@@ -38,7 +38,7 @@ const showFallback = (message: string) => {
 };
 
 async function loadWasm(): Promise<BlitzExports> {
-  const response = await fetch("/blitz.wasm", { cache: "no-store" });
+  const response = await fetch(`${import.meta.env.BASE_URL}blitz.wasm`, { cache: "no-store" });
   if (!response.ok) {
     throw new Error("Run `npm run build:wasm` before starting Blitz.");
   }

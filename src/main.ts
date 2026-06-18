@@ -11,6 +11,10 @@ type BlitzExports = {
   blitz_pointer_down(screenX: number, screenY: number): number;
   blitz_pointer_move(screenX: number, screenY: number): void;
   blitz_pointer_up(): void;
+  blitz_set_interaction_mode(mode: number): void;
+  blitz_pushback_move(screenX: number, screenY: number): void;
+  blitz_pushback_leave(): void;
+  blitz_adjust_pushback_radius(deltaSteps: number): void;
   blitz_uniform_ptr(): number;
   blitz_uniform_f32_count(): number;
   blitz_rect_draw_ptr(): number;
@@ -31,6 +35,10 @@ if (!canvasElement || !fallbackElement) {
 
 const canvas = canvasElement;
 const fallback = fallbackElement;
+const InteractionMode = {
+  Drag: 0,
+  Pushback: 1,
+} as const;
 
 const showFallback = (message: string) => {
   fallback.textContent = message;
@@ -146,6 +154,7 @@ async function boot() {
   let draggingRect = false;
   let lastX = 0;
   let lastY = 0;
+  let interactionMode: number = InteractionMode.Drag;
 
   const eventToCanvasPixels = (event: PointerEvent | WheelEvent) => {
     const rect = canvas.getBoundingClientRect();
@@ -162,6 +171,15 @@ async function boot() {
     wasm.blitz_pointer_up();
   };
 
+  const setInteractionMode = (mode: number) => {
+    interactionMode = mode;
+    stopDragging();
+    wasm.blitz_set_interaction_mode(mode);
+    if (mode !== InteractionMode.Pushback) {
+      wasm.blitz_pushback_leave();
+    }
+  };
+
   canvas.addEventListener("pointerdown", (event) => {
     const isPrimaryButton = event.button === 0;
     const isMiddleButton = event.button === 1;
@@ -173,6 +191,9 @@ async function boot() {
     if (isMiddleButton) {
       stopDragging();
       draggingCamera = true;
+    } else if (interactionMode === InteractionMode.Pushback) {
+      const point = eventToCanvasPixels(event);
+      wasm.blitz_pushback_move(point.x, point.y);
     } else {
       const point = eventToCanvasPixels(event);
       draggingRect = wasm.blitz_pointer_down(point.x, point.y) === 1;
@@ -200,6 +221,15 @@ async function boot() {
     lastY = event.clientY;
   });
 
+  canvas.addEventListener("pointermove", (event) => {
+    if (draggingCamera || draggingRect || interactionMode !== InteractionMode.Pushback) {
+      return;
+    }
+
+    const point = eventToCanvasPixels(event);
+    wasm.blitz_pushback_move(point.x, point.y);
+  });
+
   canvas.addEventListener("pointerup", (event) => {
     stopDragging();
     canvas.releasePointerCapture(event.pointerId);
@@ -208,6 +238,10 @@ async function boot() {
   canvas.addEventListener("pointercancel", (event) => {
     stopDragging();
     canvas.releasePointerCapture(event.pointerId);
+  });
+
+  canvas.addEventListener("pointerleave", () => {
+    wasm.blitz_pushback_leave();
   });
 
   canvas.addEventListener("auxclick", (event) => {
@@ -231,6 +265,24 @@ async function boot() {
     },
     { passive: false },
   );
+
+  window.addEventListener("keydown", (event) => {
+    if (event.repeat || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+      return;
+    }
+
+    if (event.key.toLowerCase() === "p") {
+      setInteractionMode(
+        interactionMode === InteractionMode.Pushback ? InteractionMode.Drag : InteractionMode.Pushback,
+      );
+    } else if (event.key === "[") {
+      wasm.blitz_adjust_pushback_radius(1);
+    } else if (event.key === "]") {
+      wasm.blitz_adjust_pushback_radius(-1);
+    } else if (event.key === "Escape") {
+      setInteractionMode(InteractionMode.Drag);
+    }
+  });
 
   const render = (timeMs: number) => {
     resize();

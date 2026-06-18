@@ -221,7 +221,9 @@ async function boot() {
     (event) => {
       event.preventDefault();
       const dpr = window.devicePixelRatio || 1;
-      if (event.ctrlKey) {
+      const horizontalScroll = Math.abs(event.deltaX) > 0.5;
+      const shouldZoom = event.ctrlKey || !horizontalScroll;
+      if (shouldZoom) {
         const point = eventToCanvasPixels(event);
         const zoomDelta = Math.exp(-event.deltaY * 0.0015);
         wasm.blitz_zoom_at(point.x, point.y, zoomDelta);

@@ -1,0 +1,17 @@
+{
+  "name": "blitz",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "npm run build:wasm && tsc && vite build",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.51",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.19"
+  }
+}

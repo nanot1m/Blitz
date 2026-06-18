@@ -58,14 +58,18 @@ typedef struct World {
   RectView rect_views[BLITZ_MAX_ENTITIES];
   u32 grid_heads[BLITZ_GRID_CELL_COUNT];
   u32 grid_next[BLITZ_MAX_ENTITIES];
+  u32 grid_cells[BLITZ_MAX_ENTITIES];
 } World;
 
 static BlitzUniforms uniforms;
 static RectDraw rect_draws[BLITZ_MAX_RECT_DRAWS];
+static u32 rect_draw_entities[BLITZ_MAX_RECT_DRAWS];
 static World world;
 static u32 rect_draw_count;
 static u32 rect_draw_version;
 static u32 render_list_dirty;
+static u32 dragging_entity;
+static Vec2 drag_offset;
 
 static float floorf_local(float value) {
   i32 truncated = (i32)value;
@@ -104,6 +108,16 @@ static u32 grid_index(i32 x, i32 y) {
   return (u32)y * BLITZ_GRID_SIZE + (u32)x;
 }
 
+static u32 grid_cell_for_position(Vec2 position) {
+  i32 x = grid_coord(position.x);
+  i32 y = grid_coord(position.y);
+  if (x < 0 || y < 0 || x >= (i32)BLITZ_GRID_SIZE ||
+      y >= (i32)BLITZ_GRID_SIZE) {
+    return BLITZ_INVALID_INDEX;
+  }
+  return grid_index(x, y);
+}
+
 static void mark_render_list_dirty(void) {
   render_list_dirty = 1u;
 }
@@ -119,6 +133,7 @@ static u32 ecs_create_entity(void) {
   if (entity < BLITZ_MAX_ENTITIES) {
     world.entity_count += 1u;
     world.grid_next[entity] = BLITZ_INVALID_INDEX;
+    world.grid_cells[entity] = BLITZ_INVALID_INDEX;
     return entity;
   }
   return BLITZ_INVALID_INDEX;
@@ -157,17 +172,54 @@ static void grid_insert(u32 entity) {
   if (entity == BLITZ_INVALID_INDEX) {
     return;
   }
-  Vec2 position = world.positions[entity];
-  i32 x = grid_coord(position.x);
-  i32 y = grid_coord(position.y);
-  if (x < 0 || y < 0 || x >= (i32)BLITZ_GRID_SIZE ||
-      y >= (i32)BLITZ_GRID_SIZE) {
+  u32 cell = grid_cell_for_position(world.positions[entity]);
+  if (cell == BLITZ_INVALID_INDEX) {
+    world.grid_cells[entity] = BLITZ_INVALID_INDEX;
     return;
   }
 
-  u32 cell = grid_index(x, y);
   world.grid_next[entity] = world.grid_heads[cell];
   world.grid_heads[cell] = entity;
+  world.grid_cells[entity] = cell;
+}
+
+static void grid_remove(u32 entity) {
+  if (entity == BLITZ_INVALID_INDEX) {
+    return;
+  }
+
+  u32 cell = world.grid_cells[entity];
+  if (cell == BLITZ_INVALID_INDEX) {
+    return;
+  }
+
+  u32 current = world.grid_heads[cell];
+  u32 previous = BLITZ_INVALID_INDEX;
+  while (current != BLITZ_INVALID_INDEX) {
+    if (current == entity) {
+      if (previous == BLITZ_INVALID_INDEX) {
+        world.grid_heads[cell] = world.grid_next[current];
+      } else {
+        world.grid_next[previous] = world.grid_next[current];
+      }
+      world.grid_next[current] = BLITZ_INVALID_INDEX;
+      world.grid_cells[current] = BLITZ_INVALID_INDEX;
+      return;
+    }
+    previous = current;
+    current = world.grid_next[current];
+  }
+}
+
+static void grid_update(u32 entity) {
+  u32 previous_cell = world.grid_cells[entity];
+  u32 next_cell = grid_cell_for_position(world.positions[entity]);
+  if (previous_cell == next_cell) {
+    return;
+  }
+
+  grid_remove(entity);
+  grid_insert(entity);
 }
 
 static void push_rect_draw(u32 entity) {
@@ -200,6 +252,7 @@ static void push_rect_draw(u32 entity) {
   draw->_pad[1] = 0.0f;
   draw->_pad[2] = 0.0f;
 
+  rect_draw_entities[rect_draw_count] = entity;
   rect_draw_count += 1u;
 }
 
@@ -266,6 +319,13 @@ static void screen_to_world(float screen_x, float screen_y, float *world_x,
       (screen_y - half_h) / uniforms.style[0] + uniforms.viewport_camera[3];
 }
 
+static int point_in_rect(float world_x, float world_y, u32 entity) {
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  return world_x >= position.x && world_y >= position.y &&
+         world_x <= position.x + size.x && world_y <= position.y + size.y;
+}
+
 static void create_demo_world(void) {
   u32 columns = 1000u;
   u32 rows = 1000u;
@@ -316,6 +376,9 @@ void blitz_init(void) {
   rect_draw_count = 0u;
   rect_draw_version = 0u;
   render_list_dirty = 1u;
+  dragging_entity = BLITZ_INVALID_INDEX;
+  drag_offset.x = 0.0f;
+  drag_offset.y = 0.0f;
   grid_clear();
 
   uniforms.viewport_camera[0] = 1.0f;
@@ -377,6 +440,47 @@ void blitz_zoom_at(float screen_x, float screen_y, float zoom_delta) {
   uniforms.viewport_camera[2] += before_x - after_x;
   uniforms.viewport_camera[3] += before_y - after_y;
   mark_render_list_dirty();
+}
+
+EXPORT("blitz_pointer_down")
+u32 blitz_pointer_down(float screen_x, float screen_y) {
+  float world_x = 0.0f;
+  float world_y = 0.0f;
+  screen_to_world(screen_x, screen_y, &world_x, &world_y);
+  extract_rect_draws();
+
+  for (u32 i = rect_draw_count; i > 0u; i -= 1u) {
+    u32 entity = rect_draw_entities[i - 1u];
+    if (point_in_rect(world_x, world_y, entity)) {
+      dragging_entity = entity;
+      drag_offset.x = world_x - world.positions[entity].x;
+      drag_offset.y = world_y - world.positions[entity].y;
+      return 1u;
+    }
+  }
+
+  dragging_entity = BLITZ_INVALID_INDEX;
+  return 0u;
+}
+
+EXPORT("blitz_pointer_move")
+void blitz_pointer_move(float screen_x, float screen_y) {
+  if (dragging_entity == BLITZ_INVALID_INDEX) {
+    return;
+  }
+
+  float world_x = 0.0f;
+  float world_y = 0.0f;
+  screen_to_world(screen_x, screen_y, &world_x, &world_y);
+  world.positions[dragging_entity].x = world_x - drag_offset.x;
+  world.positions[dragging_entity].y = world_y - drag_offset.y;
+  grid_update(dragging_entity);
+  mark_render_list_dirty();
+}
+
+EXPORT("blitz_pointer_up")
+void blitz_pointer_up(void) {
+  dragging_entity = BLITZ_INVALID_INDEX;
 }
 
 EXPORT("blitz_uniform_ptr")

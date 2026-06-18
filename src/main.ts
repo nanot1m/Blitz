@@ -8,6 +8,9 @@ type BlitzExports = {
   blitz_set_camera(x: number, y: number, zoom: number): void;
   blitz_pan(dxPixels: number, dyPixels: number): void;
   blitz_zoom_at(screenX: number, screenY: number, zoomDelta: number): void;
+  blitz_pointer_down(screenX: number, screenY: number): number;
+  blitz_pointer_move(screenX: number, screenY: number): void;
+  blitz_pointer_up(): void;
   blitz_uniform_ptr(): number;
   blitz_uniform_f32_count(): number;
   blitz_rect_draw_ptr(): number;
@@ -139,30 +142,56 @@ async function boot() {
     }
   };
 
-  let dragging = false;
+  let draggingCamera = false;
+  let draggingRect = false;
   let lastX = 0;
   let lastY = 0;
 
+  const eventToCanvasPixels = (event: PointerEvent | WheelEvent) => {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    return {
+      x: (event.clientX - rect.left) * dpr,
+      y: (event.clientY - rect.top) * dpr,
+    };
+  };
+
   canvas.addEventListener("pointerdown", (event) => {
-    dragging = true;
+    const point = eventToCanvasPixels(event);
+    draggingRect = wasm.blitz_pointer_down(point.x, point.y) === 1;
+    draggingCamera = !draggingRect;
     lastX = event.clientX;
     lastY = event.clientY;
     canvas.setPointerCapture(event.pointerId);
   });
 
   canvas.addEventListener("pointermove", (event) => {
-    if (!dragging) {
+    if (!draggingCamera && !draggingRect) {
       return;
     }
 
     const dpr = window.devicePixelRatio || 1;
-    wasm.blitz_pan((event.clientX - lastX) * dpr, (event.clientY - lastY) * dpr);
+    if (draggingRect) {
+      const point = eventToCanvasPixels(event);
+      wasm.blitz_pointer_move(point.x, point.y);
+    } else {
+      wasm.blitz_pan((event.clientX - lastX) * dpr, (event.clientY - lastY) * dpr);
+    }
     lastX = event.clientX;
     lastY = event.clientY;
   });
 
   canvas.addEventListener("pointerup", (event) => {
-    dragging = false;
+    draggingCamera = false;
+    draggingRect = false;
+    wasm.blitz_pointer_up();
+    canvas.releasePointerCapture(event.pointerId);
+  });
+
+  canvas.addEventListener("pointercancel", (event) => {
+    draggingCamera = false;
+    draggingRect = false;
+    wasm.blitz_pointer_up();
     canvas.releasePointerCapture(event.pointerId);
   });
 
@@ -170,12 +199,9 @@ async function boot() {
     "wheel",
     (event) => {
       event.preventDefault();
-      const rect = canvas.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      const screenX = (event.clientX - rect.left) * dpr;
-      const screenY = (event.clientY - rect.top) * dpr;
+      const point = eventToCanvasPixels(event);
       const zoomDelta = Math.exp(-event.deltaY * 0.0015);
-      wasm.blitz_zoom_at(screenX, screenY, zoomDelta);
+      wasm.blitz_zoom_at(point.x, point.y, zoomDelta);
     },
     { passive: false },
   );

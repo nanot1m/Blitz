@@ -156,10 +156,29 @@ async function boot() {
     };
   };
 
+  const stopDragging = () => {
+    draggingCamera = false;
+    draggingRect = false;
+    wasm.blitz_pointer_up();
+  };
+
   canvas.addEventListener("pointerdown", (event) => {
-    const point = eventToCanvasPixels(event);
-    draggingRect = wasm.blitz_pointer_down(point.x, point.y) === 1;
-    draggingCamera = !draggingRect;
+    const isPrimaryButton = event.button === 0;
+    const isMiddleButton = event.button === 1;
+    if (!isPrimaryButton && !isMiddleButton) {
+      return;
+    }
+
+    event.preventDefault();
+    if (isMiddleButton) {
+      stopDragging();
+      draggingCamera = true;
+    } else {
+      const point = eventToCanvasPixels(event);
+      draggingRect = wasm.blitz_pointer_down(point.x, point.y) === 1;
+      draggingCamera = !draggingRect;
+    }
+
     lastX = event.clientX;
     lastY = event.clientY;
     canvas.setPointerCapture(event.pointerId);
@@ -182,26 +201,33 @@ async function boot() {
   });
 
   canvas.addEventListener("pointerup", (event) => {
-    draggingCamera = false;
-    draggingRect = false;
-    wasm.blitz_pointer_up();
+    stopDragging();
     canvas.releasePointerCapture(event.pointerId);
   });
 
   canvas.addEventListener("pointercancel", (event) => {
-    draggingCamera = false;
-    draggingRect = false;
-    wasm.blitz_pointer_up();
+    stopDragging();
     canvas.releasePointerCapture(event.pointerId);
+  });
+
+  canvas.addEventListener("auxclick", (event) => {
+    if (event.button === 1) {
+      event.preventDefault();
+    }
   });
 
   canvas.addEventListener(
     "wheel",
     (event) => {
       event.preventDefault();
-      const point = eventToCanvasPixels(event);
-      const zoomDelta = Math.exp(-event.deltaY * 0.0015);
-      wasm.blitz_zoom_at(point.x, point.y, zoomDelta);
+      const dpr = window.devicePixelRatio || 1;
+      if (event.ctrlKey) {
+        const point = eventToCanvasPixels(event);
+        const zoomDelta = Math.exp(-event.deltaY * 0.0015);
+        wasm.blitz_zoom_at(point.x, point.y, zoomDelta);
+      } else {
+        wasm.blitz_pan(-event.deltaX * dpr, -event.deltaY * dpr);
+      }
     },
     { passive: false },
   );

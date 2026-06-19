@@ -9,57 +9,89 @@ const clang =
   process.env.CLANG ?? (process.platform === "win32" && existsSync(defaultWindowsClang)
     ? defaultWindowsClang
     : "clang");
+const emcc = process.env.EMCC ?? "emcc";
 const input = resolve(root, "src/wasm/blitz.c");
 const output = resolve(root, "public/blitz.wasm");
 
 mkdirSync(resolve(root, "public"), { recursive: true });
 
-const args = [
+const wasmExports = [
+  "blitz_init",
+  "blitz_resize",
+  "blitz_set_camera",
+  "blitz_pan",
+  "blitz_zoom_at",
+  "blitz_pointer_down",
+  "blitz_pointer_move",
+  "blitz_pointer_up",
+  "blitz_set_interaction_mode",
+  "blitz_interaction_move",
+  "blitz_interaction_leave",
+  "blitz_adjust_interaction_radius",
+  "blitz_uniform_ptr",
+  "blitz_uniform_f32_count",
+  "blitz_rect_draw_ptr",
+  "blitz_rect_draw_f32_count",
+  "blitz_rect_draw_count",
+  "blitz_rect_draw_version",
+  "blitz_triangle_draw_ptr",
+  "blitz_triangle_draw_f32_count",
+  "blitz_triangle_draw_count",
+  "blitz_triangle_draw_version",
+  "blitz_entity_count",
+  "blitz_render_chunk_rects",
+  "blitz_time",
+];
+
+const commandAvailable = (command) => {
+  const result = spawnSync(command, ["--version"], {
+    cwd: root,
+    stdio: "ignore",
+  });
+  return result.status === 0;
+};
+
+const clangArgs = [
   "--target=wasm32",
   "-O3",
   "-nostdlib",
   "-Wl,--no-entry",
   "-Wl,--export-memory",
-  "-Wl,--export=blitz_init",
-  "-Wl,--export=blitz_resize",
-  "-Wl,--export=blitz_set_camera",
-  "-Wl,--export=blitz_pan",
-  "-Wl,--export=blitz_zoom_at",
-  "-Wl,--export=blitz_pointer_down",
-  "-Wl,--export=blitz_pointer_move",
-  "-Wl,--export=blitz_pointer_up",
-  "-Wl,--export=blitz_set_interaction_mode",
-  "-Wl,--export=blitz_pushback_move",
-  "-Wl,--export=blitz_pushback_leave",
-  "-Wl,--export=blitz_adjust_pushback_radius",
-  "-Wl,--export=blitz_uniform_ptr",
-  "-Wl,--export=blitz_uniform_f32_count",
-  "-Wl,--export=blitz_rect_draw_ptr",
-  "-Wl,--export=blitz_rect_draw_f32_count",
-  "-Wl,--export=blitz_rect_draw_count",
-  "-Wl,--export=blitz_rect_draw_version",
-  "-Wl,--export=blitz_entity_count",
-  "-Wl,--export=blitz_render_chunk_rects",
-  "-Wl,--export=blitz_time",
+  ...wasmExports.map((name) => `-Wl,--export=${name}`),
   "-o",
   output,
   input,
 ];
 
-const result = spawnSync(clang, args, {
+const emccArgs = [
+  input,
+  "-O3",
+  "-s",
+  "STANDALONE_WASM=1",
+  "--no-entry",
+  "-s",
+  "ERROR_ON_UNDEFINED_SYMBOLS=0",
+  "-o",
+  output,
+];
+
+const compiler = process.env.CLANG || commandAvailable("wasm-ld") ? clang : emcc;
+const args = compiler === emcc ? emccArgs : clangArgs;
+
+const result = spawnSync(compiler, args, {
   cwd: root,
   stdio: "inherit",
 });
 
 if (result.error) {
-  console.error(`Failed to start ${clang}: ${result.error.message}`);
-  console.error("Install LLVM/Clang or set CLANG to the full path of clang.exe.");
+  console.error(`Failed to start ${compiler}: ${result.error.message}`);
+  console.error("Install LLVM/Clang with wasm-ld, install Emscripten, or set CLANG/EMCC.");
   process.exit(1);
 }
 
 if (result.status !== 0) {
   if (result.status === 1 && process.platform === "win32") {
-    console.error("Install LLVM/Clang or set CLANG to the full path of clang.exe.");
+    console.error("Install LLVM/Clang with wasm-ld, install Emscripten, or set CLANG/EMCC.");
   }
   process.exit(result.status ?? 1);
 }

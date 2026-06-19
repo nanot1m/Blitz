@@ -17,9 +17,11 @@ typedef int i32;
 #define BLITZ_COMPONENT_POSITION 1u
 #define BLITZ_COMPONENT_SIZE 2u
 #define BLITZ_COMPONENT_RECT_VIEW 4u
+#define BLITZ_COMPONENT_TRIANGLE_VIEW 8u
 
 #define BLITZ_MODE_DRAG 0u
 #define BLITZ_MODE_PUSHBACK 1u
+#define BLITZ_MODE_TRIANGLE 2u
 #define BLITZ_PUSHBACK_RADIUS_DEFAULT 140.0f
 #define BLITZ_PUSHBACK_RADIUS_MIN 24.0f
 #define BLITZ_PUSHBACK_RADIUS_MAX 640.0f
@@ -45,6 +47,12 @@ typedef struct RectView {
   float stroke_width;
 } RectView;
 
+typedef struct TriangleView {
+  Color fill_color;
+  Color stroke_color;
+  float stroke_width;
+} TriangleView;
+
 typedef struct BlitzUniforms {
   float viewport_camera[4];
   float style[4];
@@ -59,6 +67,15 @@ typedef struct RectDraw {
   float _pad[3];
 } RectDraw;
 
+typedef struct TriangleDraw {
+  float points_a[4];
+  float points_b[4];
+  float fill_color[4];
+  float stroke_color[4];
+  float stroke_width;
+  float _pad[3];
+} TriangleDraw;
+
 typedef struct World {
   u32 entity_count;
   u32 masks[BLITZ_MAX_ENTITIES];
@@ -66,6 +83,7 @@ typedef struct World {
   Vec2 base_positions[BLITZ_MAX_ENTITIES];
   Vec2 sizes[BLITZ_MAX_ENTITIES];
   RectView rect_views[BLITZ_MAX_ENTITIES];
+  TriangleView triangle_views[BLITZ_MAX_ENTITIES];
   u32 grid_heads[BLITZ_GRID_CELL_COUNT];
   u32 grid_next[BLITZ_MAX_ENTITIES];
   u32 grid_cells[BLITZ_MAX_ENTITIES];
@@ -75,10 +93,13 @@ typedef struct World {
 
 static BlitzUniforms uniforms;
 static RectDraw rect_draws[BLITZ_MAX_RECT_DRAWS];
+static TriangleDraw triangle_draws[BLITZ_MAX_RECT_DRAWS];
 static u32 rect_draw_entities[BLITZ_MAX_RECT_DRAWS];
 static World world;
 static u32 rect_draw_count;
+static u32 triangle_draw_count;
 static u32 rect_draw_version;
+static u32 triangle_draw_version;
 static u32 render_list_dirty;
 static u32 dragging_entity;
 static Vec2 drag_offset;
@@ -209,6 +230,17 @@ static void ecs_set_rect_view(u32 entity, Color fill_color, Color stroke_color,
   world.masks[entity] |= BLITZ_COMPONENT_RECT_VIEW;
 }
 
+static void ecs_set_triangle_view(u32 entity, Color fill_color,
+                                  Color stroke_color, float stroke_width) {
+  if (entity == BLITZ_INVALID_INDEX) {
+    return;
+  }
+  world.triangle_views[entity].fill_color = fill_color;
+  world.triangle_views[entity].stroke_color = stroke_color;
+  world.triangle_views[entity].stroke_width = stroke_width;
+  world.masks[entity] |= BLITZ_COMPONENT_TRIANGLE_VIEW;
+}
+
 static void grid_insert(u32 entity) {
   if (entity == BLITZ_INVALID_INDEX) {
     return;
@@ -310,6 +342,64 @@ static void push_rect_draw(u32 entity) {
   rect_draw_count += 1u;
 }
 
+static void push_triangle_draw(u32 entity) {
+  if (triangle_draw_count >= BLITZ_MAX_RECT_DRAWS) {
+    return;
+  }
+
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  TriangleView view = world.triangle_views[entity];
+  TriangleDraw *draw = &triangle_draws[triangle_draw_count];
+
+  float min_x = position.x;
+  float min_y = position.y;
+  float max_x = position.x + size.x;
+  float max_y = position.y + size.y;
+  float center_x = min_x + size.x * 0.5f;
+
+  draw->points_a[0] = center_x;
+  draw->points_a[1] = min_y;
+  draw->points_a[2] = max_x;
+  draw->points_a[3] = max_y;
+  draw->points_b[0] = min_x;
+  draw->points_b[1] = max_y;
+  draw->points_b[2] = 0.0f;
+  draw->points_b[3] = 0.0f;
+
+  draw->fill_color[0] = view.fill_color.r;
+  draw->fill_color[1] = view.fill_color.g;
+  draw->fill_color[2] = view.fill_color.b;
+  draw->fill_color[3] = view.fill_color.a;
+
+  draw->stroke_color[0] = view.stroke_color.r;
+  draw->stroke_color[1] = view.stroke_color.g;
+  draw->stroke_color[2] = view.stroke_color.b;
+  draw->stroke_color[3] = view.stroke_color.a;
+
+  draw->stroke_width = view.stroke_width;
+  draw->_pad[0] = 0.0f;
+  draw->_pad[1] = 0.0f;
+  draw->_pad[2] = 0.0f;
+
+  triangle_draw_count += 1u;
+}
+
+static int entity_in_triangle_cursor_radius(u32 entity) {
+  if (interaction_mode != BLITZ_MODE_TRIANGLE || !pushback_cursor_active) {
+    return 0;
+  }
+
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  float center_x = position.x + size.x * 0.5f;
+  float center_y = position.y + size.y * 0.5f;
+  float dx = center_x - pushback_cursor.x;
+  float dy = center_y - pushback_cursor.y;
+  float radius_sq = pushback_radius * pushback_radius;
+  return dx * dx + dy * dy <= radius_sq;
+}
+
 static int rect_intersects_view(u32 entity, float min_x, float min_y,
                                 float max_x, float max_y) {
   Vec2 position = world.positions[entity];
@@ -322,12 +412,13 @@ static int rect_intersects_view(u32 entity, float min_x, float min_y,
          rect_min_y <= max_y;
 }
 
-static void extract_rect_draws(void) {
+static void extract_render_draws(void) {
   if (!render_list_dirty) {
     return;
   }
 
   rect_draw_count = 0u;
+  triangle_draw_count = 0u;
 
   float half_w = uniforms.viewport_camera[0] * 0.5f / uniforms.style[0];
   float half_h = uniforms.viewport_camera[1] * 0.5f / uniforms.style[0];
@@ -345,25 +436,32 @@ static void extract_rect_draws(void) {
   i32 max_cell_x = clampi(grid_coord(grid_max_x) + 1, 0, (i32)BLITZ_GRID_SIZE - 1);
   i32 max_cell_y = clampi(grid_coord(grid_max_y) + 1, 0, (i32)BLITZ_GRID_SIZE - 1);
 
-  u32 required =
-      BLITZ_COMPONENT_POSITION | BLITZ_COMPONENT_SIZE | BLITZ_COMPONENT_RECT_VIEW;
+  u32 base_required = BLITZ_COMPONENT_POSITION | BLITZ_COMPONENT_SIZE;
 
   for (i32 y = min_cell_y; y <= max_cell_y; y += 1) {
     for (i32 x = min_cell_x; x <= max_cell_x; x += 1) {
       u32 entity = world.grid_heads[grid_index(x, y)];
       while (entity != BLITZ_INVALID_INDEX) {
-        if ((world.masks[entity] & required) == required &&
+        if ((world.masks[entity] & base_required) == base_required &&
             rect_intersects_view(entity, view_min_x, view_min_y, view_max_x,
                                  view_max_y)) {
-          push_rect_draw(entity);
+          u32 draw_triangle =
+              (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) &&
+              entity_in_triangle_cursor_radius(entity);
+          if (draw_triangle) {
+            push_triangle_draw(entity);
+          } else if (world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW) {
+            push_rect_draw(entity);
+          }
         }
         entity = world.grid_next[entity];
       }
     }
   }
 
-  uniforms.style[2] = (float)rect_draw_count;
+  uniforms.style[2] = (float)(rect_draw_count + triangle_draw_count);
   rect_draw_version += 1u;
+  triangle_draw_version += 1u;
   render_list_dirty = 0u;
 }
 
@@ -543,6 +641,9 @@ static void create_demo_world(void) {
       ecs_set_rect_view(
           entity, (Color){0.12f + hue_a * 0.55f, 0.25f + hue_b * 0.45f, 0.68f, 1.0f},
           (Color){0.02f, 0.025f, 0.03f, 1.0f}, 1.5f);
+      ecs_set_triangle_view(
+          entity, (Color){0.12f + hue_a * 0.55f, 0.25f + hue_b * 0.45f, 0.68f, 1.0f},
+          (Color){0.02f, 0.025f, 0.03f, 1.0f}, 1.5f);
       grid_insert(entity);
     }
   }
@@ -552,7 +653,9 @@ EXPORT("blitz_init")
 void blitz_init(void) {
   world.entity_count = 0u;
   rect_draw_count = 0u;
+  triangle_draw_count = 0u;
   rect_draw_version = 0u;
+  triangle_draw_version = 0u;
   render_list_dirty = 1u;
   dragging_entity = BLITZ_INVALID_INDEX;
   drag_offset.x = 0.0f;
@@ -581,7 +684,7 @@ void blitz_init(void) {
   uniforms.background_color[3] = 1.0f;
 
   create_demo_world();
-  extract_rect_draws();
+  extract_render_draws();
 }
 
 EXPORT("blitz_resize")
@@ -632,7 +735,7 @@ u32 blitz_pointer_down(float screen_x, float screen_y) {
   float world_x = 0.0f;
   float world_y = 0.0f;
   screen_to_world(screen_x, screen_y, &world_x, &world_y);
-  extract_rect_draws();
+  extract_render_draws();
 
   for (u32 i = rect_draw_count; i > 0u; i -= 1u) {
     u32 entity = rect_draw_entities[i - 1u];
@@ -670,29 +773,45 @@ void blitz_pointer_up(void) {
 
 EXPORT("blitz_set_interaction_mode")
 void blitz_set_interaction_mode(u32 mode) {
-  interaction_mode = mode == BLITZ_MODE_PUSHBACK ? BLITZ_MODE_PUSHBACK : BLITZ_MODE_DRAG;
+  u32 previous_mode = interaction_mode;
+  interaction_mode =
+      mode == BLITZ_MODE_PUSHBACK || mode == BLITZ_MODE_TRIANGLE ? mode : BLITZ_MODE_DRAG;
   dragging_entity = BLITZ_INVALID_INDEX;
-  if (interaction_mode != BLITZ_MODE_PUSHBACK) {
+  if (interaction_mode == BLITZ_MODE_DRAG) {
     pushback_cursor_active = 0u;
+  }
+  if (previous_mode == BLITZ_MODE_TRIANGLE || interaction_mode == BLITZ_MODE_TRIANGLE) {
+    mark_render_list_dirty();
   }
 }
 
-EXPORT("blitz_pushback_move")
-void blitz_pushback_move(float screen_x, float screen_y) {
+EXPORT("blitz_interaction_move")
+void blitz_interaction_move(float screen_x, float screen_y) {
   screen_to_world(screen_x, screen_y, &pushback_cursor.x, &pushback_cursor.y);
   pushback_cursor_active = 1u;
+  if (interaction_mode == BLITZ_MODE_TRIANGLE) {
+    mark_render_list_dirty();
+  }
 }
 
-EXPORT("blitz_pushback_leave")
-void blitz_pushback_leave(void) {
+EXPORT("blitz_interaction_leave")
+void blitz_interaction_leave(void) {
+  u32 was_triangle_active =
+      interaction_mode == BLITZ_MODE_TRIANGLE && pushback_cursor_active;
   pushback_cursor_active = 0u;
+  if (was_triangle_active) {
+    mark_render_list_dirty();
+  }
 }
 
-EXPORT("blitz_adjust_pushback_radius")
-void blitz_adjust_pushback_radius(float delta_steps) {
+EXPORT("blitz_adjust_interaction_radius")
+void blitz_adjust_interaction_radius(float delta_steps) {
   pushback_radius =
       clampf(pushback_radius + delta_steps * BLITZ_PUSHBACK_RADIUS_STEP,
              BLITZ_PUSHBACK_RADIUS_MIN, BLITZ_PUSHBACK_RADIUS_MAX);
+  if (interaction_mode == BLITZ_MODE_TRIANGLE) {
+    mark_render_list_dirty();
+  }
 }
 
 EXPORT("blitz_uniform_ptr")
@@ -707,7 +826,7 @@ u32 blitz_uniform_f32_count(void) {
 
 EXPORT("blitz_rect_draw_ptr")
 u32 blitz_rect_draw_ptr(void) {
-  extract_rect_draws();
+  extract_render_draws();
   return (u32)&rect_draws[0];
 }
 
@@ -724,6 +843,27 @@ u32 blitz_rect_draw_count(void) {
 EXPORT("blitz_rect_draw_version")
 u32 blitz_rect_draw_version(void) {
   return rect_draw_version;
+}
+
+EXPORT("blitz_triangle_draw_ptr")
+u32 blitz_triangle_draw_ptr(void) {
+  extract_render_draws();
+  return (u32)&triangle_draws[0];
+}
+
+EXPORT("blitz_triangle_draw_f32_count")
+u32 blitz_triangle_draw_f32_count(void) {
+  return sizeof(TriangleDraw) / sizeof(float);
+}
+
+EXPORT("blitz_triangle_draw_count")
+u32 blitz_triangle_draw_count(void) {
+  return triangle_draw_count;
+}
+
+EXPORT("blitz_triangle_draw_version")
+u32 blitz_triangle_draw_version(void) {
+  return triangle_draw_version;
 }
 
 EXPORT("blitz_entity_count")

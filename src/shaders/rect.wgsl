@@ -19,6 +19,13 @@ struct TriangleDraw {
   stroke_width_pad: vec4f,
 };
 
+struct CircleDraw {
+  circle: vec4f,
+  fill_color: vec4f,
+  stroke_color: vec4f,
+  stroke_width_pad: vec4f,
+};
+
 @group(0) @binding(0)
 var<uniform> u: BlitzUniforms;
 
@@ -27,6 +34,9 @@ var<storage, read> rect_draws: array<RectDraw>;
 
 @group(0) @binding(2)
 var<storage, read> triangle_draws: array<TriangleDraw>;
+
+@group(0) @binding(3)
+var<storage, read> circle_draws: array<CircleDraw>;
 
 struct VertexOut {
   @builtin(position) position: vec4f,
@@ -82,6 +92,32 @@ fn triangle_vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
   return out;
 }
 
+@vertex
+fn circle_vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
+  let draw_index = vertex_index / 6u;
+  let circle_vertex_index = vertex_index % 6u;
+  let draw = circle_draws[draw_index];
+  let center = draw.circle.xy;
+  let radius = draw.circle.z;
+  let circle_min = center - vec2f(radius);
+  let circle_max = center + vec2f(radius);
+  var circle_positions = array<vec2f, 6>(
+    vec2f(circle_min.x, circle_min.y),
+    vec2f(circle_max.x, circle_min.y),
+    vec2f(circle_min.x, circle_max.y),
+    vec2f(circle_min.x, circle_max.y),
+    vec2f(circle_max.x, circle_min.y),
+    vec2f(circle_max.x, circle_max.y)
+  );
+
+  let world = circle_positions[circle_vertex_index];
+  var out: VertexOut;
+  out.position = vec4f(world_to_clip(world), 0.0, 1.0);
+  out.world = world;
+  out.draw_index = draw_index;
+  return out;
+}
+
 fn rect_alpha(world: vec2f, rect: vec4f, inset: f32, edge_alpha: f32) -> f32 {
   let rect_min = rect.xy + vec2f(inset);
   let rect_max = rect.xy + rect.zw - vec2f(inset);
@@ -108,6 +144,12 @@ fn triangle_stroke(world: vec2f, draw: TriangleDraw, edge_alpha: f32) -> f32 {
   return 1.0 - smoothstep(draw.stroke_width_pad.x, draw.stroke_width_pad.x + edge_alpha, distance_to_edge);
 }
 
+fn circle_alpha(world: vec2f, draw: CircleDraw, inset: f32, edge_alpha: f32) -> f32 {
+  let distance_to_center = length(world - draw.circle.xy);
+  let radius = max(draw.circle.z - inset, 0.0);
+  return 1.0 - smoothstep(radius - edge_alpha, radius, distance_to_center);
+}
+
 @fragment
 fn rect_fragment_main(in: VertexOut) -> @location(0) vec4f {
   let draw = rect_draws[in.draw_index];
@@ -123,4 +165,18 @@ fn triangle_fragment_main(in: VertexOut) -> @location(0) vec4f {
   let edge_alpha = 1.0 / max(u.style.x, 0.001);
   let stroke = triangle_stroke(in.world, draw, edge_alpha);
   return mix(draw.fill_color, draw.stroke_color, stroke);
+}
+
+@fragment
+fn circle_fragment_main(in: VertexOut) -> @location(0) vec4f {
+  let draw = circle_draws[in.draw_index];
+  let edge_alpha = 1.0 / max(u.style.x, 0.001);
+  let outer = circle_alpha(in.world, draw, 0.0, edge_alpha);
+  if (outer <= 0.001) {
+    discard;
+  }
+  let inner = circle_alpha(in.world, draw, draw.stroke_width_pad.x, edge_alpha);
+  let stroke = outer * (1.0 - inner);
+  let color = mix(draw.fill_color, draw.stroke_color, stroke);
+  return vec4f(color.rgb, color.a * outer);
 }

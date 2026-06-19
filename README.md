@@ -17,7 +17,7 @@ npm run dev
 ```
 
 Open the local Vite URL and drag to pan. Use the mouse wheel or trackpad scroll to zoom around the cursor.
-Press `P` for pushback mode or `T` for triangle mode. Use `[` and `]` to adjust the active cursor radius.
+Press `P` for pushback mode, `R` for rect mode, `T` for triangle mode, or `C` for circle mode. Click in a shape mode to replace nearby shapes with that shape. Use `[` and `]` to adjust the active cursor radius.
 
 ## ECS Shape
 

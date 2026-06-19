@@ -13,6 +13,7 @@ type BlitzExports = {
   blitz_pointer_up(): void;
   blitz_set_interaction_mode(mode: number): void;
   blitz_interaction_move(screenX: number, screenY: number): void;
+  blitz_interaction_click(screenX: number, screenY: number): void;
   blitz_interaction_leave(): void;
   blitz_adjust_interaction_radius(deltaSteps: number): void;
   blitz_uniform_ptr(): number;
@@ -25,6 +26,10 @@ type BlitzExports = {
   blitz_triangle_draw_f32_count(): number;
   blitz_triangle_draw_count(): number;
   blitz_triangle_draw_version(): number;
+  blitz_circle_draw_ptr(): number;
+  blitz_circle_draw_f32_count(): number;
+  blitz_circle_draw_count(): number;
+  blitz_circle_draw_version(): number;
   blitz_entity_count(): number;
   blitz_render_chunk_rects(): number;
   blitz_time(seconds: number): void;
@@ -43,6 +48,8 @@ const InteractionMode = {
   Drag: 0,
   Pushback: 1,
   Triangle: 2,
+  Circle: 3,
+  Rect: 4,
 } as const;
 
 const showFallback = (message: string) => {
@@ -100,9 +107,12 @@ async function boot() {
   const rectDrawStrideBytes = rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const triangleDrawF32Count = wasm.blitz_triangle_draw_f32_count();
   const triangleDrawStrideBytes = triangleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const circleDrawF32Count = wasm.blitz_circle_draw_f32_count();
+  const circleDrawStrideBytes = circleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const rectDrawChunkSize = wasm.blitz_render_chunk_rects();
   const rectDrawChunkByteLength = rectDrawChunkSize * rectDrawStrideBytes;
   const triangleDrawChunkByteLength = rectDrawChunkSize * triangleDrawStrideBytes;
+  const circleDrawChunkByteLength = rectDrawChunkSize * circleDrawStrideBytes;
 
   const shader = device.createShaderModule({
     label: "Blitz Shape Shader",
@@ -124,6 +134,11 @@ async function boot() {
       },
       {
         binding: 2,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: "read-only-storage" },
+      },
+      {
+        binding: 3,
         visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
         buffer: { type: "read-only-storage" },
       },
@@ -168,6 +183,23 @@ async function boot() {
     },
   });
 
+  const circlePipeline = device.createRenderPipeline({
+    label: "Blitz Stroked Circle Pipeline",
+    layout: pipelineLayout,
+    vertex: {
+      module: shader,
+      entryPoint: "circle_vertex_main",
+    },
+    fragment: {
+      module: shader,
+      entryPoint: "circle_fragment_main",
+      targets: [{ format }],
+    },
+    primitive: {
+      topology: "triangle-list",
+    },
+  });
+
   const rectChunks = Array.from({ length: 4 }, (_, index) => {
     const rectStorageBuffer = device.createBuffer({
       label: `Blitz Rect Draw Storage ${index}`,
@@ -179,6 +211,11 @@ async function boot() {
       size: triangleDrawChunkByteLength,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
+    const circleStorageBuffer = device.createBuffer({
+      label: `Blitz Circle Draw Storage ${index}`,
+      size: circleDrawChunkByteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
     const bindGroup = device.createBindGroup({
       label: `Blitz Bind Group ${index}`,
       layout: bindGroupLayout,
@@ -186,15 +223,18 @@ async function boot() {
         { binding: 0, resource: { buffer: uniformBuffer } },
         { binding: 1, resource: { buffer: rectStorageBuffer } },
         { binding: 2, resource: { buffer: triangleStorageBuffer } },
+        { binding: 3, resource: { buffer: circleStorageBuffer } },
       ],
     });
-    return { bindGroup, rectStorageBuffer, triangleStorageBuffer };
+    return { bindGroup, rectStorageBuffer, triangleStorageBuffer, circleStorageBuffer };
   });
 
   let lastUploadedRectDrawVersion = -1;
   let lastUploadedTriangleDrawVersion = -1;
+  let lastUploadedCircleDrawVersion = -1;
   let currentRectDrawCount = 0;
   let currentTriangleDrawCount = 0;
+  let currentCircleDrawCount = 0;
 
   const resize = () => {
     const dpr = window.devicePixelRatio || 1;
@@ -248,9 +288,16 @@ async function boot() {
     if (isMiddleButton) {
       stopDragging();
       draggingCamera = true;
-    } else if (interactionMode === InteractionMode.Pushback || interactionMode === InteractionMode.Triangle) {
+    } else if (interactionMode === InteractionMode.Pushback) {
       const point = eventToCanvasPixels(event);
       wasm.blitz_interaction_move(point.x, point.y);
+    } else if (
+      interactionMode === InteractionMode.Triangle ||
+      interactionMode === InteractionMode.Circle ||
+      interactionMode === InteractionMode.Rect
+    ) {
+      const point = eventToCanvasPixels(event);
+      wasm.blitz_interaction_click(point.x, point.y);
     } else {
       const point = eventToCanvasPixels(event);
       draggingRect = wasm.blitz_pointer_down(point.x, point.y) === 1;
@@ -282,7 +329,10 @@ async function boot() {
     if (
       draggingCamera ||
       draggingRect ||
-      (interactionMode !== InteractionMode.Pushback && interactionMode !== InteractionMode.Triangle)
+      (interactionMode !== InteractionMode.Pushback &&
+        interactionMode !== InteractionMode.Triangle &&
+        interactionMode !== InteractionMode.Circle &&
+        interactionMode !== InteractionMode.Rect)
     ) {
       return;
     }
@@ -336,9 +386,15 @@ async function boot() {
       setInteractionMode(
         interactionMode === InteractionMode.Pushback ? InteractionMode.Drag : InteractionMode.Pushback,
       );
+    } else if (event.key.toLowerCase() === "r") {
+      setInteractionMode(interactionMode === InteractionMode.Rect ? InteractionMode.Drag : InteractionMode.Rect);
     } else if (event.key.toLowerCase() === "t") {
       setInteractionMode(
         interactionMode === InteractionMode.Triangle ? InteractionMode.Drag : InteractionMode.Triangle,
+      );
+    } else if (event.key.toLowerCase() === "c") {
+      setInteractionMode(
+        interactionMode === InteractionMode.Circle ? InteractionMode.Drag : InteractionMode.Circle,
       );
     } else if (event.key === "[") {
       wasm.blitz_adjust_interaction_radius(1);
@@ -359,6 +415,9 @@ async function boot() {
     const triangleDrawPtr = wasm.blitz_triangle_draw_ptr();
     const triangleDrawCount = wasm.blitz_triangle_draw_count();
     const triangleDrawVersion = wasm.blitz_triangle_draw_version();
+    const circleDrawPtr = wasm.blitz_circle_draw_ptr();
+    const circleDrawCount = wasm.blitz_circle_draw_count();
+    const circleDrawVersion = wasm.blitz_circle_draw_version();
 
     if (rectDrawVersion !== lastUploadedRectDrawVersion) {
       currentRectDrawCount = rectDrawCount;
@@ -398,6 +457,25 @@ async function boot() {
       lastUploadedTriangleDrawVersion = triangleDrawVersion;
     }
 
+    if (circleDrawVersion !== lastUploadedCircleDrawVersion) {
+      currentCircleDrawCount = circleDrawCount;
+      for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
+        const chunkStart = chunkIndex * rectDrawChunkSize;
+        const chunkCircleCount = Math.max(0, Math.min(rectDrawChunkSize, circleDrawCount - chunkStart));
+        if (chunkCircleCount === 0) {
+          continue;
+        }
+
+        const wasmCircleDraws = new Float32Array(
+          wasm.memory.buffer,
+          circleDrawPtr + chunkStart * circleDrawStrideBytes,
+          chunkCircleCount * circleDrawF32Count,
+        );
+        device.queue.writeBuffer(rectChunks[chunkIndex].circleStorageBuffer, 0, wasmCircleDraws);
+      }
+      lastUploadedCircleDrawVersion = circleDrawVersion;
+    }
+
     const uniforms = new Float32Array(wasm.memory.buffer, uniformPtr, wasm.blitz_uniform_f32_count());
     device.queue.writeBuffer(uniformBuffer, 0, uniforms);
 
@@ -435,6 +513,18 @@ async function boot() {
 
       pass.setBindGroup(0, rectChunks[chunkIndex].bindGroup);
       pass.draw(3 * chunkTriangleCount);
+    }
+
+    pass.setPipeline(circlePipeline);
+    for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
+      const chunkStart = chunkIndex * rectDrawChunkSize;
+      const chunkCircleCount = Math.max(0, Math.min(rectDrawChunkSize, currentCircleDrawCount - chunkStart));
+      if (chunkCircleCount === 0) {
+        continue;
+      }
+
+      pass.setBindGroup(0, rectChunks[chunkIndex].bindGroup);
+      pass.draw(6 * chunkCircleCount);
     }
     pass.end();
 

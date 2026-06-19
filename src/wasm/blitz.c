@@ -4,7 +4,7 @@ typedef int i32;
 #define EXPORT(name) __attribute__((export_name(name)))
 
 #define BLITZ_MAX_ENTITIES 1000000u
-#define BLITZ_RENDER_CHUNK_RECTS 65536u
+#define BLITZ_RENDER_CHUNK_RECTS 250000u
 #define BLITZ_RENDER_CHUNKS 4u
 #define BLITZ_MAX_RECT_DRAWS (BLITZ_RENDER_CHUNK_RECTS * BLITZ_RENDER_CHUNKS)
 
@@ -18,10 +18,13 @@ typedef int i32;
 #define BLITZ_COMPONENT_SIZE 2u
 #define BLITZ_COMPONENT_RECT_VIEW 4u
 #define BLITZ_COMPONENT_TRIANGLE_VIEW 8u
+#define BLITZ_COMPONENT_CIRCLE_VIEW 16u
 
 #define BLITZ_MODE_DRAG 0u
 #define BLITZ_MODE_PUSHBACK 1u
 #define BLITZ_MODE_TRIANGLE 2u
+#define BLITZ_MODE_CIRCLE 3u
+#define BLITZ_MODE_RECT 4u
 #define BLITZ_PUSHBACK_RADIUS_DEFAULT 140.0f
 #define BLITZ_PUSHBACK_RADIUS_MIN 24.0f
 #define BLITZ_PUSHBACK_RADIUS_MAX 640.0f
@@ -53,6 +56,12 @@ typedef struct TriangleView {
   float stroke_width;
 } TriangleView;
 
+typedef struct CircleView {
+  Color fill_color;
+  Color stroke_color;
+  float stroke_width;
+} CircleView;
+
 typedef struct BlitzUniforms {
   float viewport_camera[4];
   float style[4];
@@ -76,6 +85,14 @@ typedef struct TriangleDraw {
   float _pad[3];
 } TriangleDraw;
 
+typedef struct CircleDraw {
+  float circle[4];
+  float fill_color[4];
+  float stroke_color[4];
+  float stroke_width;
+  float _pad[3];
+} CircleDraw;
+
 typedef struct World {
   u32 entity_count;
   u32 masks[BLITZ_MAX_ENTITIES];
@@ -84,6 +101,7 @@ typedef struct World {
   Vec2 sizes[BLITZ_MAX_ENTITIES];
   RectView rect_views[BLITZ_MAX_ENTITIES];
   TriangleView triangle_views[BLITZ_MAX_ENTITIES];
+  CircleView circle_views[BLITZ_MAX_ENTITIES];
   u32 grid_heads[BLITZ_GRID_CELL_COUNT];
   u32 grid_next[BLITZ_MAX_ENTITIES];
   u32 grid_cells[BLITZ_MAX_ENTITIES];
@@ -94,12 +112,17 @@ typedef struct World {
 static BlitzUniforms uniforms;
 static RectDraw rect_draws[BLITZ_MAX_RECT_DRAWS];
 static TriangleDraw triangle_draws[BLITZ_MAX_RECT_DRAWS];
+static CircleDraw circle_draws[BLITZ_MAX_RECT_DRAWS];
 static u32 rect_draw_entities[BLITZ_MAX_RECT_DRAWS];
+static u32 triangle_draw_entities[BLITZ_MAX_RECT_DRAWS];
+static u32 circle_draw_entities[BLITZ_MAX_RECT_DRAWS];
 static World world;
 static u32 rect_draw_count;
 static u32 triangle_draw_count;
+static u32 circle_draw_count;
 static u32 rect_draw_version;
 static u32 triangle_draw_version;
+static u32 circle_draw_version;
 static u32 render_list_dirty;
 static u32 dragging_entity;
 static Vec2 drag_offset;
@@ -239,6 +262,17 @@ static void ecs_set_triangle_view(u32 entity, Color fill_color,
   world.triangle_views[entity].stroke_color = stroke_color;
   world.triangle_views[entity].stroke_width = stroke_width;
   world.masks[entity] |= BLITZ_COMPONENT_TRIANGLE_VIEW;
+}
+
+static void ecs_set_circle_view(u32 entity, Color fill_color,
+                                Color stroke_color, float stroke_width) {
+  if (entity == BLITZ_INVALID_INDEX) {
+    return;
+  }
+  world.circle_views[entity].fill_color = fill_color;
+  world.circle_views[entity].stroke_color = stroke_color;
+  world.circle_views[entity].stroke_width = stroke_width;
+  world.masks[entity] |= BLITZ_COMPONENT_CIRCLE_VIEW;
 }
 
 static void grid_insert(u32 entity) {
@@ -382,11 +416,47 @@ static void push_triangle_draw(u32 entity) {
   draw->_pad[1] = 0.0f;
   draw->_pad[2] = 0.0f;
 
+  triangle_draw_entities[triangle_draw_count] = entity;
   triangle_draw_count += 1u;
 }
 
-static int entity_in_triangle_cursor_radius(u32 entity) {
-  if (interaction_mode != BLITZ_MODE_TRIANGLE || !pushback_cursor_active) {
+static void push_circle_draw(u32 entity) {
+  if (circle_draw_count >= BLITZ_MAX_RECT_DRAWS) {
+    return;
+  }
+
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  CircleView view = world.circle_views[entity];
+  CircleDraw *draw = &circle_draws[circle_draw_count];
+
+  float radius = minf_local(size.x, size.y) * 0.5f;
+  draw->circle[0] = position.x + size.x * 0.5f;
+  draw->circle[1] = position.y + size.y * 0.5f;
+  draw->circle[2] = radius;
+  draw->circle[3] = 0.0f;
+
+  draw->fill_color[0] = view.fill_color.r;
+  draw->fill_color[1] = view.fill_color.g;
+  draw->fill_color[2] = view.fill_color.b;
+  draw->fill_color[3] = view.fill_color.a;
+
+  draw->stroke_color[0] = view.stroke_color.r;
+  draw->stroke_color[1] = view.stroke_color.g;
+  draw->stroke_color[2] = view.stroke_color.b;
+  draw->stroke_color[3] = view.stroke_color.a;
+
+  draw->stroke_width = view.stroke_width;
+  draw->_pad[0] = 0.0f;
+  draw->_pad[1] = 0.0f;
+  draw->_pad[2] = 0.0f;
+
+  circle_draw_entities[circle_draw_count] = entity;
+  circle_draw_count += 1u;
+}
+
+static int entity_in_cursor_radius_for_mode(u32 entity, u32 mode) {
+  if (interaction_mode != mode || !pushback_cursor_active) {
     return 0;
   }
 
@@ -398,6 +468,90 @@ static int entity_in_triangle_cursor_radius(u32 entity) {
   float dy = center_y - pushback_cursor.y;
   float radius_sq = pushback_radius * pushback_radius;
   return dx * dx + dy * dy <= radius_sq;
+}
+
+static void replace_entity_with_mode_shape(u32 entity) {
+  if (entity == BLITZ_INVALID_INDEX) {
+    return;
+  }
+
+  if (interaction_mode == BLITZ_MODE_RECT &&
+      (world.masks[entity] &
+       (BLITZ_COMPONENT_RECT_VIEW | BLITZ_COMPONENT_TRIANGLE_VIEW |
+        BLITZ_COMPONENT_CIRCLE_VIEW))) {
+    world.masks[entity] |= BLITZ_COMPONENT_RECT_VIEW;
+    world.masks[entity] &= ~BLITZ_COMPONENT_TRIANGLE_VIEW;
+    world.masks[entity] &= ~BLITZ_COMPONENT_CIRCLE_VIEW;
+  } else if (interaction_mode == BLITZ_MODE_TRIANGLE &&
+      (world.masks[entity] &
+       (BLITZ_COMPONENT_RECT_VIEW | BLITZ_COMPONENT_TRIANGLE_VIEW |
+        BLITZ_COMPONENT_CIRCLE_VIEW))) {
+    world.masks[entity] |= BLITZ_COMPONENT_TRIANGLE_VIEW;
+    world.masks[entity] &= ~BLITZ_COMPONENT_RECT_VIEW;
+    world.masks[entity] &= ~BLITZ_COMPONENT_CIRCLE_VIEW;
+  } else if (interaction_mode == BLITZ_MODE_CIRCLE &&
+             (world.masks[entity] &
+              (BLITZ_COMPONENT_RECT_VIEW | BLITZ_COMPONENT_TRIANGLE_VIEW |
+               BLITZ_COMPONENT_CIRCLE_VIEW))) {
+    world.masks[entity] |= BLITZ_COMPONENT_CIRCLE_VIEW;
+    world.masks[entity] &= ~BLITZ_COMPONENT_RECT_VIEW;
+    world.masks[entity] &= ~BLITZ_COMPONENT_TRIANGLE_VIEW;
+  }
+}
+
+static int entity_in_cursor_radius(u32 entity) {
+  if (!pushback_cursor_active) {
+    return 0;
+  }
+
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  float center_x = position.x + size.x * 0.5f;
+  float center_y = position.y + size.y * 0.5f;
+  float dx = center_x - pushback_cursor.x;
+  float dy = center_y - pushback_cursor.y;
+  float radius_sq = pushback_radius * pushback_radius;
+  return dx * dx + dy * dy <= radius_sq;
+}
+
+static void replace_cursor_radius_with_mode_shape(void) {
+  if (!pushback_cursor_active ||
+      (interaction_mode != BLITZ_MODE_RECT && interaction_mode != BLITZ_MODE_TRIANGLE &&
+       interaction_mode != BLITZ_MODE_CIRCLE)) {
+    return;
+  }
+
+  i32 min_cell_x =
+      clampi(grid_coord(pushback_cursor.x - pushback_radius) - 1, 0,
+             (i32)BLITZ_GRID_SIZE - 1);
+  i32 min_cell_y =
+      clampi(grid_coord(pushback_cursor.y - pushback_radius) - 1, 0,
+             (i32)BLITZ_GRID_SIZE - 1);
+  i32 max_cell_x =
+      clampi(grid_coord(pushback_cursor.x + pushback_radius) + 1, 0,
+             (i32)BLITZ_GRID_SIZE - 1);
+  i32 max_cell_y =
+      clampi(grid_coord(pushback_cursor.y + pushback_radius) + 1, 0,
+             (i32)BLITZ_GRID_SIZE - 1);
+
+  u32 base_required = BLITZ_COMPONENT_POSITION | BLITZ_COMPONENT_SIZE;
+  for (i32 y = min_cell_y; y <= max_cell_y; y += 1) {
+    for (i32 x = min_cell_x; x <= max_cell_x; x += 1) {
+      u32 entity = world.grid_heads[grid_index(x, y)];
+      while (entity != BLITZ_INVALID_INDEX) {
+        if ((world.masks[entity] & base_required) == base_required &&
+            (world.masks[entity] &
+             (BLITZ_COMPONENT_RECT_VIEW | BLITZ_COMPONENT_TRIANGLE_VIEW |
+              BLITZ_COMPONENT_CIRCLE_VIEW)) &&
+            entity_in_cursor_radius(entity)) {
+          replace_entity_with_mode_shape(entity);
+        }
+        entity = world.grid_next[entity];
+      }
+    }
+  }
+
+  mark_render_list_dirty();
 }
 
 static int rect_intersects_view(u32 entity, float min_x, float min_y,
@@ -419,6 +573,7 @@ static void extract_render_draws(void) {
 
   rect_draw_count = 0u;
   triangle_draw_count = 0u;
+  circle_draw_count = 0u;
 
   float half_w = uniforms.viewport_camera[0] * 0.5f / uniforms.style[0];
   float half_h = uniforms.viewport_camera[1] * 0.5f / uniforms.style[0];
@@ -445,13 +600,31 @@ static void extract_render_draws(void) {
         if ((world.masks[entity] & base_required) == base_required &&
             rect_intersects_view(entity, view_min_x, view_min_y, view_max_x,
                                  view_max_y)) {
+          u32 has_rect = world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW;
+          u32 has_triangle = world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW;
+          u32 has_circle = world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW;
+          u32 has_shape = has_rect || has_triangle || has_circle;
+          u32 draw_circle =
+              has_shape &&
+              entity_in_cursor_radius_for_mode(entity, BLITZ_MODE_CIRCLE);
           u32 draw_triangle =
-              (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) &&
-              entity_in_triangle_cursor_radius(entity);
-          if (draw_triangle) {
-            push_triangle_draw(entity);
-          } else if (world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW) {
+              has_shape &&
+              entity_in_cursor_radius_for_mode(entity, BLITZ_MODE_TRIANGLE);
+          u32 draw_rect =
+              has_shape &&
+              entity_in_cursor_radius_for_mode(entity, BLITZ_MODE_RECT);
+          if (draw_rect) {
             push_rect_draw(entity);
+          } else if (draw_circle) {
+            push_circle_draw(entity);
+          } else if (draw_triangle) {
+            push_triangle_draw(entity);
+          } else if (has_rect) {
+            push_rect_draw(entity);
+          } else if (has_circle) {
+            push_circle_draw(entity);
+          } else if (has_triangle) {
+            push_triangle_draw(entity);
           }
         }
         entity = world.grid_next[entity];
@@ -459,9 +632,11 @@ static void extract_render_draws(void) {
     }
   }
 
-  uniforms.style[2] = (float)(rect_draw_count + triangle_draw_count);
+  uniforms.style[2] =
+      (float)(rect_draw_count + triangle_draw_count + circle_draw_count);
   rect_draw_version += 1u;
   triangle_draw_version += 1u;
+  circle_draw_version += 1u;
   render_list_dirty = 0u;
 }
 
@@ -480,6 +655,47 @@ static int point_in_rect(float world_x, float world_y, u32 entity) {
   Vec2 size = world.sizes[entity];
   return world_x >= position.x && world_y >= position.y &&
          world_x <= position.x + size.x && world_y <= position.y + size.y;
+}
+
+static float triangle_sign(float px, float py, float ax, float ay, float bx,
+                           float by) {
+  return (px - bx) * (ay - by) - (ax - bx) * (py - by);
+}
+
+static int point_in_triangle(float world_x, float world_y, u32 entity) {
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  float top_x = position.x + size.x * 0.5f;
+  float top_y = position.y;
+  float right_x = position.x + size.x;
+  float right_y = position.y + size.y;
+  float left_x = position.x;
+  float left_y = position.y + size.y;
+
+  float d1 = triangle_sign(world_x, world_y, top_x, top_y, right_x, right_y);
+  float d2 = triangle_sign(world_x, world_y, right_x, right_y, left_x, left_y);
+  float d3 = triangle_sign(world_x, world_y, left_x, left_y, top_x, top_y);
+  int has_negative = d1 < 0.0f || d2 < 0.0f || d3 < 0.0f;
+  int has_positive = d1 > 0.0f || d2 > 0.0f || d3 > 0.0f;
+  return !(has_negative && has_positive);
+}
+
+static int point_in_circle(float world_x, float world_y, u32 entity) {
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  float radius = minf_local(size.x, size.y) * 0.5f;
+  float center_x = position.x + size.x * 0.5f;
+  float center_y = position.y + size.y * 0.5f;
+  float dx = world_x - center_x;
+  float dy = world_y - center_y;
+  return dx * dx + dy * dy <= radius * radius;
+}
+
+static u32 start_dragging_entity(float world_x, float world_y, u32 entity) {
+  dragging_entity = entity;
+  drag_offset.x = world_x - world.positions[entity].x;
+  drag_offset.y = world_y - world.positions[entity].y;
+  return 1u;
 }
 
 static void pushback_track_entity(u32 entity) {
@@ -640,10 +856,13 @@ static void create_demo_world(void) {
       ecs_set_size(entity, rect_size, rect_size);
       ecs_set_rect_view(
           entity, (Color){0.12f + hue_a * 0.55f, 0.25f + hue_b * 0.45f, 0.68f, 1.0f},
-          (Color){0.02f, 0.025f, 0.03f, 1.0f}, 1.5f);
+          (Color){0.08f, 0.32f, 1.0f, 1.0f}, 1.5f);
       ecs_set_triangle_view(
           entity, (Color){0.12f + hue_a * 0.55f, 0.25f + hue_b * 0.45f, 0.68f, 1.0f},
-          (Color){0.02f, 0.025f, 0.03f, 1.0f}, 1.5f);
+          (Color){1.0f, 0.86f, 0.1f, 1.0f}, 1.5f);
+      ecs_set_circle_view(
+          entity, (Color){0.12f + hue_a * 0.55f, 0.25f + hue_b * 0.45f, 0.68f, 1.0f},
+          (Color){1.0f, 1.0f, 1.0f, 1.0f}, 1.5f);
       grid_insert(entity);
     }
   }
@@ -654,8 +873,10 @@ void blitz_init(void) {
   world.entity_count = 0u;
   rect_draw_count = 0u;
   triangle_draw_count = 0u;
+  circle_draw_count = 0u;
   rect_draw_version = 0u;
   triangle_draw_version = 0u;
+  circle_draw_version = 0u;
   render_list_dirty = 1u;
   dragging_entity = BLITZ_INVALID_INDEX;
   drag_offset.x = 0.0f;
@@ -737,13 +958,24 @@ u32 blitz_pointer_down(float screen_x, float screen_y) {
   screen_to_world(screen_x, screen_y, &world_x, &world_y);
   extract_render_draws();
 
+  for (u32 i = circle_draw_count; i > 0u; i -= 1u) {
+    u32 entity = circle_draw_entities[i - 1u];
+    if (point_in_circle(world_x, world_y, entity)) {
+      return start_dragging_entity(world_x, world_y, entity);
+    }
+  }
+
+  for (u32 i = triangle_draw_count; i > 0u; i -= 1u) {
+    u32 entity = triangle_draw_entities[i - 1u];
+    if (point_in_triangle(world_x, world_y, entity)) {
+      return start_dragging_entity(world_x, world_y, entity);
+    }
+  }
+
   for (u32 i = rect_draw_count; i > 0u; i -= 1u) {
     u32 entity = rect_draw_entities[i - 1u];
     if (point_in_rect(world_x, world_y, entity)) {
-      dragging_entity = entity;
-      drag_offset.x = world_x - world.positions[entity].x;
-      drag_offset.y = world_y - world.positions[entity].y;
-      return 1u;
+      return start_dragging_entity(world_x, world_y, entity);
     }
   }
 
@@ -775,12 +1007,17 @@ EXPORT("blitz_set_interaction_mode")
 void blitz_set_interaction_mode(u32 mode) {
   u32 previous_mode = interaction_mode;
   interaction_mode =
-      mode == BLITZ_MODE_PUSHBACK || mode == BLITZ_MODE_TRIANGLE ? mode : BLITZ_MODE_DRAG;
+      mode == BLITZ_MODE_PUSHBACK || mode == BLITZ_MODE_TRIANGLE ||
+              mode == BLITZ_MODE_CIRCLE || mode == BLITZ_MODE_RECT
+          ? mode
+          : BLITZ_MODE_DRAG;
   dragging_entity = BLITZ_INVALID_INDEX;
   if (interaction_mode == BLITZ_MODE_DRAG) {
     pushback_cursor_active = 0u;
   }
-  if (previous_mode == BLITZ_MODE_TRIANGLE || interaction_mode == BLITZ_MODE_TRIANGLE) {
+  if (previous_mode == BLITZ_MODE_RECT || previous_mode == BLITZ_MODE_TRIANGLE ||
+      previous_mode == BLITZ_MODE_CIRCLE || interaction_mode == BLITZ_MODE_RECT ||
+      interaction_mode == BLITZ_MODE_TRIANGLE || interaction_mode == BLITZ_MODE_CIRCLE) {
     mark_render_list_dirty();
   }
 }
@@ -789,17 +1026,27 @@ EXPORT("blitz_interaction_move")
 void blitz_interaction_move(float screen_x, float screen_y) {
   screen_to_world(screen_x, screen_y, &pushback_cursor.x, &pushback_cursor.y);
   pushback_cursor_active = 1u;
-  if (interaction_mode == BLITZ_MODE_TRIANGLE) {
+  if (interaction_mode == BLITZ_MODE_RECT || interaction_mode == BLITZ_MODE_TRIANGLE ||
+      interaction_mode == BLITZ_MODE_CIRCLE) {
     mark_render_list_dirty();
   }
 }
 
+EXPORT("blitz_interaction_click")
+void blitz_interaction_click(float screen_x, float screen_y) {
+  screen_to_world(screen_x, screen_y, &pushback_cursor.x, &pushback_cursor.y);
+  pushback_cursor_active = 1u;
+  replace_cursor_radius_with_mode_shape();
+}
+
 EXPORT("blitz_interaction_leave")
 void blitz_interaction_leave(void) {
-  u32 was_triangle_active =
-      interaction_mode == BLITZ_MODE_TRIANGLE && pushback_cursor_active;
+  u32 was_shape_active =
+      (interaction_mode == BLITZ_MODE_RECT || interaction_mode == BLITZ_MODE_TRIANGLE ||
+       interaction_mode == BLITZ_MODE_CIRCLE) &&
+      pushback_cursor_active;
   pushback_cursor_active = 0u;
-  if (was_triangle_active) {
+  if (was_shape_active) {
     mark_render_list_dirty();
   }
 }
@@ -809,7 +1056,8 @@ void blitz_adjust_interaction_radius(float delta_steps) {
   pushback_radius =
       clampf(pushback_radius + delta_steps * BLITZ_PUSHBACK_RADIUS_STEP,
              BLITZ_PUSHBACK_RADIUS_MIN, BLITZ_PUSHBACK_RADIUS_MAX);
-  if (interaction_mode == BLITZ_MODE_TRIANGLE) {
+  if (interaction_mode == BLITZ_MODE_RECT || interaction_mode == BLITZ_MODE_TRIANGLE ||
+      interaction_mode == BLITZ_MODE_CIRCLE) {
     mark_render_list_dirty();
   }
 }
@@ -864,6 +1112,27 @@ u32 blitz_triangle_draw_count(void) {
 EXPORT("blitz_triangle_draw_version")
 u32 blitz_triangle_draw_version(void) {
   return triangle_draw_version;
+}
+
+EXPORT("blitz_circle_draw_ptr")
+u32 blitz_circle_draw_ptr(void) {
+  extract_render_draws();
+  return (u32)&circle_draws[0];
+}
+
+EXPORT("blitz_circle_draw_f32_count")
+u32 blitz_circle_draw_f32_count(void) {
+  return sizeof(CircleDraw) / sizeof(float);
+}
+
+EXPORT("blitz_circle_draw_count")
+u32 blitz_circle_draw_count(void) {
+  return circle_draw_count;
+}
+
+EXPORT("blitz_circle_draw_version")
+u32 blitz_circle_draw_version(void) {
+  return circle_draw_version;
 }
 
 EXPORT("blitz_entity_count")

@@ -158,6 +158,10 @@ static u32 drag_active;
 // Selection state captured when a marquee starts, so each marquee move can
 // recompute live selection as base ∪ (entities inside the current box).
 static u32 marquee_base_selected[BLITZ_MAX_ENTITIES];
+// Reclaimed entity slots (stack) and the count of currently-live entities.
+static u32 free_slots[BLITZ_MAX_ENTITIES];
+static u32 free_count;
+static u32 live_count;
 static Vec2 marquee_start;
 static Vec2 marquee_end;
 static u32 camera_fit_initialized;
@@ -186,15 +190,22 @@ static void mark_dynamic_dirty(void) {
 }
 
 static u32 ecs_create_entity(void) {
-  u32 entity = world.entity_count;
-  if (entity < BLITZ_MAX_ENTITIES) {
+  u32 entity;
+  if (free_count > 0u) {
+    free_count -= 1u;
+    entity = free_slots[free_count];
+  } else if (world.entity_count < BLITZ_MAX_ENTITIES) {
+    entity = world.entity_count;
     world.entity_count += 1u;
-    world.draw_order[world.draw_order_count] = entity;
-    world.draw_order_count += 1u;
-    world.selected[entity] = 0u;
-    return entity;
+  } else {
+    return BLITZ_INVALID_INDEX;
   }
-  return BLITZ_INVALID_INDEX;
+  world.draw_order[world.draw_order_count] = entity;
+  world.draw_order_count += 1u;
+  world.selected[entity] = 0u;
+  world.masks[entity] = 0u;
+  live_count += 1u;
+  return entity;
 }
 
 static void ecs_set_position(u32 entity, float x, float y) {
@@ -988,6 +999,8 @@ EXPORT("blitz_init")
 void blitz_init(void) {
   world.entity_count = 0u;
   world.draw_order_count = 0u;
+  free_count = 0u;
+  live_count = 0u;
   shape_command_count = 0u;
   rect_draw_count = 0u;
   triangle_draw_count = 0u;
@@ -1285,10 +1298,24 @@ void blitz_delete_selected(void) {
     if (world.selected[entity]) {
       world.masks[entity] = 0u;
       world.selected[entity] = 0u;
+      free_slots[free_count] = entity;
+      free_count += 1u;
+      live_count -= 1u;
     }
   }
+  // Drop deleted entities from the draw order (cleared mask marks them dead).
+  u32 kept = 0u;
+  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
+    u32 entity = world.draw_order[i];
+    if (world.masks[entity] != 0u) {
+      world.draw_order[kept] = entity;
+      kept += 1u;
+    }
+  }
+  world.draw_order_count = kept;
   selected_count = 0u;
   dragging_selection = 0u;
+  drag_active = 0u;
   mark_render_list_dirty();
 }
 
@@ -1452,7 +1479,7 @@ u32 blitz_render_max_dyn_rects(void) {
 
 EXPORT("blitz_entity_count")
 u32 blitz_entity_count(void) {
-  return world.entity_count;
+  return live_count;
 }
 
 EXPORT("blitz_selected_count")

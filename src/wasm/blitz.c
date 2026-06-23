@@ -9,7 +9,7 @@ typedef unsigned int u32;
 #define BLITZ_RENDER_CHUNKS 4u
 #define BLITZ_MAX_RECT_DRAWS (BLITZ_RENDER_CHUNK_RECTS * BLITZ_RENDER_CHUNKS)
 #define BLITZ_MAX_TEXT_DRAWS 262144u
-#define BLITZ_MAX_DYN_RECTS 65536u
+#define BLITZ_MAX_DYN_RECTS 2000000u
 #define BLITZ_MAX_DYN_COMMANDS (BLITZ_MAX_TEXT_DRAWS + BLITZ_MAX_DYN_RECTS)
 #define BLITZ_MIN_TEXT_PX 3.0f
 
@@ -25,7 +25,6 @@ typedef unsigned int u32;
 #define BLITZ_COMPONENT_CIRCLE_VIEW 16u
 #define BLITZ_COMPONENT_TEXT_VIEW 32u
 #define BLITZ_COMPONENT_SELECTABLE 64u
-#define BLITZ_COMPONENT_SELECTION_BACKDROP 128u
 
 #define BLITZ_SHAPE_RECT 0u
 #define BLITZ_SHAPE_TRIANGLE 1u
@@ -156,6 +155,9 @@ static u32 spawn_count;
 static Vec2 drag_last_world;
 static Vec2 drag_offset;
 static u32 drag_active;
+// Selection state captured when a marquee starts, so each marquee move can
+// recompute live selection as base ∪ (entities inside the current box).
+static u32 marquee_base_selected[BLITZ_MAX_ENTITIES];
 static Vec2 marquee_start;
 static Vec2 marquee_end;
 static u32 camera_fit_initialized;
@@ -285,6 +287,34 @@ static void toggle_selection(u32 entity) {
     selected_count += 1u;
   }
   mark_dynamic_dirty();
+}
+
+static void snapshot_selection_base(void) {
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    marquee_base_selected[entity] = world.selected[entity];
+  }
+}
+
+static void marquee_apply_live(void) {
+  float min_x = minf_local(marquee_start.x, marquee_end.x);
+  float min_y = minf_local(marquee_start.y, marquee_end.y);
+  float max_x = marquee_start.x > marquee_end.x ? marquee_start.x : marquee_end.x;
+  float max_y = marquee_start.y > marquee_end.y ? marquee_start.y : marquee_end.y;
+  u32 count = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    u32 sel = marquee_base_selected[entity];
+    if (!sel && (world.masks[entity] & BLITZ_COMPONENT_SELECTABLE)) {
+      Vec2 position = world.positions[entity];
+      Vec2 size = world.sizes[entity];
+      if (position.x >= min_x && position.y >= min_y &&
+          position.x + size.x <= max_x && position.y + size.y <= max_y) {
+        sel = 1u;
+      }
+    }
+    world.selected[entity] = sel;
+    count += sel;
+  }
+  selected_count = count;
 }
 
 static void reorder_selection(u32 selected_first) {
@@ -714,9 +744,21 @@ static void extract_dynamic(void) {
   }
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
     u32 entity = world.draw_order[i];
-    if (world.selected[entity]) {
-      push_selection_draw(entity, overlay_order);
+    if (!world.selected[entity]) {
+      continue;
     }
+    // Only draw outlines for selected shapes that are actually visible, so
+    // select-all stays bounded by the screen rather than the dyn buffer cap.
+    Vec2 position = world.positions[entity];
+    Vec2 size = world.sizes[entity];
+    if (position.x + size.x < view_min_x || position.x > view_max_x ||
+        position.y + size.y < view_min_y || position.y > view_max_y) {
+      continue;
+    }
+    if (size.x * scale < 1.0f && size.y * scale < 1.0f) {
+      continue;
+    }
+    push_selection_draw(entity, overlay_order);
   }
   push_marquee_draw(world.draw_order_count + 2u);
   uniforms.style[3] = (float)world.draw_order_count;
@@ -855,11 +897,8 @@ static u32 create_user_text(float x, float y) {
 static void create_demo_world(void) {
   Color transparent = {0.0f, 0.0f, 0.0f, 0.0f};
 
-  u32 slide_background =
-      create_slide_rect(-560.0f, -315.0f, 1120.0f, 630.0f,
-                        (Color){0.965f, 0.972f, 0.984f, 1.0f}, transparent,
-                        0.0f);
-  world.masks[slide_background] |= BLITZ_COMPONENT_SELECTION_BACKDROP;
+  create_slide_rect(-560.0f, -315.0f, 1120.0f, 630.0f,
+                    (Color){0.965f, 0.972f, 0.984f, 1.0f}, transparent, 0.0f);
   create_slide_rect(-560.0f, -315.0f, 300.0f, 630.0f,
                     (Color){0.075f, 0.095f, 0.13f, 1.0f}, transparent, 0.0f);
   create_slide_rect(-560.0f, -315.0f, 300.0f, 9.0f,
@@ -1070,19 +1109,6 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
       hit = (u32)point_in_rect(world_x, world_y, entity);
     }
     if (hit) {
-      if (world.masks[entity] & BLITZ_COMPONENT_SELECTION_BACKDROP) {
-        if (!additive) {
-          clear_selection();
-        }
-        marquee_active = 1u;
-        marquee_additive = additive;
-        marquee_candidate = entity;
-        marquee_start.x = world_x;
-        marquee_start.y = world_y;
-        marquee_end = marquee_start;
-        mark_dynamic_dirty();
-        return 2u;
-      }
       if (additive) {
         toggle_selection(entity);
       } else if (!world.selected[entity]) {
@@ -1105,6 +1131,7 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
   marquee_start.x = world_x;
   marquee_start.y = world_y;
   marquee_end = marquee_start;
+  snapshot_selection_base();
   mark_dynamic_dirty();
   return 2u;
 }
@@ -1117,6 +1144,7 @@ void blitz_pointer_move(float screen_x, float screen_y) {
   if (marquee_active) {
     marquee_end.x = world_x;
     marquee_end.y = world_y;
+    marquee_apply_live();
     mark_dynamic_dirty();
     return;
   }
@@ -1182,19 +1210,7 @@ void blitz_pointer_up(void) {
     return;
   }
 
-  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
-    if (!(world.masks[entity] & BLITZ_COMPONENT_SELECTABLE) ||
-        world.selected[entity]) {
-      continue;
-    }
-    Vec2 position = world.positions[entity];
-    Vec2 size = world.sizes[entity];
-    if (position.x >= min_x && position.y >= min_y &&
-        position.x + size.x <= max_x && position.y + size.y <= max_y) {
-      world.selected[entity] = 1u;
-      selected_count += 1u;
-    }
-  }
+  // Selection for a dragged marquee was already applied live during move.
   marquee_active = 0u;
   marquee_candidate = BLITZ_INVALID_INDEX;
   mark_dynamic_dirty();

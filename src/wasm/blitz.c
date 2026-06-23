@@ -342,20 +342,74 @@ static void push_circle_draw(u32 entity) {
 }
 
 static const FontGlyphMetric *font_glyph_metric(u32 codepoint) {
-  if (codepoint < BLITZ_FONT_FIRST_CODEPOINT ||
-      codepoint > BLITZ_FONT_LAST_CODEPOINT) {
-    codepoint = (u32)'?';
+  u32 low = 0u;
+  u32 high = BLITZ_FONT_GLYPH_COUNT;
+  while (low < high) {
+    u32 middle = low + (high - low) / 2u;
+    u32 candidate = blitz_font_glyphs[middle].codepoint;
+    if (candidate < codepoint) {
+      low = middle + 1u;
+    } else {
+      high = middle;
+    }
   }
-  return &blitz_font_glyphs[codepoint - BLITZ_FONT_FIRST_CODEPOINT];
+  if (low < BLITZ_FONT_GLYPH_COUNT &&
+      blitz_font_glyphs[low].codepoint == codepoint) {
+    return &blitz_font_glyphs[low];
+  }
+  if (codepoint != BLITZ_FONT_REPLACEMENT_CODEPOINT) {
+    return font_glyph_metric(BLITZ_FONT_REPLACEMENT_CODEPOINT);
+  }
+  return &blitz_font_glyphs[0];
+}
+
+static u32 utf8_continuation(unsigned char value) {
+  return (value & 0xc0u) == 0x80u;
+}
+
+static u32 utf8_next(const char **cursor) {
+  const unsigned char *text = (const unsigned char *)*cursor;
+  u32 first = text[0];
+  if (first < 0x80u) {
+    *cursor += 1;
+    return first;
+  }
+
+  u32 codepoint = BLITZ_FONT_REPLACEMENT_CODEPOINT;
+  u32 length = 1u;
+  if (first >= 0xc2u && first <= 0xdfu && utf8_continuation(text[1])) {
+    codepoint = ((first & 0x1fu) << 6u) | (text[1] & 0x3fu);
+    length = 2u;
+  } else if (first >= 0xe0u && first <= 0xefu &&
+             utf8_continuation(text[1]) && utf8_continuation(text[2])) {
+    u32 candidate = ((first & 0x0fu) << 12u) |
+                    ((text[1] & 0x3fu) << 6u) | (text[2] & 0x3fu);
+    if (candidate >= 0x800u &&
+        !(candidate >= 0xd800u && candidate <= 0xdfffu)) {
+      codepoint = candidate;
+      length = 3u;
+    }
+  } else if (first >= 0xf0u && first <= 0xf4u &&
+             utf8_continuation(text[1]) && utf8_continuation(text[2]) &&
+             utf8_continuation(text[3])) {
+    u32 candidate = ((first & 0x07u) << 18u) |
+                    ((text[1] & 0x3fu) << 12u) |
+                    ((text[2] & 0x3fu) << 6u) | (text[3] & 0x3fu);
+    if (candidate >= 0x10000u && candidate <= 0x10ffffu) {
+      codepoint = candidate;
+      length = 4u;
+    }
+  }
+
+  *cursor += length;
+  return codepoint;
 }
 
 static float font_text_width(const char *text, float font_size) {
   float width = 0.0f;
   while (*text != '\0') {
-    const FontGlyphMetric *glyph =
-        font_glyph_metric((u32)(unsigned char)*text);
+    const FontGlyphMetric *glyph = font_glyph_metric(utf8_next(&text));
     width += glyph->advance * font_size;
-    text += 1;
   }
   return width;
 }
@@ -367,7 +421,7 @@ static void push_text_draws(u32 entity) {
   float pen_x = position.x + view.origin_x;
   float baseline_y = position.y + view.baseline_offset;
   while (*text != '\0') {
-    u32 codepoint = (u32)(unsigned char)*text;
+    u32 codepoint = utf8_next(&text);
     const FontGlyphMetric *glyph = font_glyph_metric(codepoint);
 
     if (codepoint != (u32)' ' &&
@@ -396,7 +450,6 @@ static void push_text_draws(u32 entity) {
     }
 
     pen_x += glyph->advance * view.font_size;
-    text += 1;
   }
 }
 
@@ -598,6 +651,8 @@ static void create_demo_world(void) {
                     (Color){0.95f, 0.97f, 1.0f, 1.0f});
   create_slide_text("1 pipeline", -500.0f, 232.0f, 17.0f,
                     (Color){0.68f, 0.72f, 0.78f, 1.0f});
+  create_slide_text("Ελληνικά · Русский · Việt", -500.0f, 274.0f, 12.0f,
+                    (Color){0.55f, 0.90f, 0.82f, 1.0f});
 
   create_slide_text("01", -178.0f, 57.0f, 18.0f,
                     (Color){0.91f, 0.31f, 0.27f, 1.0f});

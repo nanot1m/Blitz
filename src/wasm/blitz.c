@@ -9,8 +9,14 @@ typedef unsigned int u32;
 #define BLITZ_RENDER_CHUNKS 4u
 #define BLITZ_MAX_RECT_DRAWS (BLITZ_RENDER_CHUNK_RECTS * BLITZ_RENDER_CHUNKS)
 #define BLITZ_MAX_TEXT_DRAWS 262144u
+#define BLITZ_MAX_DYN_RECTS 65536u
+#define BLITZ_MAX_DYN_COMMANDS (BLITZ_MAX_TEXT_DRAWS + BLITZ_MAX_DYN_RECTS)
+#define BLITZ_MIN_TEXT_PX 3.0f
 
 #define BLITZ_INVALID_INDEX 0xffffffffu
+// High bit of a command's order word: set while the command's entity is being
+// dragged, so the shader translates it by the drag offset instead of rebuilding.
+#define BLITZ_DRAG_FLAG 0x80000000u
 
 #define BLITZ_COMPONENT_POSITION 1u
 #define BLITZ_COMPONENT_SIZE 2u
@@ -127,14 +133,20 @@ static RectDraw rect_draws[BLITZ_MAX_RECT_DRAWS];
 static TriangleDraw triangle_draws[BLITZ_MAX_RECT_DRAWS];
 static CircleDraw circle_draws[BLITZ_MAX_RECT_DRAWS];
 static TextDraw text_draws[BLITZ_MAX_TEXT_DRAWS];
+static ShapeCommand dyn_commands[BLITZ_MAX_DYN_COMMANDS];
+static RectDraw dyn_rects[BLITZ_MAX_DYN_RECTS];
 static World world;
 static u32 shape_command_count;
 static u32 rect_draw_count;
 static u32 triangle_draw_count;
 static u32 circle_draw_count;
 static u32 text_draw_count;
+static u32 dyn_command_count;
+static u32 dyn_rect_count;
 static u32 shape_command_version;
-static u32 render_list_dirty;
+static u32 dyn_version;
+static u32 static_dirty;
+static u32 dynamic_dirty;
 static u32 dragging_selection;
 static u32 marquee_active;
 static u32 marquee_additive;
@@ -142,6 +154,8 @@ static u32 marquee_candidate;
 static u32 selected_count;
 static u32 spawn_count;
 static Vec2 drag_last_world;
+static Vec2 drag_offset;
+static u32 drag_active;
 static Vec2 marquee_start;
 static Vec2 marquee_end;
 static u32 camera_fit_initialized;
@@ -161,7 +175,12 @@ static float minf_local(float a, float b) {
 }
 
 static void mark_render_list_dirty(void) {
-  render_list_dirty = 1u;
+  static_dirty = 1u;
+  dynamic_dirty = 1u;
+}
+
+static void mark_dynamic_dirty(void) {
+  dynamic_dirty = 1u;
 }
 
 static u32 ecs_create_entity(void) {
@@ -246,7 +265,7 @@ static void clear_selection(void) {
     world.selected[entity] = 0u;
   }
   selected_count = 0u;
-  mark_render_list_dirty();
+  mark_dynamic_dirty();
 }
 
 static void select_only(u32 entity) {
@@ -265,7 +284,7 @@ static void toggle_selection(u32 entity) {
     world.selected[entity] = 1u;
     selected_count += 1u;
   }
-  mark_render_list_dirty();
+  mark_dynamic_dirty();
 }
 
 static void reorder_selection(u32 selected_first) {
@@ -286,7 +305,7 @@ static void reorder_selection(u32 selected_first) {
   mark_render_list_dirty();
 }
 
-static void push_rect_draw(u32 entity) {
+static void push_rect_draw(u32 entity, u32 order) {
   if (shape_command_count >= BLITZ_MAX_RECT_DRAWS ||
       rect_draw_count >= BLITZ_MAX_RECT_DRAWS) {
     return;
@@ -320,21 +339,21 @@ static void push_rect_draw(u32 entity) {
   shape_commands[shape_command_count].shape_kind = (u32)BLITZ_SHAPE_RECT;
   shape_commands[shape_command_count].shape_index = rect_draw_count;
   shape_commands[shape_command_count].entity = entity;
-  shape_commands[shape_command_count]._pad0 = 0u;
+  shape_commands[shape_command_count]._pad0 = order;
   rect_draw_count += 1u;
   shape_command_count += 1u;
 }
 
-static void push_selection_draw(u32 entity) {
-  if (shape_command_count >= BLITZ_MAX_RECT_DRAWS ||
-      rect_draw_count >= BLITZ_MAX_RECT_DRAWS) {
+static void push_selection_draw(u32 entity, u32 order) {
+  if (dyn_command_count >= BLITZ_MAX_DYN_COMMANDS ||
+      dyn_rect_count >= BLITZ_MAX_DYN_RECTS) {
     return;
   }
 
   Vec2 position = world.positions[entity];
   Vec2 size = world.sizes[entity];
   float inset = 3.0f / uniforms.style[0];
-  RectDraw *draw = &rect_draws[rect_draw_count];
+  RectDraw *draw = &dyn_rects[dyn_rect_count];
   draw->rect[0] = position.x - inset;
   draw->rect[1] = position.y - inset;
   draw->rect[2] = size.x + inset * 2.0f;
@@ -352,17 +371,17 @@ static void push_selection_draw(u32 entity) {
   draw->stroke_width_pad[2] = 0.0f;
   draw->stroke_width_pad[3] = 0.0f;
 
-  shape_commands[shape_command_count].shape_kind = BLITZ_SHAPE_RECT;
-  shape_commands[shape_command_count].shape_index = rect_draw_count;
-  shape_commands[shape_command_count].entity = BLITZ_INVALID_INDEX;
-  shape_commands[shape_command_count]._pad0 = 0u;
-  rect_draw_count += 1u;
-  shape_command_count += 1u;
+  dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_RECT;
+  dyn_commands[dyn_command_count].shape_index = dyn_rect_count;
+  dyn_commands[dyn_command_count].entity = BLITZ_INVALID_INDEX;
+  dyn_commands[dyn_command_count]._pad0 = order;
+  dyn_rect_count += 1u;
+  dyn_command_count += 1u;
 }
 
-static void push_marquee_draw(void) {
-  if (!marquee_active || shape_command_count >= BLITZ_MAX_RECT_DRAWS ||
-      rect_draw_count >= BLITZ_MAX_RECT_DRAWS) {
+static void push_marquee_draw(u32 order) {
+  if (!marquee_active || dyn_command_count >= BLITZ_MAX_DYN_COMMANDS ||
+      dyn_rect_count >= BLITZ_MAX_DYN_RECTS) {
     return;
   }
 
@@ -370,7 +389,7 @@ static void push_marquee_draw(void) {
   float min_y = minf_local(marquee_start.y, marquee_end.y);
   float max_x = marquee_start.x > marquee_end.x ? marquee_start.x : marquee_end.x;
   float max_y = marquee_start.y > marquee_end.y ? marquee_start.y : marquee_end.y;
-  RectDraw *draw = &rect_draws[rect_draw_count];
+  RectDraw *draw = &dyn_rects[dyn_rect_count];
   draw->rect[0] = min_x;
   draw->rect[1] = min_y;
   draw->rect[2] = max_x - min_x;
@@ -388,15 +407,15 @@ static void push_marquee_draw(void) {
   draw->stroke_width_pad[2] = 0.0f;
   draw->stroke_width_pad[3] = 0.0f;
 
-  shape_commands[shape_command_count].shape_kind = BLITZ_SHAPE_RECT;
-  shape_commands[shape_command_count].shape_index = rect_draw_count;
-  shape_commands[shape_command_count].entity = BLITZ_INVALID_INDEX;
-  shape_commands[shape_command_count]._pad0 = 0u;
-  rect_draw_count += 1u;
-  shape_command_count += 1u;
+  dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_RECT;
+  dyn_commands[dyn_command_count].shape_index = dyn_rect_count;
+  dyn_commands[dyn_command_count].entity = BLITZ_INVALID_INDEX;
+  dyn_commands[dyn_command_count]._pad0 = order;
+  dyn_rect_count += 1u;
+  dyn_command_count += 1u;
 }
 
-static void push_triangle_draw(u32 entity) {
+static void push_triangle_draw(u32 entity, u32 order) {
   if (shape_command_count >= BLITZ_MAX_RECT_DRAWS ||
       triangle_draw_count >= BLITZ_MAX_RECT_DRAWS) {
     return;
@@ -440,12 +459,12 @@ static void push_triangle_draw(u32 entity) {
   shape_commands[shape_command_count].shape_kind = (u32)BLITZ_SHAPE_TRIANGLE;
   shape_commands[shape_command_count].shape_index = triangle_draw_count;
   shape_commands[shape_command_count].entity = entity;
-  shape_commands[shape_command_count]._pad0 = 0u;
+  shape_commands[shape_command_count]._pad0 = order;
   triangle_draw_count += 1u;
   shape_command_count += 1u;
 }
 
-static void push_circle_draw(u32 entity) {
+static void push_circle_draw(u32 entity, u32 order) {
   if (shape_command_count >= BLITZ_MAX_RECT_DRAWS ||
       circle_draw_count >= BLITZ_MAX_RECT_DRAWS) {
     return;
@@ -480,7 +499,7 @@ static void push_circle_draw(u32 entity) {
   shape_commands[shape_command_count].shape_kind = (u32)BLITZ_SHAPE_CIRCLE;
   shape_commands[shape_command_count].shape_index = circle_draw_count;
   shape_commands[shape_command_count].entity = entity;
-  shape_commands[shape_command_count]._pad0 = 0u;
+  shape_commands[shape_command_count]._pad0 = order;
   circle_draw_count += 1u;
   shape_command_count += 1u;
 }
@@ -558,7 +577,7 @@ static float font_text_width(const char *text, float font_size) {
   return width;
 }
 
-static void push_text_draws(u32 entity) {
+static void push_text_draws(u32 entity, u32 order) {
   TextView view = world.text_views[entity];
   Vec2 position = world.positions[entity];
   const char *text = view.text;
@@ -569,7 +588,7 @@ static void push_text_draws(u32 entity) {
     const FontGlyphMetric *glyph = font_glyph_metric(codepoint);
 
     if (codepoint != (u32)' ' &&
-        shape_command_count < BLITZ_MAX_RECT_DRAWS &&
+        dyn_command_count < BLITZ_MAX_DYN_COMMANDS &&
         text_draw_count < BLITZ_MAX_TEXT_DRAWS) {
       TextDraw *draw = &text_draws[text_draw_count];
       draw->rect[0] = pen_x + glyph->plane_left * view.font_size;
@@ -585,42 +604,37 @@ static void push_text_draws(u32 entity) {
       draw->color[2] = view.color.b;
       draw->color[3] = view.color.a;
 
-      shape_commands[shape_command_count].shape_kind = BLITZ_SHAPE_TEXT;
-      shape_commands[shape_command_count].shape_index = text_draw_count;
-      shape_commands[shape_command_count].entity = entity;
-      shape_commands[shape_command_count]._pad0 = 0u;
+      dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_TEXT;
+      dyn_commands[dyn_command_count].shape_index = text_draw_count;
+      dyn_commands[dyn_command_count].entity = entity;
+      dyn_commands[dyn_command_count]._pad0 = order;
       text_draw_count += 1u;
-      shape_command_count += 1u;
+      dyn_command_count += 1u;
     }
 
     pen_x += glyph->advance * view.font_size;
   }
 }
 
-#define BLITZ_MIN_SCREEN_PX 1.0f
-
-static int rect_visible_in_view(u32 entity, float scale, float min_x,
+static int text_visible_in_view(u32 entity, float scale, float min_x,
                                 float min_y, float max_x, float max_y) {
   Vec2 position = world.positions[entity];
   Vec2 size = world.sizes[entity];
-  float rect_min_x = position.x;
-  float rect_min_y = position.y;
-  float rect_max_x = position.x + size.x;
-  float rect_max_y = position.y + size.y;
-  if (rect_max_x < min_x || rect_min_x > max_x || rect_max_y < min_y ||
-      rect_min_y > max_y) {
+  if (position.x + size.x < min_x || position.x > max_x ||
+      position.y + size.y < min_y || position.y > max_y) {
     return 0;
   }
-  // Only cull when sub-pixel in both axes so thin lines still render.
-  if (size.x * scale < BLITZ_MIN_SCREEN_PX &&
-      size.y * scale < BLITZ_MIN_SCREEN_PX) {
+  // Cull by line height: text below a few pixels tall is unreadable.
+  if (size.y * scale < BLITZ_MIN_TEXT_PX) {
     return 0;
   }
   return 1;
 }
 
-static void extract_render_draws(void) {
-  if (!render_list_dirty) {
+// Full unculled shape stream (rects/triangles/circles), rebuilt only on
+// structural change. The GPU compute pass culls it against the viewport.
+static void extract_static_shapes(void) {
+  if (!static_dirty) {
     return;
   }
 
@@ -628,10 +642,47 @@ static void extract_render_draws(void) {
   rect_draw_count = 0u;
   triangle_draw_count = 0u;
   circle_draw_count = 0u;
+  u32 base_required = BLITZ_COMPONENT_POSITION | BLITZ_COMPONENT_SIZE;
+
+  for (u32 order_index = 0u; order_index < world.draw_order_count;
+       order_index += 1u) {
+    u32 entity = world.draw_order[order_index];
+    if ((world.masks[entity] & base_required) != base_required) {
+      continue;
+    }
+    u32 order = order_index;
+    if (drag_active && world.selected[entity]) {
+      order |= BLITZ_DRAG_FLAG;
+    }
+    if (world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW) {
+      push_rect_draw(entity, order);
+    } else if (world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW) {
+      push_circle_draw(entity, order);
+    } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
+      push_triangle_draw(entity, order);
+    }
+  }
+
+  uniforms.style[2] = (float)shape_command_count;
+  uniforms.style[3] = (float)world.draw_order_count;
+  shape_command_version += 1u;
+  static_dirty = 0u;
+}
+
+// Per-frame stream: visible text glyphs plus selection/marquee overlays.
+// Overlays use an order key above every shape so they draw on top.
+static void extract_dynamic(void) {
+  if (!dynamic_dirty) {
+    return;
+  }
+
+  dyn_command_count = 0u;
+  dyn_rect_count = 0u;
   text_draw_count = 0u;
 
-  float half_w = uniforms.viewport_camera[0] * 0.5f / uniforms.style[0];
-  float half_h = uniforms.viewport_camera[1] * 0.5f / uniforms.style[0];
+  float scale = uniforms.style[0];
+  float half_w = uniforms.viewport_camera[0] * 0.5f / scale;
+  float half_h = uniforms.viewport_camera[1] * 0.5f / scale;
   float view_min_x = uniforms.viewport_camera[2] - half_w;
   float view_min_y = uniforms.viewport_camera[3] - half_h;
   float view_max_x = uniforms.viewport_camera[2] + half_w;
@@ -641,35 +692,36 @@ static void extract_render_draws(void) {
   for (u32 order_index = 0u; order_index < world.draw_order_count;
        order_index += 1u) {
     u32 entity = world.draw_order[order_index];
-    if ((world.masks[entity] & base_required) == base_required &&
-        rect_visible_in_view(entity, uniforms.style[0], view_min_x, view_min_y,
-                             view_max_x, view_max_y)) {
-      u32 has_rect = world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW;
-      u32 has_triangle = world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW;
-      u32 has_circle = world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW;
-      u32 has_text = world.masks[entity] & BLITZ_COMPONENT_TEXT_VIEW;
-      if (has_rect) {
-        push_rect_draw(entity);
-      } else if (has_circle) {
-        push_circle_draw(entity);
-      } else if (has_triangle) {
-        push_triangle_draw(entity);
-      } else if (has_text) {
-        push_text_draws(entity);
+    if ((world.masks[entity] & base_required) != base_required) {
+      continue;
+    }
+    if (!(world.masks[entity] & BLITZ_COMPONENT_TEXT_VIEW)) {
+      continue;
+    }
+    if (text_visible_in_view(entity, scale, view_min_x, view_min_y, view_max_x,
+                             view_max_y)) {
+      u32 order = order_index;
+      if (drag_active && world.selected[entity]) {
+        order |= BLITZ_DRAG_FLAG;
       }
+      push_text_draws(entity, order);
     }
   }
 
+  u32 overlay_order = world.draw_order_count + 1u;
+  if (drag_active) {
+    overlay_order |= BLITZ_DRAG_FLAG;
+  }
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
     u32 entity = world.draw_order[i];
     if (world.selected[entity]) {
-      push_selection_draw(entity);
+      push_selection_draw(entity, overlay_order);
     }
   }
-  push_marquee_draw();
-  uniforms.style[2] = (float)shape_command_count;
-  shape_command_version += 1u;
-  render_list_dirty = 0u;
+  push_marquee_draw(world.draw_order_count + 2u);
+  uniforms.style[3] = (float)world.draw_order_count;
+  dyn_version += 1u;
+  dynamic_dirty = 0u;
 }
 
 static void screen_to_world(float screen_x, float screen_y, float *world_x,
@@ -902,9 +954,16 @@ void blitz_init(void) {
   triangle_draw_count = 0u;
   circle_draw_count = 0u;
   text_draw_count = 0u;
+  dyn_command_count = 0u;
+  dyn_rect_count = 0u;
   shape_command_version = 0u;
-  render_list_dirty = 1u;
+  dyn_version = 0u;
+  static_dirty = 1u;
+  dynamic_dirty = 1u;
   dragging_selection = 0u;
+  drag_active = 0u;
+  drag_offset.x = 0.0f;
+  drag_offset.y = 0.0f;
   marquee_active = 0u;
   marquee_additive = 0u;
   marquee_candidate = BLITZ_INVALID_INDEX;
@@ -938,7 +997,8 @@ void blitz_init(void) {
   uniforms.font_params[3] = 0.0f;
 
   create_demo_world();
-  extract_render_draws();
+  extract_static_shapes();
+  extract_dynamic();
 }
 
 EXPORT("blitz_resize")
@@ -955,7 +1015,7 @@ void blitz_resize(float width, float height) {
                  0.005f, 12.0f);
       camera_fit_initialized = 1u;
     }
-    mark_render_list_dirty();
+    mark_dynamic_dirty();
   }
 }
 
@@ -963,15 +1023,15 @@ EXPORT("blitz_set_camera")
 void blitz_set_camera(float x, float y, float zoom) {
   uniforms.viewport_camera[2] = x;
   uniforms.viewport_camera[3] = y;
-  uniforms.style[0] = clampf(zoom, 0.15f, 12.0f);
-  mark_render_list_dirty();
+  uniforms.style[0] = clampf(zoom, 0.01f, 12.0f);
+  mark_dynamic_dirty();
 }
 
 EXPORT("blitz_pan")
 void blitz_pan(float dx_pixels, float dy_pixels) {
   uniforms.viewport_camera[2] -= dx_pixels / uniforms.style[0];
   uniforms.viewport_camera[3] -= dy_pixels / uniforms.style[0];
-  mark_render_list_dirty();
+  mark_dynamic_dirty();
 }
 
 EXPORT("blitz_zoom_at")
@@ -982,12 +1042,12 @@ void blitz_zoom_at(float screen_x, float screen_y, float zoom_delta) {
   float after_y = 0.0f;
 
   screen_to_world(screen_x, screen_y, &before_x, &before_y);
-  uniforms.style[0] = clampf(uniforms.style[0] * zoom_delta, 0.15f, 12.0f);
+  uniforms.style[0] = clampf(uniforms.style[0] * zoom_delta, 0.01f, 12.0f);
   screen_to_world(screen_x, screen_y, &after_x, &after_y);
 
   uniforms.viewport_camera[2] += before_x - after_x;
   uniforms.viewport_camera[3] += before_y - after_y;
-  mark_render_list_dirty();
+  mark_dynamic_dirty();
 }
 
 EXPORT("blitz_pointer_down")
@@ -995,21 +1055,16 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
   float world_x = 0.0f;
   float world_y = 0.0f;
   screen_to_world(screen_x, screen_y, &world_x, &world_y);
-  extract_render_draws();
 
-  for (u32 i = shape_command_count; i > 0u; i -= 1u) {
-    ShapeCommand command = shape_commands[i - 1u];
-    u32 entity = command.entity;
-    if (entity == BLITZ_INVALID_INDEX) {
-      continue;
-    }
+  for (u32 i = world.draw_order_count; i > 0u; i -= 1u) {
+    u32 entity = world.draw_order[i - 1u];
     if (!(world.masks[entity] & BLITZ_COMPONENT_SELECTABLE)) {
       continue;
     }
     u32 hit = 0u;
-    if (command.shape_kind == BLITZ_SHAPE_CIRCLE) {
+    if (world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW) {
       hit = (u32)point_in_circle(world_x, world_y, entity);
-    } else if (command.shape_kind == BLITZ_SHAPE_TRIANGLE) {
+    } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
       hit = (u32)point_in_triangle(world_x, world_y, entity);
     } else {
       hit = (u32)point_in_rect(world_x, world_y, entity);
@@ -1025,7 +1080,7 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
         marquee_start.x = world_x;
         marquee_start.y = world_y;
         marquee_end = marquee_start;
-        mark_render_list_dirty();
+        mark_dynamic_dirty();
         return 2u;
       }
       if (additive) {
@@ -1050,7 +1105,7 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
   marquee_start.x = world_x;
   marquee_start.y = world_y;
   marquee_end = marquee_start;
-  mark_render_list_dirty();
+  mark_dynamic_dirty();
   return 2u;
 }
 
@@ -1062,28 +1117,47 @@ void blitz_pointer_move(float screen_x, float screen_y) {
   if (marquee_active) {
     marquee_end.x = world_x;
     marquee_end.y = world_y;
-    mark_render_list_dirty();
+    mark_dynamic_dirty();
     return;
   }
   if (!dragging_selection) {
     return;
   }
 
-  float delta_x = world_x - drag_last_world.x;
-  float delta_y = world_y - drag_last_world.y;
-  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
-    if (world.selected[entity]) {
-      world.positions[entity].x += delta_x;
-      world.positions[entity].y += delta_y;
-    }
+  // First motion: rebuild once so the dragged commands get the drag flag, then
+  // each frame only updates the offset uniform (no extraction/re-upload).
+  if (!drag_active) {
+    drag_active = 1u;
+    drag_offset.x = 0.0f;
+    drag_offset.y = 0.0f;
+    mark_render_list_dirty();
   }
+  drag_offset.x += world_x - drag_last_world.x;
+  drag_offset.y += world_y - drag_last_world.y;
   drag_last_world.x = world_x;
   drag_last_world.y = world_y;
-  mark_render_list_dirty();
+  uniforms.font_params[2] = drag_offset.x;
+  uniforms.font_params[3] = drag_offset.y;
 }
 
 EXPORT("blitz_pointer_up")
 void blitz_pointer_up(void) {
+  if (drag_active) {
+    for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+      if (world.selected[entity]) {
+        world.positions[entity].x += drag_offset.x;
+        world.positions[entity].y += drag_offset.y;
+      }
+    }
+    drag_offset.x = 0.0f;
+    drag_offset.y = 0.0f;
+    uniforms.font_params[2] = 0.0f;
+    uniforms.font_params[3] = 0.0f;
+    drag_active = 0u;
+    dragging_selection = 0u;
+    mark_render_list_dirty();
+    return;
+  }
   dragging_selection = 0u;
   if (!marquee_active) {
     return;
@@ -1104,7 +1178,7 @@ void blitz_pointer_up(void) {
     }
     marquee_active = 0u;
     marquee_candidate = BLITZ_INVALID_INDEX;
-    mark_render_list_dirty();
+    mark_dynamic_dirty();
     return;
   }
 
@@ -1123,7 +1197,7 @@ void blitz_pointer_up(void) {
   }
   marquee_active = 0u;
   marquee_candidate = BLITZ_INVALID_INDEX;
-  mark_render_list_dirty();
+  mark_dynamic_dirty();
 }
 
 EXPORT("blitz_add_rect")
@@ -1133,6 +1207,7 @@ void blitz_add_rect(void) {
                                 uniforms.viewport_camera[3] + offset);
   spawn_count += 1u;
   select_only(entity);
+  mark_render_list_dirty();
 }
 
 EXPORT("blitz_add_circle")
@@ -1142,6 +1217,7 @@ void blitz_add_circle(void) {
                                   uniforms.viewport_camera[3] + offset);
   spawn_count += 1u;
   select_only(entity);
+  mark_render_list_dirty();
 }
 
 EXPORT("blitz_add_triangle")
@@ -1151,6 +1227,7 @@ void blitz_add_triangle(void) {
                                     uniforms.viewport_camera[3] + offset);
   spawn_count += 1u;
   select_only(entity);
+  mark_render_list_dirty();
 }
 
 EXPORT("blitz_add_text")
@@ -1160,6 +1237,7 @@ void blitz_add_text(void) {
                                 uniforms.viewport_camera[3] + offset);
   spawn_count += 1u;
   select_only(entity);
+  mark_render_list_dirty();
 }
 
 EXPORT("blitz_stress_test")
@@ -1231,7 +1309,7 @@ u32 blitz_uniform_f32_count(void) {
 
 EXPORT("blitz_shape_command_ptr")
 u32 blitz_shape_command_ptr(void) {
-  extract_render_draws();
+  extract_static_shapes();
   return (u32)&shape_commands[0];
 }
 
@@ -1252,7 +1330,7 @@ u32 blitz_shape_command_version(void) {
 
 EXPORT("blitz_rect_draw_ptr")
 u32 blitz_rect_draw_ptr(void) {
-  extract_render_draws();
+  extract_static_shapes();
   return (u32)&rect_draws[0];
 }
 
@@ -1268,7 +1346,7 @@ u32 blitz_rect_draw_count(void) {
 
 EXPORT("blitz_triangle_draw_ptr")
 u32 blitz_triangle_draw_ptr(void) {
-  extract_render_draws();
+  extract_static_shapes();
   return (u32)&triangle_draws[0];
 }
 
@@ -1284,7 +1362,7 @@ u32 blitz_triangle_draw_count(void) {
 
 EXPORT("blitz_circle_draw_ptr")
 u32 blitz_circle_draw_ptr(void) {
-  extract_render_draws();
+  extract_static_shapes();
   return (u32)&circle_draws[0];
 }
 
@@ -1300,7 +1378,7 @@ u32 blitz_circle_draw_count(void) {
 
 EXPORT("blitz_text_draw_ptr")
 u32 blitz_text_draw_ptr(void) {
-  extract_render_draws();
+  extract_dynamic();
   return (u32)&text_draws[0];
 }
 
@@ -1317,6 +1395,43 @@ u32 blitz_text_draw_count(void) {
 EXPORT("blitz_render_max_text_draws")
 u32 blitz_render_max_text_draws(void) {
   return BLITZ_MAX_TEXT_DRAWS;
+}
+
+EXPORT("blitz_dyn_command_ptr")
+u32 blitz_dyn_command_ptr(void) {
+  extract_dynamic();
+  return (u32)&dyn_commands[0];
+}
+
+EXPORT("blitz_dyn_command_count")
+u32 blitz_dyn_command_count(void) {
+  return dyn_command_count;
+}
+
+EXPORT("blitz_dyn_version")
+u32 blitz_dyn_version(void) {
+  return dyn_version;
+}
+
+EXPORT("blitz_dyn_rect_ptr")
+u32 blitz_dyn_rect_ptr(void) {
+  extract_dynamic();
+  return (u32)&dyn_rects[0];
+}
+
+EXPORT("blitz_dyn_rect_count")
+u32 blitz_dyn_rect_count(void) {
+  return dyn_rect_count;
+}
+
+EXPORT("blitz_render_max_dyn_commands")
+u32 blitz_render_max_dyn_commands(void) {
+  return BLITZ_MAX_DYN_COMMANDS;
+}
+
+EXPORT("blitz_render_max_dyn_rects")
+u32 blitz_render_max_dyn_rects(void) {
+  return BLITZ_MAX_DYN_RECTS;
 }
 
 EXPORT("blitz_entity_count")

@@ -10,6 +10,7 @@ import {
   Type as TypeIcon,
 } from "lucide";
 import shaderSource from "./shaders/rect.wgsl?raw";
+import cullSource from "./shaders/cull.wgsl?raw";
 import "./style.css";
 
 type BlitzExports = {
@@ -49,6 +50,13 @@ type BlitzExports = {
   blitz_text_draw_ptr(): number;
   blitz_text_draw_f32_count(): number;
   blitz_text_draw_count(): number;
+  blitz_dyn_command_ptr(): number;
+  blitz_dyn_command_count(): number;
+  blitz_dyn_version(): number;
+  blitz_dyn_rect_ptr(): number;
+  blitz_dyn_rect_count(): number;
+  blitz_render_max_dyn_commands(): number;
+  blitz_render_max_dyn_rects(): number;
   blitz_entity_count(): number;
   blitz_render_chunk_rects(): number;
   blitz_render_max_shapes(): number;
@@ -65,6 +73,7 @@ const stressTestElement = document.querySelector<HTMLButtonElement>("#stress-tes
 const sendToBackElement = document.querySelector<HTMLButtonElement>("#send-to-back");
 const bringToFrontElement = document.querySelector<HTMLButtonElement>("#bring-to-front");
 const deleteElement = document.querySelector<HTMLButtonElement>("#delete-selected");
+const zoomIndicatorElement = document.querySelector<HTMLDivElement>("#zoom-indicator");
 
 if (
   !canvasElement ||
@@ -76,7 +85,8 @@ if (
   !stressTestElement ||
   !sendToBackElement ||
   !bringToFrontElement ||
-  !deleteElement
+  !deleteElement ||
+  !zoomIndicatorElement
 ) {
   throw new Error("Blitz interface was not found.");
 }
@@ -91,6 +101,7 @@ const stressTestButton = stressTestElement;
 const sendToBackButton = sendToBackElement;
 const bringToFrontButton = bringToFrontElement;
 const deleteButton = deleteElement;
+const zoomIndicator = zoomIndicatorElement;
 
 createIcons({
   icons: {
@@ -143,6 +154,7 @@ async function boot() {
   }
 
   const format = navigator.gpu.getPreferredCanvasFormat();
+  const depthFormat: GPUTextureFormat = "depth32float";
   context.configure({
     device,
     format,
@@ -168,6 +180,10 @@ async function boot() {
   const textDrawF32Count = wasm.blitz_text_draw_f32_count();
   const textDrawBufferByteLength =
     wasm.blitz_render_max_text_draws() * textDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const maxDynCommands = wasm.blitz_render_max_dyn_commands();
+  const dynCommandBufferByteLength = maxDynCommands * shapeCommandU32Count * Uint32Array.BYTES_PER_ELEMENT;
+  const maxDynRects = wasm.blitz_render_max_dyn_rects();
+  const dynRectBufferByteLength = maxDynRects * rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
 
   const atlasResponse = await fetch(`${import.meta.env.BASE_URL}font-atlas.png`);
   if (!atlasResponse.ok) {
@@ -278,6 +294,33 @@ async function boot() {
     primitive: {
       topology: "triangle-list",
     },
+    depthStencil: {
+      format: depthFormat,
+      depthWriteEnabled: true,
+      depthCompare: "greater-equal",
+    },
+  });
+
+  const cullShader = device.createShaderModule({
+    label: "Blitz Cull Shader",
+    code: cullSource,
+  });
+  const cullBindGroupLayout = device.createBindGroupLayout({
+    label: "Blitz Cull Bind Group Layout",
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+    ],
+  });
+  const cullPipeline = device.createComputePipeline({
+    label: "Blitz Cull Pipeline",
+    layout: device.createPipelineLayout({ bindGroupLayouts: [cullBindGroupLayout] }),
+    compute: { module: cullShader, entryPoint: "cull_main" },
   });
 
   const shapeCommandStorageBuffer = device.createBuffer({
@@ -305,13 +348,66 @@ async function boot() {
     size: textDrawBufferByteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
-  const bindGroup = device.createBindGroup({
-    label: "Blitz Bind Group",
-    layout: bindGroupLayout,
+  // Compute-cull output: compacted visible static commands + indirect draw args.
+  const visibleCommandStorageBuffer = device.createBuffer({
+    label: "Blitz Visible Command Storage",
+    size: shapeCommandBufferByteLength,
+    usage: GPUBufferUsage.STORAGE,
+  });
+  const drawArgsBuffer = device.createBuffer({
+    label: "Blitz Draw Args",
+    size: 4 * Uint32Array.BYTES_PER_ELEMENT,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+  });
+  const dynCommandStorageBuffer = device.createBuffer({
+    label: "Blitz Dynamic Command Storage",
+    size: dynCommandBufferByteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const dynRectStorageBuffer = device.createBuffer({
+    label: "Blitz Dynamic Rect Storage",
+    size: dynRectBufferByteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+
+  const cullBindGroup = device.createBindGroup({
+    label: "Blitz Cull Bind Group",
+    layout: cullBindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: uniformBuffer } },
       { binding: 1, resource: { buffer: shapeCommandStorageBuffer } },
       { binding: 2, resource: { buffer: rectStorageBuffer } },
+      { binding: 3, resource: { buffer: triangleStorageBuffer } },
+      { binding: 4, resource: { buffer: circleStorageBuffer } },
+      { binding: 5, resource: { buffer: visibleCommandStorageBuffer } },
+      { binding: 6, resource: { buffer: drawArgsBuffer } },
+    ],
+  });
+  // Static pass draws the culled commands; text binding is unused (no text in
+  // the static stream) but the layout requires it.
+  const staticRenderBindGroup = device.createBindGroup({
+    label: "Blitz Static Render Bind Group",
+    layout: bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuffer } },
+      { binding: 1, resource: { buffer: visibleCommandStorageBuffer } },
+      { binding: 2, resource: { buffer: rectStorageBuffer } },
+      { binding: 3, resource: { buffer: triangleStorageBuffer } },
+      { binding: 4, resource: { buffer: circleStorageBuffer } },
+      { binding: 5, resource: { buffer: textStorageBuffer } },
+      { binding: 6, resource: fontAtlasTexture.createView() },
+      { binding: 7, resource: fontSampler },
+    ],
+  });
+  // Dynamic pass draws text + selection/marquee; triangle/circle bindings are
+  // unused but the layout requires them.
+  const dynamicRenderBindGroup = device.createBindGroup({
+    label: "Blitz Dynamic Render Bind Group",
+    layout: bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuffer } },
+      { binding: 1, resource: { buffer: dynCommandStorageBuffer } },
+      { binding: 2, resource: { buffer: dynRectStorageBuffer } },
       { binding: 3, resource: { buffer: triangleStorageBuffer } },
       { binding: 4, resource: { buffer: circleStorageBuffer } },
       { binding: 5, resource: { buffer: textStorageBuffer } },
@@ -322,15 +418,30 @@ async function boot() {
 
   let lastUploadedShapeCommandVersion = -1;
   let currentShapeCommandCount = 0;
+  let lastUploadedDynVersion = -1;
+  let currentDynCommandCount = 0;
+  let lastZoomPercent = -1;
+  const drawArgsReset = new Uint32Array([6, 0, 0, 0]);
+
+  let depthTexture: GPUTexture | null = null;
+  let depthView: GPUTextureView | null = null;
 
   const resize = () => {
     const dpr = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
     const height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
-    if (canvas.width !== width || canvas.height !== height) {
+    if (canvas.width !== width || canvas.height !== height || !depthTexture) {
       canvas.width = width;
       canvas.height = height;
       wasm.blitz_resize(width, height);
+      depthTexture?.destroy();
+      depthTexture = device.createTexture({
+        label: "Blitz Depth Texture",
+        size: [width, height],
+        format: depthFormat,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      depthView = depthTexture.createView();
     }
   };
 
@@ -513,63 +624,104 @@ async function boot() {
   const render = () => {
     resize();
 
+    // Call the trigger pointer first: it runs extract_static_shapes() (guarded
+    // by the dirty flag) so the version below reflects the latest build.
     const shapeCommandPtr = wasm.blitz_shape_command_ptr();
-    const shapeCommandCount = wasm.blitz_shape_command_count();
     const shapeCommandVersion = wasm.blitz_shape_command_version();
-    const rectDrawPtr = wasm.blitz_rect_draw_ptr();
-    const rectDrawCount = wasm.blitz_rect_draw_count();
-    const triangleDrawPtr = wasm.blitz_triangle_draw_ptr();
-    const triangleDrawCount = wasm.blitz_triangle_draw_count();
-    const circleDrawPtr = wasm.blitz_circle_draw_ptr();
-    const circleDrawCount = wasm.blitz_circle_draw_count();
-    const textDrawPtr = wasm.blitz_text_draw_ptr();
-    const textDrawCount = wasm.blitz_text_draw_count();
-
     if (shapeCommandVersion !== lastUploadedShapeCommandVersion) {
+      const shapeCommandCount = wasm.blitz_shape_command_count();
+      const rectDrawPtr = wasm.blitz_rect_draw_ptr();
+      const rectDrawCount = wasm.blitz_rect_draw_count();
+      const triangleDrawPtr = wasm.blitz_triangle_draw_ptr();
+      const triangleDrawCount = wasm.blitz_triangle_draw_count();
+      const circleDrawPtr = wasm.blitz_circle_draw_ptr();
+      const circleDrawCount = wasm.blitz_circle_draw_count();
       currentShapeCommandCount = shapeCommandCount;
       if (shapeCommandCount > 0) {
-        const wasmShapeCommands = new Uint32Array(
-          wasm.memory.buffer,
-          shapeCommandPtr,
-          shapeCommandCount * shapeCommandU32Count,
+        device.queue.writeBuffer(
+          shapeCommandStorageBuffer,
+          0,
+          new Uint32Array(wasm.memory.buffer, shapeCommandPtr, shapeCommandCount * shapeCommandU32Count),
         );
-        device.queue.writeBuffer(shapeCommandStorageBuffer, 0, wasmShapeCommands);
       }
       if (rectDrawCount > 0) {
-        const wasmRectDraws = new Float32Array(wasm.memory.buffer, rectDrawPtr, rectDrawCount * rectDrawF32Count);
-        device.queue.writeBuffer(rectStorageBuffer, 0, wasmRectDraws);
+        device.queue.writeBuffer(
+          rectStorageBuffer,
+          0,
+          new Float32Array(wasm.memory.buffer, rectDrawPtr, rectDrawCount * rectDrawF32Count),
+        );
       }
       if (triangleDrawCount > 0) {
-        const wasmTriangleDraws = new Float32Array(
-          wasm.memory.buffer,
-          triangleDrawPtr,
-          triangleDrawCount * triangleDrawF32Count,
+        device.queue.writeBuffer(
+          triangleStorageBuffer,
+          0,
+          new Float32Array(wasm.memory.buffer, triangleDrawPtr, triangleDrawCount * triangleDrawF32Count),
         );
-        device.queue.writeBuffer(triangleStorageBuffer, 0, wasmTriangleDraws);
       }
       if (circleDrawCount > 0) {
-        const wasmCircleDraws = new Float32Array(
-          wasm.memory.buffer,
-          circleDrawPtr,
-          circleDrawCount * circleDrawF32Count,
+        device.queue.writeBuffer(
+          circleStorageBuffer,
+          0,
+          new Float32Array(wasm.memory.buffer, circleDrawPtr, circleDrawCount * circleDrawF32Count),
         );
-        device.queue.writeBuffer(circleStorageBuffer, 0, wasmCircleDraws);
-      }
-      if (textDrawCount > 0) {
-        const wasmTextDraws = new Float32Array(
-          wasm.memory.buffer,
-          textDrawPtr,
-          textDrawCount * textDrawF32Count,
-        );
-        device.queue.writeBuffer(textStorageBuffer, 0, wasmTextDraws);
       }
       lastUploadedShapeCommandVersion = shapeCommandVersion;
+    }
+
+    const dynCommandPtr = wasm.blitz_dyn_command_ptr();
+    const dynVersion = wasm.blitz_dyn_version();
+    if (dynVersion !== lastUploadedDynVersion) {
+      const dynCommandCount = wasm.blitz_dyn_command_count();
+      const dynRectPtr = wasm.blitz_dyn_rect_ptr();
+      const dynRectCount = wasm.blitz_dyn_rect_count();
+      const textDrawPtr = wasm.blitz_text_draw_ptr();
+      const textDrawCount = wasm.blitz_text_draw_count();
+      currentDynCommandCount = dynCommandCount;
+      if (dynCommandCount > 0) {
+        device.queue.writeBuffer(
+          dynCommandStorageBuffer,
+          0,
+          new Uint32Array(wasm.memory.buffer, dynCommandPtr, dynCommandCount * shapeCommandU32Count),
+        );
+      }
+      if (dynRectCount > 0) {
+        device.queue.writeBuffer(
+          dynRectStorageBuffer,
+          0,
+          new Float32Array(wasm.memory.buffer, dynRectPtr, dynRectCount * rectDrawF32Count),
+        );
+      }
+      if (textDrawCount > 0) {
+        device.queue.writeBuffer(
+          textStorageBuffer,
+          0,
+          new Float32Array(wasm.memory.buffer, textDrawPtr, textDrawCount * textDrawF32Count),
+        );
+      }
+      lastUploadedDynVersion = dynVersion;
     }
 
     const uniforms = new Float32Array(wasm.memory.buffer, uniformPtr, wasm.blitz_uniform_f32_count());
     device.queue.writeBuffer(uniformBuffer, 0, uniforms);
 
+    const zoomPercent = Math.round(uniforms[4] * 100);
+    if (zoomPercent !== lastZoomPercent) {
+      lastZoomPercent = zoomPercent;
+      zoomIndicator.textContent = `${zoomPercent}%`;
+    }
+
+    device.queue.writeBuffer(drawArgsBuffer, 0, drawArgsReset);
+
     const encoder = device.createCommandEncoder({ label: "Blitz Render Encoder" });
+
+    if (currentShapeCommandCount > 0) {
+      const cullPass = encoder.beginComputePass({ label: "Blitz Cull Pass" });
+      cullPass.setPipeline(cullPipeline);
+      cullPass.setBindGroup(0, cullBindGroup);
+      cullPass.dispatchWorkgroups(Math.ceil(currentShapeCommandCount / 64));
+      cullPass.end();
+    }
+
     const pass = encoder.beginRenderPass({
       label: "Blitz Render Pass",
       colorAttachments: [
@@ -580,11 +732,21 @@ async function boot() {
           storeOp: "store",
         },
       ],
+      depthStencilAttachment: {
+        view: depthView!,
+        depthClearValue: 0.0,
+        depthLoadOp: "clear",
+        depthStoreOp: "store",
+      },
     });
     pass.setPipeline(shapePipeline);
     if (currentShapeCommandCount > 0) {
-      pass.setBindGroup(0, bindGroup);
-      pass.draw(6 * currentShapeCommandCount);
+      pass.setBindGroup(0, staticRenderBindGroup);
+      pass.drawIndirect(drawArgsBuffer, 0);
+    }
+    if (currentDynCommandCount > 0) {
+      pass.setBindGroup(0, dynamicRenderBindGroup);
+      pass.draw(6, currentDynCommandCount);
     }
     pass.end();
 

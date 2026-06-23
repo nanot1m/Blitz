@@ -4,6 +4,10 @@ struct BlitzUniforms {
   background_color: vec4f,
 };
 
+struct ShapeCommand {
+  kind_index_entity_pad: vec4u,
+};
+
 struct RectDraw {
   rect: vec4f,
   fill_color: vec4f,
@@ -30,18 +34,21 @@ struct CircleDraw {
 var<uniform> u: BlitzUniforms;
 
 @group(0) @binding(1)
-var<storage, read> rect_draws: array<RectDraw>;
+var<storage, read> shape_commands: array<ShapeCommand>;
 
 @group(0) @binding(2)
-var<storage, read> triangle_draws: array<TriangleDraw>;
+var<storage, read> rect_draws: array<RectDraw>;
 
 @group(0) @binding(3)
+var<storage, read> triangle_draws: array<TriangleDraw>;
+
+@group(0) @binding(4)
 var<storage, read> circle_draws: array<CircleDraw>;
 
 struct VertexOut {
   @builtin(position) position: vec4f,
   @location(0) world: vec2f,
-  @location(1) @interpolate(flat) draw_index: u32,
+  @location(1) @interpolate(flat) command_index: u32,
 };
 
 fn world_to_clip(world: vec2f) -> vec2f {
@@ -49,14 +56,10 @@ fn world_to_clip(world: vec2f) -> vec2f {
   return pixel / u.viewport_camera.xy * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0);
 }
 
-@vertex
-fn rect_vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
-  let draw_index = vertex_index / 6u;
-  let rect_vertex_index = vertex_index % 6u;
-  let draw = rect_draws[draw_index];
-  let rect_min = draw.rect.xy;
-  let rect_max = draw.rect.xy + draw.rect.zw;
-  var rect_positions = array<vec2f, 6>(
+fn rect_bounds(rect: vec4f, vertex_index: u32) -> vec2f {
+  let rect_min = rect.xy;
+  let rect_max = rect.xy + rect.zw;
+  var positions = array<vec2f, 6>(
     vec2f(rect_min.x, rect_min.y),
     vec2f(rect_max.x, rect_min.y),
     vec2f(rect_min.x, rect_max.y),
@@ -64,57 +67,43 @@ fn rect_vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
     vec2f(rect_max.x, rect_min.y),
     vec2f(rect_max.x, rect_max.y)
   );
+  return positions[vertex_index];
+}
 
-  let world = rect_positions[rect_vertex_index];
-  var out: VertexOut;
-  out.position = vec4f(world_to_clip(world), 0.0, 1.0);
-  out.world = world;
-  out.draw_index = draw_index;
-  return out;
+fn triangle_bounds(draw: TriangleDraw, vertex_index: u32) -> vec2f {
+  let top = draw.points_a.xy;
+  let right = draw.points_a.zw;
+  let left = draw.points_b.xy;
+  let bounds_min = min(top, min(right, left));
+  let bounds_max = max(top, max(right, left));
+  return rect_bounds(vec4f(bounds_min, bounds_max - bounds_min), vertex_index);
+}
+
+fn circle_bounds(circle: vec4f, vertex_index: u32) -> vec2f {
+  let center = circle.xy;
+  let radius = circle.z;
+  return rect_bounds(vec4f(center - vec2f(radius), vec2f(radius * 2.0)), vertex_index);
 }
 
 @vertex
-fn triangle_vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
-  let draw_index = vertex_index / 3u;
-  let triangle_vertex_index = vertex_index % 3u;
-  let draw = triangle_draws[draw_index];
-  var triangle_positions = array<vec2f, 3>(
-    draw.points_a.xy,
-    draw.points_a.zw,
-    draw.points_b.xy
-  );
+fn shape_vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
+  let command_index = vertex_index / 6u;
+  let shape_vertex_index = vertex_index % 6u;
+  let command = shape_commands[command_index].kind_index_entity_pad;
 
-  let world = triangle_positions[triangle_vertex_index];
+  var world: vec2f;
+  if (command.x == 0u) {
+    world = rect_bounds(rect_draws[command.y].rect, shape_vertex_index);
+  } else if (command.x == 1u) {
+    world = triangle_bounds(triangle_draws[command.y], shape_vertex_index);
+  } else {
+    world = circle_bounds(circle_draws[command.y].circle, shape_vertex_index);
+  }
+
   var out: VertexOut;
   out.position = vec4f(world_to_clip(world), 0.0, 1.0);
   out.world = world;
-  out.draw_index = draw_index;
-  return out;
-}
-
-@vertex
-fn circle_vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
-  let draw_index = vertex_index / 6u;
-  let circle_vertex_index = vertex_index % 6u;
-  let draw = circle_draws[draw_index];
-  let center = draw.circle.xy;
-  let radius = draw.circle.z;
-  let circle_min = center - vec2f(radius);
-  let circle_max = center + vec2f(radius);
-  var circle_positions = array<vec2f, 6>(
-    vec2f(circle_min.x, circle_min.y),
-    vec2f(circle_max.x, circle_min.y),
-    vec2f(circle_min.x, circle_max.y),
-    vec2f(circle_min.x, circle_max.y),
-    vec2f(circle_max.x, circle_min.y),
-    vec2f(circle_max.x, circle_max.y)
-  );
-
-  let world = circle_positions[circle_vertex_index];
-  var out: VertexOut;
-  out.position = vec4f(world_to_clip(world), 0.0, 1.0);
-  out.world = world;
-  out.draw_index = draw_index;
+  out.command_index = command_index;
   return out;
 }
 
@@ -131,6 +120,30 @@ fn segment_distance(point: vec2f, start: vec2f, end: vec2f) -> f32 {
   let offset = point - start;
   let projection = clamp(dot(offset, edge) / max(dot(edge, edge), 0.001), 0.0, 1.0);
   return length(offset - edge * projection);
+}
+
+fn triangle_sign(point: vec2f, start: vec2f, end: vec2f) -> f32 {
+  return (point.x - end.x) * (start.y - end.y) - (start.x - end.x) * (point.y - end.y);
+}
+
+fn triangle_alpha(world: vec2f, draw: TriangleDraw, edge_alpha: f32) -> f32 {
+  let top = draw.points_a.xy;
+  let right = draw.points_a.zw;
+  let left = draw.points_b.xy;
+  let s0 = triangle_sign(world, top, right);
+  let s1 = triangle_sign(world, right, left);
+  let s2 = triangle_sign(world, left, top);
+  let all_positive = s0 >= 0.0 && s1 >= 0.0 && s2 >= 0.0;
+  let all_negative = s0 <= 0.0 && s1 <= 0.0 && s2 <= 0.0;
+  if (!all_positive && !all_negative) {
+    return 0.0;
+  }
+
+  let distance_to_edge = min(
+    segment_distance(world, top, right),
+    min(segment_distance(world, right, left), segment_distance(world, left, top)),
+  );
+  return smoothstep(0.0, edge_alpha, distance_to_edge);
 }
 
 fn triangle_stroke(world: vec2f, draw: TriangleDraw, edge_alpha: f32) -> f32 {
@@ -151,32 +164,40 @@ fn circle_alpha(world: vec2f, draw: CircleDraw, inset: f32, edge_alpha: f32) -> 
 }
 
 @fragment
-fn rect_fragment_main(in: VertexOut) -> @location(0) vec4f {
-  let draw = rect_draws[in.draw_index];
+fn shape_fragment_main(in: VertexOut) -> @location(0) vec4f {
+  let command = shape_commands[in.command_index].kind_index_entity_pad;
   let edge_alpha = 1.0 / max(u.style.x, 0.001);
-  let inner = rect_alpha(in.world, draw.rect, draw.stroke_width_pad.x, edge_alpha);
-  let stroke = 1.0 - inner;
-  return mix(draw.fill_color, draw.stroke_color, stroke);
-}
+  var coverage: f32;
+  var stroke: f32;
+  var fill_color: vec4f;
+  var stroke_color: vec4f;
 
-@fragment
-fn triangle_fragment_main(in: VertexOut) -> @location(0) vec4f {
-  let draw = triangle_draws[in.draw_index];
-  let edge_alpha = 1.0 / max(u.style.x, 0.001);
-  let stroke = triangle_stroke(in.world, draw, edge_alpha);
-  return mix(draw.fill_color, draw.stroke_color, stroke);
-}
+  if (command.x == 0u) {
+    let draw = rect_draws[command.y];
+    coverage = rect_alpha(in.world, draw.rect, 0.0, edge_alpha);
+    let inner = rect_alpha(in.world, draw.rect, draw.stroke_width_pad.x, edge_alpha);
+    stroke = coverage * (1.0 - inner);
+    fill_color = draw.fill_color;
+    stroke_color = draw.stroke_color;
+  } else if (command.x == 1u) {
+    let draw = triangle_draws[command.y];
+    coverage = triangle_alpha(in.world, draw, edge_alpha);
+    stroke = coverage * triangle_stroke(in.world, draw, edge_alpha);
+    fill_color = draw.fill_color;
+    stroke_color = draw.stroke_color;
+  } else {
+    let draw = circle_draws[command.y];
+    coverage = circle_alpha(in.world, draw, 0.0, edge_alpha);
+    let inner = circle_alpha(in.world, draw, draw.stroke_width_pad.x, edge_alpha);
+    stroke = coverage * (1.0 - inner);
+    fill_color = draw.fill_color;
+    stroke_color = draw.stroke_color;
+  }
 
-@fragment
-fn circle_fragment_main(in: VertexOut) -> @location(0) vec4f {
-  let draw = circle_draws[in.draw_index];
-  let edge_alpha = 1.0 / max(u.style.x, 0.001);
-  let outer = circle_alpha(in.world, draw, 0.0, edge_alpha);
-  if (outer <= 0.001) {
+  if (coverage <= 0.001) {
     discard;
   }
-  let inner = circle_alpha(in.world, draw, draw.stroke_width_pad.x, edge_alpha);
-  let stroke = outer * (1.0 - inner);
-  let color = mix(draw.fill_color, draw.stroke_color, stroke);
-  return vec4f(color.rgb, color.a * outer);
+
+  let color = mix(fill_color, stroke_color, stroke);
+  return vec4f(color.rgb, color.a * coverage);
 }

@@ -18,20 +18,22 @@ type BlitzExports = {
   blitz_adjust_interaction_radius(deltaSteps: number): void;
   blitz_uniform_ptr(): number;
   blitz_uniform_f32_count(): number;
+  blitz_shape_command_ptr(): number;
+  blitz_shape_command_u32_count(): number;
+  blitz_shape_command_count(): number;
+  blitz_shape_command_version(): number;
   blitz_rect_draw_ptr(): number;
   blitz_rect_draw_f32_count(): number;
   blitz_rect_draw_count(): number;
-  blitz_rect_draw_version(): number;
   blitz_triangle_draw_ptr(): number;
   blitz_triangle_draw_f32_count(): number;
   blitz_triangle_draw_count(): number;
-  blitz_triangle_draw_version(): number;
   blitz_circle_draw_ptr(): number;
   blitz_circle_draw_f32_count(): number;
   blitz_circle_draw_count(): number;
-  blitz_circle_draw_version(): number;
   blitz_entity_count(): number;
   blitz_render_chunk_rects(): number;
+  blitz_render_max_shapes(): number;
   blitz_time(seconds: number): void;
 };
 
@@ -103,16 +105,15 @@ async function boot() {
     size: uniformByteLength,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
+  const maxShapes = wasm.blitz_render_max_shapes();
+  const shapeCommandU32Count = wasm.blitz_shape_command_u32_count();
+  const shapeCommandBufferByteLength = maxShapes * shapeCommandU32Count * Uint32Array.BYTES_PER_ELEMENT;
   const rectDrawF32Count = wasm.blitz_rect_draw_f32_count();
-  const rectDrawStrideBytes = rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const rectDrawBufferByteLength = maxShapes * rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const triangleDrawF32Count = wasm.blitz_triangle_draw_f32_count();
-  const triangleDrawStrideBytes = triangleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const triangleDrawBufferByteLength = maxShapes * triangleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const circleDrawF32Count = wasm.blitz_circle_draw_f32_count();
-  const circleDrawStrideBytes = circleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
-  const rectDrawChunkSize = wasm.blitz_render_chunk_rects();
-  const rectDrawChunkByteLength = rectDrawChunkSize * rectDrawStrideBytes;
-  const triangleDrawChunkByteLength = rectDrawChunkSize * triangleDrawStrideBytes;
-  const circleDrawChunkByteLength = rectDrawChunkSize * circleDrawStrideBytes;
+  const circleDrawBufferByteLength = maxShapes * circleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
 
   const shader = device.createShaderModule({
     label: "Blitz Shape Shader",
@@ -142,6 +143,11 @@ async function boot() {
         visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
         buffer: { type: "read-only-storage" },
       },
+      {
+        binding: 4,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: "read-only-storage" },
+      },
     ],
   });
   const pipelineLayout = device.createPipelineLayout({
@@ -149,16 +155,16 @@ async function boot() {
     bindGroupLayouts: [bindGroupLayout],
   });
 
-  const rectPipeline = device.createRenderPipeline({
-    label: "Blitz Stroked Rect Pipeline",
+  const shapePipeline = device.createRenderPipeline({
+    label: "Blitz Shape Pipeline",
     layout: pipelineLayout,
     vertex: {
       module: shader,
-      entryPoint: "rect_vertex_main",
+      entryPoint: "shape_vertex_main",
     },
     fragment: {
       module: shader,
-      entryPoint: "rect_fragment_main",
+      entryPoint: "shape_fragment_main",
       targets: [{ format }],
     },
     primitive: {
@@ -166,75 +172,40 @@ async function boot() {
     },
   });
 
-  const trianglePipeline = device.createRenderPipeline({
-    label: "Blitz Stroked Triangle Pipeline",
-    layout: pipelineLayout,
-    vertex: {
-      module: shader,
-      entryPoint: "triangle_vertex_main",
-    },
-    fragment: {
-      module: shader,
-      entryPoint: "triangle_fragment_main",
-      targets: [{ format }],
-    },
-    primitive: {
-      topology: "triangle-list",
-    },
+  const shapeCommandStorageBuffer = device.createBuffer({
+    label: "Blitz Shape Command Storage",
+    size: shapeCommandBufferByteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const rectStorageBuffer = device.createBuffer({
+    label: "Blitz Rect Draw Storage",
+    size: rectDrawBufferByteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const triangleStorageBuffer = device.createBuffer({
+    label: "Blitz Triangle Draw Storage",
+    size: triangleDrawBufferByteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const circleStorageBuffer = device.createBuffer({
+    label: "Blitz Circle Draw Storage",
+    size: circleDrawBufferByteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const bindGroup = device.createBindGroup({
+    label: "Blitz Bind Group",
+    layout: bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuffer } },
+      { binding: 1, resource: { buffer: shapeCommandStorageBuffer } },
+      { binding: 2, resource: { buffer: rectStorageBuffer } },
+      { binding: 3, resource: { buffer: triangleStorageBuffer } },
+      { binding: 4, resource: { buffer: circleStorageBuffer } },
+    ],
   });
 
-  const circlePipeline = device.createRenderPipeline({
-    label: "Blitz Stroked Circle Pipeline",
-    layout: pipelineLayout,
-    vertex: {
-      module: shader,
-      entryPoint: "circle_vertex_main",
-    },
-    fragment: {
-      module: shader,
-      entryPoint: "circle_fragment_main",
-      targets: [{ format }],
-    },
-    primitive: {
-      topology: "triangle-list",
-    },
-  });
-
-  const rectChunks = Array.from({ length: 4 }, (_, index) => {
-    const rectStorageBuffer = device.createBuffer({
-      label: `Blitz Rect Draw Storage ${index}`,
-      size: rectDrawChunkByteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    const triangleStorageBuffer = device.createBuffer({
-      label: `Blitz Triangle Draw Storage ${index}`,
-      size: triangleDrawChunkByteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    const circleStorageBuffer = device.createBuffer({
-      label: `Blitz Circle Draw Storage ${index}`,
-      size: circleDrawChunkByteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    const bindGroup = device.createBindGroup({
-      label: `Blitz Bind Group ${index}`,
-      layout: bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: uniformBuffer } },
-        { binding: 1, resource: { buffer: rectStorageBuffer } },
-        { binding: 2, resource: { buffer: triangleStorageBuffer } },
-        { binding: 3, resource: { buffer: circleStorageBuffer } },
-      ],
-    });
-    return { bindGroup, rectStorageBuffer, triangleStorageBuffer, circleStorageBuffer };
-  });
-
-  let lastUploadedRectDrawVersion = -1;
-  let lastUploadedTriangleDrawVersion = -1;
-  let lastUploadedCircleDrawVersion = -1;
-  let currentRectDrawCount = 0;
-  let currentTriangleDrawCount = 0;
-  let currentCircleDrawCount = 0;
+  let lastUploadedShapeCommandVersion = -1;
+  let currentShapeCommandCount = 0;
 
   const resize = () => {
     const dpr = window.devicePixelRatio || 1;
@@ -409,71 +380,47 @@ async function boot() {
     resize();
     wasm.blitz_time(timeMs / 1000);
 
+    const shapeCommandPtr = wasm.blitz_shape_command_ptr();
+    const shapeCommandCount = wasm.blitz_shape_command_count();
+    const shapeCommandVersion = wasm.blitz_shape_command_version();
     const rectDrawPtr = wasm.blitz_rect_draw_ptr();
     const rectDrawCount = wasm.blitz_rect_draw_count();
-    const rectDrawVersion = wasm.blitz_rect_draw_version();
     const triangleDrawPtr = wasm.blitz_triangle_draw_ptr();
     const triangleDrawCount = wasm.blitz_triangle_draw_count();
-    const triangleDrawVersion = wasm.blitz_triangle_draw_version();
     const circleDrawPtr = wasm.blitz_circle_draw_ptr();
     const circleDrawCount = wasm.blitz_circle_draw_count();
-    const circleDrawVersion = wasm.blitz_circle_draw_version();
 
-    if (rectDrawVersion !== lastUploadedRectDrawVersion) {
-      currentRectDrawCount = rectDrawCount;
-      for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
-        const chunkStart = chunkIndex * rectDrawChunkSize;
-        const chunkRectCount = Math.max(0, Math.min(rectDrawChunkSize, rectDrawCount - chunkStart));
-        if (chunkRectCount === 0) {
-          continue;
-        }
-
-        const wasmRectDraws = new Float32Array(
+    if (shapeCommandVersion !== lastUploadedShapeCommandVersion) {
+      currentShapeCommandCount = shapeCommandCount;
+      if (shapeCommandCount > 0) {
+        const wasmShapeCommands = new Uint32Array(
           wasm.memory.buffer,
-          rectDrawPtr + chunkStart * rectDrawStrideBytes,
-          chunkRectCount * rectDrawF32Count,
+          shapeCommandPtr,
+          shapeCommandCount * shapeCommandU32Count,
         );
-        device.queue.writeBuffer(rectChunks[chunkIndex].rectStorageBuffer, 0, wasmRectDraws);
+        device.queue.writeBuffer(shapeCommandStorageBuffer, 0, wasmShapeCommands);
       }
-      lastUploadedRectDrawVersion = rectDrawVersion;
-    }
-
-    if (triangleDrawVersion !== lastUploadedTriangleDrawVersion) {
-      currentTriangleDrawCount = triangleDrawCount;
-      for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
-        const chunkStart = chunkIndex * rectDrawChunkSize;
-        const chunkTriangleCount = Math.max(0, Math.min(rectDrawChunkSize, triangleDrawCount - chunkStart));
-        if (chunkTriangleCount === 0) {
-          continue;
-        }
-
+      if (rectDrawCount > 0) {
+        const wasmRectDraws = new Float32Array(wasm.memory.buffer, rectDrawPtr, rectDrawCount * rectDrawF32Count);
+        device.queue.writeBuffer(rectStorageBuffer, 0, wasmRectDraws);
+      }
+      if (triangleDrawCount > 0) {
         const wasmTriangleDraws = new Float32Array(
           wasm.memory.buffer,
-          triangleDrawPtr + chunkStart * triangleDrawStrideBytes,
-          chunkTriangleCount * triangleDrawF32Count,
+          triangleDrawPtr,
+          triangleDrawCount * triangleDrawF32Count,
         );
-        device.queue.writeBuffer(rectChunks[chunkIndex].triangleStorageBuffer, 0, wasmTriangleDraws);
+        device.queue.writeBuffer(triangleStorageBuffer, 0, wasmTriangleDraws);
       }
-      lastUploadedTriangleDrawVersion = triangleDrawVersion;
-    }
-
-    if (circleDrawVersion !== lastUploadedCircleDrawVersion) {
-      currentCircleDrawCount = circleDrawCount;
-      for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
-        const chunkStart = chunkIndex * rectDrawChunkSize;
-        const chunkCircleCount = Math.max(0, Math.min(rectDrawChunkSize, circleDrawCount - chunkStart));
-        if (chunkCircleCount === 0) {
-          continue;
-        }
-
+      if (circleDrawCount > 0) {
         const wasmCircleDraws = new Float32Array(
           wasm.memory.buffer,
-          circleDrawPtr + chunkStart * circleDrawStrideBytes,
-          chunkCircleCount * circleDrawF32Count,
+          circleDrawPtr,
+          circleDrawCount * circleDrawF32Count,
         );
-        device.queue.writeBuffer(rectChunks[chunkIndex].circleStorageBuffer, 0, wasmCircleDraws);
+        device.queue.writeBuffer(circleStorageBuffer, 0, wasmCircleDraws);
       }
-      lastUploadedCircleDrawVersion = circleDrawVersion;
+      lastUploadedShapeCommandVersion = shapeCommandVersion;
     }
 
     const uniforms = new Float32Array(wasm.memory.buffer, uniformPtr, wasm.blitz_uniform_f32_count());
@@ -491,40 +438,10 @@ async function boot() {
         },
       ],
     });
-    pass.setPipeline(rectPipeline);
-    for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
-      const chunkStart = chunkIndex * rectDrawChunkSize;
-      const chunkRectCount = Math.max(0, Math.min(rectDrawChunkSize, currentRectDrawCount - chunkStart));
-      if (chunkRectCount === 0) {
-        continue;
-      }
-
-      pass.setBindGroup(0, rectChunks[chunkIndex].bindGroup);
-      pass.draw(6 * chunkRectCount);
-    }
-
-    pass.setPipeline(trianglePipeline);
-    for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
-      const chunkStart = chunkIndex * rectDrawChunkSize;
-      const chunkTriangleCount = Math.max(0, Math.min(rectDrawChunkSize, currentTriangleDrawCount - chunkStart));
-      if (chunkTriangleCount === 0) {
-        continue;
-      }
-
-      pass.setBindGroup(0, rectChunks[chunkIndex].bindGroup);
-      pass.draw(3 * chunkTriangleCount);
-    }
-
-    pass.setPipeline(circlePipeline);
-    for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
-      const chunkStart = chunkIndex * rectDrawChunkSize;
-      const chunkCircleCount = Math.max(0, Math.min(rectDrawChunkSize, currentCircleDrawCount - chunkStart));
-      if (chunkCircleCount === 0) {
-        continue;
-      }
-
-      pass.setBindGroup(0, rectChunks[chunkIndex].bindGroup);
-      pass.draw(6 * chunkCircleCount);
+    pass.setPipeline(shapePipeline);
+    if (currentShapeCommandCount > 0) {
+      pass.setBindGroup(0, bindGroup);
+      pass.draw(6 * currentShapeCommandCount);
     }
     pass.end();
 

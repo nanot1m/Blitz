@@ -24,11 +24,6 @@ const wasmExports = [
   "blitz_pointer_down",
   "blitz_pointer_move",
   "blitz_pointer_up",
-  "blitz_set_interaction_mode",
-  "blitz_interaction_move",
-  "blitz_interaction_click",
-  "blitz_interaction_leave",
-  "blitz_adjust_interaction_radius",
   "blitz_uniform_ptr",
   "blitz_uniform_f32_count",
   "blitz_shape_command_ptr",
@@ -51,7 +46,6 @@ const wasmExports = [
   "blitz_render_chunk_rects",
   "blitz_render_max_shapes",
   "blitz_render_max_text_draws",
-  "blitz_time",
 ];
 
 const commandAvailable = (command) => {

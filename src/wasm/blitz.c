@@ -1,5 +1,4 @@
 typedef unsigned int u32;
-typedef int i32;
 
 #include "font.generated.h"
 
@@ -11,10 +10,6 @@ typedef int i32;
 #define BLITZ_MAX_RECT_DRAWS (BLITZ_RENDER_CHUNK_RECTS * BLITZ_RENDER_CHUNKS)
 #define BLITZ_MAX_TEXT_DRAWS 4096u
 
-#define BLITZ_GRID_SIZE 1024u
-#define BLITZ_GRID_CELL_SIZE 128.0f
-#define BLITZ_GRID_ORIGIN -65536.0f
-#define BLITZ_GRID_CELL_COUNT (BLITZ_GRID_SIZE * BLITZ_GRID_SIZE)
 #define BLITZ_INVALID_INDEX 0xffffffffu
 
 #define BLITZ_COMPONENT_POSITION 1u
@@ -24,21 +19,10 @@ typedef int i32;
 #define BLITZ_COMPONENT_CIRCLE_VIEW 16u
 #define BLITZ_COMPONENT_TEXT_VIEW 32u
 
-#define BLITZ_MODE_DRAG 0u
-#define BLITZ_MODE_PUSHBACK 1u
-#define BLITZ_MODE_TRIANGLE 2u
-#define BLITZ_MODE_CIRCLE 3u
-#define BLITZ_MODE_RECT 4u
 #define BLITZ_SHAPE_RECT 0u
 #define BLITZ_SHAPE_TRIANGLE 1u
 #define BLITZ_SHAPE_CIRCLE 2u
 #define BLITZ_SHAPE_TEXT 3u
-#define BLITZ_PUSHBACK_RADIUS_DEFAULT 140.0f
-#define BLITZ_PUSHBACK_RADIUS_MIN 24.0f
-#define BLITZ_PUSHBACK_RADIUS_MAX 640.0f
-#define BLITZ_PUSHBACK_RADIUS_STEP 24.0f
-#define BLITZ_PUSHBACK_DISTANCE 42.0f
-#define BLITZ_PUSHBACK_SPEED 12.0f
 
 typedef struct Vec2 {
   float x;
@@ -124,17 +108,11 @@ typedef struct World {
   u32 entity_count;
   u32 masks[BLITZ_MAX_ENTITIES];
   Vec2 positions[BLITZ_MAX_ENTITIES];
-  Vec2 base_positions[BLITZ_MAX_ENTITIES];
   Vec2 sizes[BLITZ_MAX_ENTITIES];
   RectView rect_views[BLITZ_MAX_ENTITIES];
   TriangleView triangle_views[BLITZ_MAX_ENTITIES];
   CircleView circle_views[BLITZ_MAX_ENTITIES];
   TextView text_views[BLITZ_MAX_ENTITIES];
-  u32 grid_heads[BLITZ_GRID_CELL_COUNT];
-  u32 grid_next[BLITZ_MAX_ENTITIES];
-  u32 grid_cells[BLITZ_MAX_ENTITIES];
-  u32 pushback_active[BLITZ_MAX_ENTITIES];
-  u32 pushback_entities[BLITZ_MAX_ENTITIES];
 } World;
 
 static BlitzUniforms uniforms;
@@ -153,21 +131,7 @@ static u32 shape_command_version;
 static u32 render_list_dirty;
 static u32 dragging_entity;
 static Vec2 drag_offset;
-static u32 interaction_mode;
-static u32 pushback_active_count;
-static u32 pushback_cursor_active;
-static Vec2 pushback_cursor;
-static float pushback_radius;
-static float last_time_seconds;
 static u32 camera_fit_initialized;
-
-static float floorf_local(float value) {
-  i32 truncated = (i32)value;
-  if ((float)truncated > value) {
-    truncated -= 1;
-  }
-  return (float)truncated;
-}
 
 static float clampf(float value, float min_value, float max_value) {
   if (value < min_value) {
@@ -179,72 +143,18 @@ static float clampf(float value, float min_value, float max_value) {
   return value;
 }
 
-static float absf_local(float value) {
-  return value < 0.0f ? -value : value;
-}
-
 static float minf_local(float a, float b) {
   return a < b ? a : b;
-}
-
-static float sqrtf_local(float value) {
-  if (value <= 0.0f) {
-    return 0.0f;
-  }
-
-  float estimate = value;
-  for (u32 i = 0u; i < 8u; i += 1u) {
-    estimate = 0.5f * (estimate + value / estimate);
-  }
-  return estimate;
-}
-
-static i32 clampi(i32 value, i32 min_value, i32 max_value) {
-  if (value < min_value) {
-    return min_value;
-  }
-  if (value > max_value) {
-    return max_value;
-  }
-  return value;
-}
-
-static i32 grid_coord(float world_position) {
-  float cell = (world_position - BLITZ_GRID_ORIGIN) / BLITZ_GRID_CELL_SIZE;
-  return (i32)floorf_local(cell);
-}
-
-static u32 grid_index(i32 x, i32 y) {
-  return (u32)y * BLITZ_GRID_SIZE + (u32)x;
-}
-
-static u32 grid_cell_for_position(Vec2 position) {
-  i32 x = grid_coord(position.x);
-  i32 y = grid_coord(position.y);
-  if (x < 0 || y < 0 || x >= (i32)BLITZ_GRID_SIZE ||
-      y >= (i32)BLITZ_GRID_SIZE) {
-    return BLITZ_INVALID_INDEX;
-  }
-  return grid_index(x, y);
 }
 
 static void mark_render_list_dirty(void) {
   render_list_dirty = 1u;
 }
 
-static void grid_clear(void) {
-  for (u32 i = 0u; i < BLITZ_GRID_CELL_COUNT; i += 1u) {
-    world.grid_heads[i] = BLITZ_INVALID_INDEX;
-  }
-}
-
 static u32 ecs_create_entity(void) {
   u32 entity = world.entity_count;
   if (entity < BLITZ_MAX_ENTITIES) {
     world.entity_count += 1u;
-    world.grid_next[entity] = BLITZ_INVALID_INDEX;
-    world.grid_cells[entity] = BLITZ_INVALID_INDEX;
-    world.pushback_active[entity] = 0u;
     return entity;
   }
   return BLITZ_INVALID_INDEX;
@@ -256,8 +166,6 @@ static void ecs_set_position(u32 entity, float x, float y) {
   }
   world.positions[entity].x = x;
   world.positions[entity].y = y;
-  world.base_positions[entity].x = x;
-  world.base_positions[entity].y = y;
   world.masks[entity] |= BLITZ_COMPONENT_POSITION;
 }
 
@@ -281,28 +189,6 @@ static void ecs_set_rect_view(u32 entity, Color fill_color, Color stroke_color,
   world.masks[entity] |= BLITZ_COMPONENT_RECT_VIEW;
 }
 
-static void ecs_set_triangle_view(u32 entity, Color fill_color,
-                                  Color stroke_color, float stroke_width) {
-  if (entity == BLITZ_INVALID_INDEX) {
-    return;
-  }
-  world.triangle_views[entity].fill_color = fill_color;
-  world.triangle_views[entity].stroke_color = stroke_color;
-  world.triangle_views[entity].stroke_width = stroke_width;
-  world.masks[entity] |= BLITZ_COMPONENT_TRIANGLE_VIEW;
-}
-
-static void ecs_set_circle_view(u32 entity, Color fill_color,
-                                Color stroke_color, float stroke_width) {
-  if (entity == BLITZ_INVALID_INDEX) {
-    return;
-  }
-  world.circle_views[entity].fill_color = fill_color;
-  world.circle_views[entity].stroke_color = stroke_color;
-  world.circle_views[entity].stroke_width = stroke_width;
-  world.masks[entity] |= BLITZ_COMPONENT_CIRCLE_VIEW;
-}
-
 static void ecs_set_text_view(u32 entity, const char *text, Color color,
                               float font_size, float origin_x,
                               float baseline_offset) {
@@ -317,70 +203,13 @@ static void ecs_set_text_view(u32 entity, const char *text, Color color,
   world.masks[entity] |= BLITZ_COMPONENT_TEXT_VIEW;
 }
 
-static void grid_insert(u32 entity) {
-  if (entity == BLITZ_INVALID_INDEX) {
-    return;
-  }
-  u32 cell = grid_cell_for_position(world.positions[entity]);
-  if (cell == BLITZ_INVALID_INDEX) {
-    world.grid_cells[entity] = BLITZ_INVALID_INDEX;
-    return;
-  }
-
-  world.grid_next[entity] = world.grid_heads[cell];
-  world.grid_heads[cell] = entity;
-  world.grid_cells[entity] = cell;
-}
-
-static void grid_remove(u32 entity) {
-  if (entity == BLITZ_INVALID_INDEX) {
-    return;
-  }
-
-  u32 cell = world.grid_cells[entity];
-  if (cell == BLITZ_INVALID_INDEX) {
-    return;
-  }
-
-  u32 current = world.grid_heads[cell];
-  u32 previous = BLITZ_INVALID_INDEX;
-  while (current != BLITZ_INVALID_INDEX) {
-    if (current == entity) {
-      if (previous == BLITZ_INVALID_INDEX) {
-        world.grid_heads[cell] = world.grid_next[current];
-      } else {
-        world.grid_next[previous] = world.grid_next[current];
-      }
-      world.grid_next[current] = BLITZ_INVALID_INDEX;
-      world.grid_cells[current] = BLITZ_INVALID_INDEX;
-      return;
-    }
-    previous = current;
-    current = world.grid_next[current];
-  }
-}
-
-static void grid_update(u32 entity) {
-  u32 previous_cell = world.grid_cells[entity];
-  u32 next_cell = grid_cell_for_position(world.positions[entity]);
-  if (previous_cell == next_cell) {
-    return;
-  }
-
-  grid_remove(entity);
-  grid_insert(entity);
-}
-
-static void set_entity_base_position(u32 entity, float x, float y) {
+static void set_entity_position(u32 entity, float x, float y) {
   if (entity == BLITZ_INVALID_INDEX) {
     return;
   }
 
   world.positions[entity].x = x;
   world.positions[entity].y = y;
-  world.base_positions[entity].x = x;
-  world.base_positions[entity].y = y;
-  grid_update(entity);
   mark_render_list_dirty();
 }
 
@@ -571,105 +400,6 @@ static void push_text_draws(u32 entity) {
   }
 }
 
-static int entity_in_cursor_radius_for_mode(u32 entity, u32 mode) {
-  if (interaction_mode != mode || !pushback_cursor_active) {
-    return 0;
-  }
-
-  Vec2 position = world.positions[entity];
-  Vec2 size = world.sizes[entity];
-  float center_x = position.x + size.x * 0.5f;
-  float center_y = position.y + size.y * 0.5f;
-  float dx = center_x - pushback_cursor.x;
-  float dy = center_y - pushback_cursor.y;
-  float radius_sq = pushback_radius * pushback_radius;
-  return dx * dx + dy * dy <= radius_sq;
-}
-
-static void replace_entity_with_mode_shape(u32 entity) {
-  if (entity == BLITZ_INVALID_INDEX) {
-    return;
-  }
-
-  if (interaction_mode == BLITZ_MODE_RECT &&
-      (world.masks[entity] &
-       (BLITZ_COMPONENT_RECT_VIEW | BLITZ_COMPONENT_TRIANGLE_VIEW |
-        BLITZ_COMPONENT_CIRCLE_VIEW))) {
-    world.masks[entity] |= BLITZ_COMPONENT_RECT_VIEW;
-    world.masks[entity] &= ~BLITZ_COMPONENT_TRIANGLE_VIEW;
-    world.masks[entity] &= ~BLITZ_COMPONENT_CIRCLE_VIEW;
-  } else if (interaction_mode == BLITZ_MODE_TRIANGLE &&
-      (world.masks[entity] &
-       (BLITZ_COMPONENT_RECT_VIEW | BLITZ_COMPONENT_TRIANGLE_VIEW |
-        BLITZ_COMPONENT_CIRCLE_VIEW))) {
-    world.masks[entity] |= BLITZ_COMPONENT_TRIANGLE_VIEW;
-    world.masks[entity] &= ~BLITZ_COMPONENT_RECT_VIEW;
-    world.masks[entity] &= ~BLITZ_COMPONENT_CIRCLE_VIEW;
-  } else if (interaction_mode == BLITZ_MODE_CIRCLE &&
-             (world.masks[entity] &
-              (BLITZ_COMPONENT_RECT_VIEW | BLITZ_COMPONENT_TRIANGLE_VIEW |
-               BLITZ_COMPONENT_CIRCLE_VIEW))) {
-    world.masks[entity] |= BLITZ_COMPONENT_CIRCLE_VIEW;
-    world.masks[entity] &= ~BLITZ_COMPONENT_RECT_VIEW;
-    world.masks[entity] &= ~BLITZ_COMPONENT_TRIANGLE_VIEW;
-  }
-}
-
-static int entity_in_cursor_radius(u32 entity) {
-  if (!pushback_cursor_active) {
-    return 0;
-  }
-
-  Vec2 position = world.positions[entity];
-  Vec2 size = world.sizes[entity];
-  float center_x = position.x + size.x * 0.5f;
-  float center_y = position.y + size.y * 0.5f;
-  float dx = center_x - pushback_cursor.x;
-  float dy = center_y - pushback_cursor.y;
-  float radius_sq = pushback_radius * pushback_radius;
-  return dx * dx + dy * dy <= radius_sq;
-}
-
-static void replace_cursor_radius_with_mode_shape(void) {
-  if (!pushback_cursor_active ||
-      (interaction_mode != BLITZ_MODE_RECT && interaction_mode != BLITZ_MODE_TRIANGLE &&
-       interaction_mode != BLITZ_MODE_CIRCLE)) {
-    return;
-  }
-
-  i32 min_cell_x =
-      clampi(grid_coord(pushback_cursor.x - pushback_radius) - 1, 0,
-             (i32)BLITZ_GRID_SIZE - 1);
-  i32 min_cell_y =
-      clampi(grid_coord(pushback_cursor.y - pushback_radius) - 1, 0,
-             (i32)BLITZ_GRID_SIZE - 1);
-  i32 max_cell_x =
-      clampi(grid_coord(pushback_cursor.x + pushback_radius) + 1, 0,
-             (i32)BLITZ_GRID_SIZE - 1);
-  i32 max_cell_y =
-      clampi(grid_coord(pushback_cursor.y + pushback_radius) + 1, 0,
-             (i32)BLITZ_GRID_SIZE - 1);
-
-  u32 base_required = BLITZ_COMPONENT_POSITION | BLITZ_COMPONENT_SIZE;
-  for (i32 y = min_cell_y; y <= max_cell_y; y += 1) {
-    for (i32 x = min_cell_x; x <= max_cell_x; x += 1) {
-      u32 entity = world.grid_heads[grid_index(x, y)];
-      while (entity != BLITZ_INVALID_INDEX) {
-        if ((world.masks[entity] & base_required) == base_required &&
-            (world.masks[entity] &
-             (BLITZ_COMPONENT_RECT_VIEW | BLITZ_COMPONENT_TRIANGLE_VIEW |
-              BLITZ_COMPONENT_CIRCLE_VIEW)) &&
-            entity_in_cursor_radius(entity)) {
-          replace_entity_with_mode_shape(entity);
-        }
-        entity = world.grid_next[entity];
-      }
-    }
-  }
-
-  mark_render_list_dirty();
-}
-
 static int rect_intersects_view(u32 entity, float min_x, float min_y,
                                 float max_x, float max_y) {
   Vec2 position = world.positions[entity];
@@ -709,23 +439,7 @@ static void extract_render_draws(void) {
       u32 has_triangle = world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW;
       u32 has_circle = world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW;
       u32 has_text = world.masks[entity] & BLITZ_COMPONENT_TEXT_VIEW;
-      u32 has_shape = has_rect || has_triangle || has_circle;
-      u32 draw_circle =
-          has_shape &&
-          entity_in_cursor_radius_for_mode(entity, BLITZ_MODE_CIRCLE);
-      u32 draw_triangle =
-          has_shape &&
-          entity_in_cursor_radius_for_mode(entity, BLITZ_MODE_TRIANGLE);
-      u32 draw_rect =
-          has_shape &&
-          entity_in_cursor_radius_for_mode(entity, BLITZ_MODE_RECT);
-      if (draw_rect) {
-        push_rect_draw(entity);
-      } else if (draw_circle) {
-        push_circle_draw(entity);
-      } else if (draw_triangle) {
-        push_triangle_draw(entity);
-      } else if (has_rect) {
+      if (has_rect) {
         push_rect_draw(entity);
       } else if (has_circle) {
         push_circle_draw(entity);
@@ -800,148 +514,12 @@ static u32 start_dragging_entity(float world_x, float world_y, u32 entity) {
   return 1u;
 }
 
-static void pushback_track_entity(u32 entity) {
-  if (entity == BLITZ_INVALID_INDEX || world.pushback_active[entity]) {
-    return;
-  }
-
-  world.pushback_active[entity] = 1u;
-  world.pushback_entities[pushback_active_count] = entity;
-  pushback_active_count += 1u;
-}
-
-static Vec2 pushback_target_for_entity(u32 entity, u32 *in_range) {
-  Vec2 base = world.base_positions[entity];
-  Vec2 size = world.sizes[entity];
-  Vec2 target = base;
-  *in_range = 0u;
-
-  if (!pushback_cursor_active || interaction_mode != BLITZ_MODE_PUSHBACK) {
-    return target;
-  }
-
-  float center_x = base.x + size.x * 0.5f;
-  float center_y = base.y + size.y * 0.5f;
-  float dx = center_x - pushback_cursor.x;
-  float dy = center_y - pushback_cursor.y;
-  float distance_sq = dx * dx + dy * dy;
-  float radius_sq = pushback_radius * pushback_radius;
-  if (distance_sq > radius_sq) {
-    return target;
-  }
-
-  float distance = sqrtf_local(distance_sq);
-  if (distance < 0.001f) {
-    dx = 1.0f;
-    dy = 0.0f;
-    distance = 1.0f;
-  }
-
-  float falloff = 1.0f - distance / pushback_radius;
-  float max_push = minf_local(BLITZ_PUSHBACK_DISTANCE, pushback_radius * 0.25f);
-  float push = falloff * falloff * falloff * max_push;
-  target.x = base.x + dx / distance * push;
-  target.y = base.y + dy / distance * push;
-  *in_range = 1u;
-  return target;
-}
-
-static u32 tween_entity_to(u32 entity, Vec2 target, float dt) {
-  Vec2 position = world.positions[entity];
-  float alpha = clampf(dt * BLITZ_PUSHBACK_SPEED, 0.0f, 1.0f);
-  float next_x = position.x + (target.x - position.x) * alpha;
-  float next_y = position.y + (target.y - position.y) * alpha;
-  float dx = target.x - next_x;
-  float dy = target.y - next_y;
-
-  if (dx * dx + dy * dy < 0.0001f) {
-    next_x = target.x;
-    next_y = target.y;
-  }
-
-  if (absf_local(next_x - position.x) < 0.0001f &&
-      absf_local(next_y - position.y) < 0.0001f) {
-    return 0u;
-  }
-
-  world.positions[entity].x = next_x;
-  world.positions[entity].y = next_y;
-  return 1u;
-}
-
-static void scan_pushback_cursor_cells(void) {
-  if (!pushback_cursor_active || interaction_mode != BLITZ_MODE_PUSHBACK) {
-    return;
-  }
-
-  i32 min_cell_x =
-      clampi(grid_coord(pushback_cursor.x - pushback_radius) - 1, 0,
-             (i32)BLITZ_GRID_SIZE - 1);
-  i32 min_cell_y =
-      clampi(grid_coord(pushback_cursor.y - pushback_radius) - 1, 0,
-             (i32)BLITZ_GRID_SIZE - 1);
-  i32 max_cell_x =
-      clampi(grid_coord(pushback_cursor.x + pushback_radius) + 1, 0,
-             (i32)BLITZ_GRID_SIZE - 1);
-  i32 max_cell_y =
-      clampi(grid_coord(pushback_cursor.y + pushback_radius) + 1, 0,
-             (i32)BLITZ_GRID_SIZE - 1);
-
-  for (i32 y = min_cell_y; y <= max_cell_y; y += 1) {
-    for (i32 x = min_cell_x; x <= max_cell_x; x += 1) {
-      u32 entity = world.grid_heads[grid_index(x, y)];
-      while (entity != BLITZ_INVALID_INDEX) {
-        u32 in_range = 0u;
-        pushback_target_for_entity(entity, &in_range);
-        if (in_range) {
-          pushback_track_entity(entity);
-        }
-        entity = world.grid_next[entity];
-      }
-    }
-  }
-}
-
-static void update_pushback(float dt) {
-  if (dt <= 0.0f) {
-    return;
-  }
-
-  scan_pushback_cursor_cells();
-
-  u32 i = 0u;
-  while (i < pushback_active_count) {
-    u32 entity = world.pushback_entities[i];
-    u32 in_range = 0u;
-    Vec2 target = pushback_target_for_entity(entity, &in_range);
-    u32 moved = tween_entity_to(entity, target, dt);
-    Vec2 position = world.positions[entity];
-    Vec2 base = world.base_positions[entity];
-    u32 at_base = absf_local(position.x - base.x) < 0.0001f &&
-                  absf_local(position.y - base.y) < 0.0001f;
-
-    if (moved) {
-      mark_render_list_dirty();
-    }
-
-    if (!in_range && at_base) {
-      world.pushback_active[entity] = 0u;
-      pushback_active_count -= 1u;
-      world.pushback_entities[i] = world.pushback_entities[pushback_active_count];
-      continue;
-    }
-
-    i += 1u;
-  }
-}
-
 static void create_slide_rect(float x, float y, float width, float height,
                               Color fill, Color stroke, float stroke_width) {
   u32 entity = ecs_create_entity();
   ecs_set_position(entity, x, y);
   ecs_set_size(entity, width, height);
   ecs_set_rect_view(entity, fill, stroke, stroke_width);
-  grid_insert(entity);
 }
 
 static void create_slide_text(const char *text, float x, float baseline_y,
@@ -955,7 +533,6 @@ static void create_slide_text(const char *text, float x, float baseline_y,
   ecs_set_size(entity, width + padding * 2.0f, height + padding * 2.0f);
   ecs_set_text_view(entity, text, color, font_size, padding,
                     padding + BLITZ_FONT_ASCENDER * font_size);
-  grid_insert(entity);
 }
 
 static void create_demo_world(void) {
@@ -1059,15 +636,7 @@ void blitz_init(void) {
   dragging_entity = BLITZ_INVALID_INDEX;
   drag_offset.x = 0.0f;
   drag_offset.y = 0.0f;
-  interaction_mode = BLITZ_MODE_DRAG;
-  pushback_active_count = 0u;
-  pushback_cursor_active = 0u;
-  pushback_cursor.x = 0.0f;
-  pushback_cursor.y = 0.0f;
-  pushback_radius = BLITZ_PUSHBACK_RADIUS_DEFAULT;
-  last_time_seconds = 0.0f;
   camera_fit_initialized = 0u;
-  grid_clear();
 
   uniforms.viewport_camera[0] = 1.0f;
   uniforms.viewport_camera[1] = 1.0f;
@@ -1180,74 +749,13 @@ void blitz_pointer_move(float screen_x, float screen_y) {
   float world_x = 0.0f;
   float world_y = 0.0f;
   screen_to_world(screen_x, screen_y, &world_x, &world_y);
-  world.positions[dragging_entity].x = world_x - drag_offset.x;
-  world.positions[dragging_entity].y = world_y - drag_offset.y;
-  set_entity_base_position(dragging_entity, world.positions[dragging_entity].x,
-                           world.positions[dragging_entity].y);
+  set_entity_position(dragging_entity, world_x - drag_offset.x,
+                      world_y - drag_offset.y);
 }
 
 EXPORT("blitz_pointer_up")
 void blitz_pointer_up(void) {
   dragging_entity = BLITZ_INVALID_INDEX;
-}
-
-EXPORT("blitz_set_interaction_mode")
-void blitz_set_interaction_mode(u32 mode) {
-  u32 previous_mode = interaction_mode;
-  interaction_mode =
-      mode == BLITZ_MODE_PUSHBACK || mode == BLITZ_MODE_TRIANGLE ||
-              mode == BLITZ_MODE_CIRCLE || mode == BLITZ_MODE_RECT
-          ? mode
-          : BLITZ_MODE_DRAG;
-  dragging_entity = BLITZ_INVALID_INDEX;
-  if (interaction_mode == BLITZ_MODE_DRAG) {
-    pushback_cursor_active = 0u;
-  }
-  if (previous_mode == BLITZ_MODE_RECT || previous_mode == BLITZ_MODE_TRIANGLE ||
-      previous_mode == BLITZ_MODE_CIRCLE || interaction_mode == BLITZ_MODE_RECT ||
-      interaction_mode == BLITZ_MODE_TRIANGLE || interaction_mode == BLITZ_MODE_CIRCLE) {
-    mark_render_list_dirty();
-  }
-}
-
-EXPORT("blitz_interaction_move")
-void blitz_interaction_move(float screen_x, float screen_y) {
-  screen_to_world(screen_x, screen_y, &pushback_cursor.x, &pushback_cursor.y);
-  pushback_cursor_active = 1u;
-  if (interaction_mode == BLITZ_MODE_RECT || interaction_mode == BLITZ_MODE_TRIANGLE ||
-      interaction_mode == BLITZ_MODE_CIRCLE) {
-    mark_render_list_dirty();
-  }
-}
-
-EXPORT("blitz_interaction_click")
-void blitz_interaction_click(float screen_x, float screen_y) {
-  screen_to_world(screen_x, screen_y, &pushback_cursor.x, &pushback_cursor.y);
-  pushback_cursor_active = 1u;
-  replace_cursor_radius_with_mode_shape();
-}
-
-EXPORT("blitz_interaction_leave")
-void blitz_interaction_leave(void) {
-  u32 was_shape_active =
-      (interaction_mode == BLITZ_MODE_RECT || interaction_mode == BLITZ_MODE_TRIANGLE ||
-       interaction_mode == BLITZ_MODE_CIRCLE) &&
-      pushback_cursor_active;
-  pushback_cursor_active = 0u;
-  if (was_shape_active) {
-    mark_render_list_dirty();
-  }
-}
-
-EXPORT("blitz_adjust_interaction_radius")
-void blitz_adjust_interaction_radius(float delta_steps) {
-  pushback_radius =
-      clampf(pushback_radius + delta_steps * BLITZ_PUSHBACK_RADIUS_STEP,
-             BLITZ_PUSHBACK_RADIUS_MIN, BLITZ_PUSHBACK_RADIUS_MAX);
-  if (interaction_mode == BLITZ_MODE_RECT || interaction_mode == BLITZ_MODE_TRIANGLE ||
-      interaction_mode == BLITZ_MODE_CIRCLE) {
-    mark_render_list_dirty();
-  }
 }
 
 EXPORT("blitz_uniform_ptr")
@@ -1363,13 +871,4 @@ u32 blitz_render_chunk_rects(void) {
 EXPORT("blitz_render_max_shapes")
 u32 blitz_render_max_shapes(void) {
   return BLITZ_MAX_RECT_DRAWS;
-}
-
-EXPORT("blitz_time")
-void blitz_time(float seconds) {
-  float dt = seconds - last_time_seconds;
-  last_time_seconds = seconds;
-  dt = clampf(dt, 0.0f, 0.05f);
-  uniforms.style[1] = seconds;
-  update_pushback(dt);
 }

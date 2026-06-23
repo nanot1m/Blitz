@@ -11,11 +11,6 @@ type BlitzExports = {
   blitz_pointer_down(screenX: number, screenY: number): number;
   blitz_pointer_move(screenX: number, screenY: number): void;
   blitz_pointer_up(): void;
-  blitz_set_interaction_mode(mode: number): void;
-  blitz_interaction_move(screenX: number, screenY: number): void;
-  blitz_interaction_click(screenX: number, screenY: number): void;
-  blitz_interaction_leave(): void;
-  blitz_adjust_interaction_radius(deltaSteps: number): void;
   blitz_uniform_ptr(): number;
   blitz_uniform_f32_count(): number;
   blitz_shape_command_ptr(): number;
@@ -38,7 +33,6 @@ type BlitzExports = {
   blitz_render_chunk_rects(): number;
   blitz_render_max_shapes(): number;
   blitz_render_max_text_draws(): number;
-  blitz_time(seconds: number): void;
 };
 
 const canvasElement = document.querySelector<HTMLCanvasElement>("#blitz-canvas");
@@ -50,13 +44,6 @@ if (!canvasElement || !fallbackElement) {
 
 const canvas = canvasElement;
 const fallback = fallbackElement;
-const InteractionMode = {
-  Drag: 0,
-  Pushback: 1,
-  Triangle: 2,
-  Circle: 3,
-  Rect: 4,
-} as const;
 
 const showFallback = (message: string) => {
   fallback.textContent = message;
@@ -288,10 +275,9 @@ async function boot() {
   };
 
   let draggingCamera = false;
-  let draggingRect = false;
+  let draggingEntity = false;
   let lastX = 0;
   let lastY = 0;
-  let interactionMode: number = InteractionMode.Drag;
 
   const eventToCanvasPixels = (event: PointerEvent | WheelEvent) => {
     const rect = canvas.getBoundingClientRect();
@@ -304,17 +290,8 @@ async function boot() {
 
   const stopDragging = () => {
     draggingCamera = false;
-    draggingRect = false;
+    draggingEntity = false;
     wasm.blitz_pointer_up();
-  };
-
-  const setInteractionMode = (mode: number) => {
-    interactionMode = mode;
-    stopDragging();
-    wasm.blitz_set_interaction_mode(mode);
-    if (mode === InteractionMode.Drag) {
-      wasm.blitz_interaction_leave();
-    }
   };
 
   canvas.addEventListener("pointerdown", (event) => {
@@ -328,20 +305,10 @@ async function boot() {
     if (isMiddleButton) {
       stopDragging();
       draggingCamera = true;
-    } else if (interactionMode === InteractionMode.Pushback) {
-      const point = eventToCanvasPixels(event);
-      wasm.blitz_interaction_move(point.x, point.y);
-    } else if (
-      interactionMode === InteractionMode.Triangle ||
-      interactionMode === InteractionMode.Circle ||
-      interactionMode === InteractionMode.Rect
-    ) {
-      const point = eventToCanvasPixels(event);
-      wasm.blitz_interaction_click(point.x, point.y);
     } else {
       const point = eventToCanvasPixels(event);
-      draggingRect = wasm.blitz_pointer_down(point.x, point.y) === 1;
-      draggingCamera = !draggingRect;
+      draggingEntity = wasm.blitz_pointer_down(point.x, point.y) === 1;
+      draggingCamera = !draggingEntity;
     }
 
     lastX = event.clientX;
@@ -350,12 +317,12 @@ async function boot() {
   });
 
   canvas.addEventListener("pointermove", (event) => {
-    if (!draggingCamera && !draggingRect) {
+    if (!draggingCamera && !draggingEntity) {
       return;
     }
 
     const dpr = window.devicePixelRatio || 1;
-    if (draggingRect) {
+    if (draggingEntity) {
       const point = eventToCanvasPixels(event);
       wasm.blitz_pointer_move(point.x, point.y);
     } else {
@@ -363,22 +330,6 @@ async function boot() {
     }
     lastX = event.clientX;
     lastY = event.clientY;
-  });
-
-  canvas.addEventListener("pointermove", (event) => {
-    if (
-      draggingCamera ||
-      draggingRect ||
-      (interactionMode !== InteractionMode.Pushback &&
-        interactionMode !== InteractionMode.Triangle &&
-        interactionMode !== InteractionMode.Circle &&
-        interactionMode !== InteractionMode.Rect)
-    ) {
-      return;
-    }
-
-    const point = eventToCanvasPixels(event);
-    wasm.blitz_interaction_move(point.x, point.y);
   });
 
   canvas.addEventListener("pointerup", (event) => {
@@ -389,10 +340,6 @@ async function boot() {
   canvas.addEventListener("pointercancel", (event) => {
     stopDragging();
     canvas.releasePointerCapture(event.pointerId);
-  });
-
-  canvas.addEventListener("pointerleave", () => {
-    wasm.blitz_interaction_leave();
   });
 
   canvas.addEventListener("auxclick", (event) => {
@@ -417,37 +364,8 @@ async function boot() {
     { passive: false },
   );
 
-  window.addEventListener("keydown", (event) => {
-    if (event.repeat || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
-      return;
-    }
-
-    if (event.key.toLowerCase() === "p") {
-      setInteractionMode(
-        interactionMode === InteractionMode.Pushback ? InteractionMode.Drag : InteractionMode.Pushback,
-      );
-    } else if (event.key.toLowerCase() === "r") {
-      setInteractionMode(interactionMode === InteractionMode.Rect ? InteractionMode.Drag : InteractionMode.Rect);
-    } else if (event.key.toLowerCase() === "t") {
-      setInteractionMode(
-        interactionMode === InteractionMode.Triangle ? InteractionMode.Drag : InteractionMode.Triangle,
-      );
-    } else if (event.key.toLowerCase() === "c") {
-      setInteractionMode(
-        interactionMode === InteractionMode.Circle ? InteractionMode.Drag : InteractionMode.Circle,
-      );
-    } else if (event.key === "[") {
-      wasm.blitz_adjust_interaction_radius(1);
-    } else if (event.key === "]") {
-      wasm.blitz_adjust_interaction_radius(-1);
-    } else if (event.key === "Escape") {
-      setInteractionMode(InteractionMode.Drag);
-    }
-  });
-
-  const render = (timeMs: number) => {
+  const render = () => {
     resize();
-    wasm.blitz_time(timeMs / 1000);
 
     const shapeCommandPtr = wasm.blitz_shape_command_ptr();
     const shapeCommandCount = wasm.blitz_shape_command_count();

@@ -1,4 +1,5 @@
 import {
+  Activity,
   BringToFront,
   Circle,
   createIcons,
@@ -58,6 +59,7 @@ type BlitzExports = {
   blitz_render_max_dyn_commands(): number;
   blitz_render_max_dyn_rects(): number;
   blitz_entity_count(): number;
+  blitz_selected_count(): number;
   blitz_render_chunk_rects(): number;
   blitz_render_max_shapes(): number;
   blitz_render_max_text_draws(): number;
@@ -74,6 +76,9 @@ const sendToBackElement = document.querySelector<HTMLButtonElement>("#send-to-ba
 const bringToFrontElement = document.querySelector<HTMLButtonElement>("#bring-to-front");
 const deleteElement = document.querySelector<HTMLButtonElement>("#delete-selected");
 const zoomIndicatorElement = document.querySelector<HTMLDivElement>("#zoom-indicator");
+const toggleStatsElement = document.querySelector<HTMLButtonElement>("#toggle-stats");
+const statsPanelElement = document.querySelector<HTMLDivElement>("#stats-panel");
+const statsBodyElement = document.querySelector<HTMLPreElement>("#stats-body");
 
 if (
   !canvasElement ||
@@ -86,7 +91,10 @@ if (
   !sendToBackElement ||
   !bringToFrontElement ||
   !deleteElement ||
-  !zoomIndicatorElement
+  !zoomIndicatorElement ||
+  !toggleStatsElement ||
+  !statsPanelElement ||
+  !statsBodyElement
 ) {
   throw new Error("Blitz interface was not found.");
 }
@@ -102,9 +110,13 @@ const sendToBackButton = sendToBackElement;
 const bringToFrontButton = bringToFrontElement;
 const deleteButton = deleteElement;
 const zoomIndicator = zoomIndicatorElement;
+const toggleStatsButton = toggleStatsElement;
+const statsPanel = statsPanelElement;
+const statsBody = statsBodyElement;
 
 createIcons({
   icons: {
+    Activity,
     BringToFront,
     Circle,
     LayoutGrid,
@@ -184,6 +196,18 @@ async function boot() {
   const dynCommandBufferByteLength = maxDynCommands * shapeCommandU32Count * Uint32Array.BYTES_PER_ELEMENT;
   const maxDynRects = wasm.blitz_render_max_dyn_rects();
   const dynRectBufferByteLength = maxDynRects * rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  // Total bytes of the fixed storage buffers, for the stats panel (excludes the
+  // resize-dependent depth texture, reported separately).
+  const gpuBufferBytes =
+    uniformByteLength +
+    shapeCommandBufferByteLength * 2 +
+    rectDrawBufferByteLength +
+    triangleDrawBufferByteLength +
+    circleDrawBufferByteLength +
+    textDrawBufferByteLength +
+    dynCommandBufferByteLength +
+    dynRectBufferByteLength +
+    16;
 
   const atlasResponse = await fetch(`${import.meta.env.BASE_URL}font-atlas.png`);
   if (!atlasResponse.ok) {
@@ -357,7 +381,13 @@ async function boot() {
   const drawArgsBuffer = device.createBuffer({
     label: "Blitz Draw Args",
     size: 4 * Uint32Array.BYTES_PER_ELEMENT,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+  });
+  // Reads back the post-cull visible instance count for the stats panel.
+  const drawArgsReadback = device.createBuffer({
+    label: "Blitz Draw Args Readback",
+    size: 4 * Uint32Array.BYTES_PER_ELEMENT,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
   const dynCommandStorageBuffer = device.createBuffer({
     label: "Blitz Dynamic Command Storage",
@@ -422,6 +452,40 @@ async function boot() {
   let currentDynCommandCount = 0;
   let lastZoomPercent = -1;
   const drawArgsReset = new Uint32Array([6, 0, 0, 0]);
+
+  let statsVisible = false;
+  let frameMs = 16;
+  let lastFrameStamp = 0;
+  let lastStatsAt = 0;
+  let visibleShapeCount = 0;
+  let readbackPending = false;
+
+  const formatBytes = (bytes: number) => {
+    if (bytes >= 1 << 30) return `${(bytes / (1 << 30)).toFixed(1)} GB`;
+    if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(1)} MB`;
+    if (bytes >= 1 << 10) return `${(bytes / (1 << 10)).toFixed(1)} KB`;
+    return `${bytes} B`;
+  };
+
+  const updateStats = () => {
+    const lines = [
+      `fps         ${(1000 / frameMs).toFixed(0)}  (${frameMs.toFixed(1)} ms)`,
+      `zoom        ${lastZoomPercent}%`,
+      `entities    ${wasm.blitz_entity_count().toLocaleString()}`,
+      `shapes      ${wasm.blitz_shape_command_count().toLocaleString()}`,
+      `  visible   ${visibleShapeCount.toLocaleString()}`,
+      `  rect ${wasm.blitz_rect_draw_count().toLocaleString()} · tri ${wasm
+        .blitz_triangle_draw_count()
+        .toLocaleString()} · circ ${wasm.blitz_circle_draw_count().toLocaleString()}`,
+      `text glyphs ${wasm.blitz_text_draw_count().toLocaleString()}`,
+      `dyn cmds    ${wasm.blitz_dyn_command_count().toLocaleString()}`,
+      `selected    ${wasm.blitz_selected_count().toLocaleString()}`,
+      `wasm mem    ${formatBytes(wasm.memory.buffer.byteLength)}`,
+      `gpu bufs    ${formatBytes(gpuBufferBytes)}`,
+      `depth tex   ${formatBytes(canvas.width * canvas.height * 4)}`,
+    ];
+    statsBody.textContent = lines.join("\n");
+  };
 
   let depthTexture: GPUTexture | null = null;
   let depthView: GPUTextureView | null = null;
@@ -590,6 +654,15 @@ async function boot() {
     wasm.blitz_bring_to_front();
   });
 
+  toggleStatsButton.addEventListener("click", () => {
+    statsVisible = !statsVisible;
+    statsPanel.hidden = !statsVisible;
+    toggleStatsButton.setAttribute("aria-pressed", statsVisible ? "true" : "false");
+    if (statsVisible) {
+      updateStats();
+    }
+  });
+
   window.addEventListener("keydown", (event) => {
     if (
       event.target instanceof HTMLInputElement ||
@@ -623,6 +696,12 @@ async function boot() {
 
   const render = () => {
     resize();
+
+    const now = performance.now();
+    if (lastFrameStamp) {
+      frameMs = frameMs * 0.9 + (now - lastFrameStamp) * 0.1;
+    }
+    lastFrameStamp = now;
 
     // Call the trigger pointer first: it runs extract_static_shapes() (guarded
     // by the dirty flag) so the version below reflects the latest build.
@@ -750,7 +829,33 @@ async function boot() {
     }
     pass.end();
 
+    // When stats are open, copy the post-cull instance count out for readback.
+    const sampleVisible = statsVisible && !readbackPending && currentShapeCommandCount > 0;
+    if (sampleVisible) {
+      encoder.copyBufferToBuffer(drawArgsBuffer, 0, drawArgsReadback, 0, 16);
+    }
+
     device.queue.submit([encoder.finish()]);
+
+    if (sampleVisible) {
+      readbackPending = true;
+      drawArgsReadback
+        .mapAsync(GPUMapMode.READ)
+        .then(() => {
+          visibleShapeCount = new Uint32Array(drawArgsReadback.getMappedRange())[1];
+          drawArgsReadback.unmap();
+          readbackPending = false;
+        })
+        .catch(() => {
+          readbackPending = false;
+        });
+    }
+
+    if (statsVisible && now - lastStatsAt > 200) {
+      lastStatsAt = now;
+      updateStats();
+    }
+
     requestAnimationFrame(render);
   };
 

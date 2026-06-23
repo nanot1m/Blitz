@@ -1455,6 +1455,11 @@ u32 blitz_entity_count(void) {
   return world.entity_count;
 }
 
+EXPORT("blitz_selected_count")
+u32 blitz_selected_count(void) {
+  return selected_count;
+}
+
 EXPORT("blitz_render_chunk_rects")
 u32 blitz_render_chunk_rects(void) {
   return BLITZ_RENDER_CHUNK_RECTS;

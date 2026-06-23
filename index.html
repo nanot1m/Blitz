@@ -34,9 +34,14 @@
       <button id="delete-selected" type="button" aria-label="Delete selected" title="Delete selected" disabled>
         <i data-lucide="trash-2" aria-hidden="true"></i>
       </button>
+      <span class="tool-divider" aria-hidden="true"></span>
+      <button id="toggle-stats" type="button" aria-label="Stats for nerds" title="Stats for nerds" aria-pressed="false">
+        <i data-lucide="activity" aria-hidden="true"></i>
+      </button>
     </div>
     <div id="fallback" role="status"></div>
     <div id="zoom-indicator" role="status" aria-label="Zoom level"></div>
+    <div id="stats-panel" role="status" aria-label="Stats for nerds" hidden><pre id="stats-body"></pre></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

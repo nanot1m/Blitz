@@ -123,6 +123,39 @@ body {
   display: none;
 }
 
+#tool-island button[aria-pressed="true"] {
+  background: #155bd7;
+  color: #fff;
+}
+
+#stats-panel {
+  position: fixed;
+  top: 72px;
+  right: 16px;
+  z-index: 2;
+  min-width: 220px;
+  padding: 10px 12px;
+  border: 1px solid #d4d9e1;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+  color: #18202b;
+  pointer-events: none;
+  user-select: none;
+}
+
+#stats-panel[hidden] {
+  display: none;
+}
+
+#stats-panel pre {
+  margin: 0;
+  font:
+    600 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: pre;
+}
+
 #zoom-indicator {
   position: fixed;
   right: 16px;

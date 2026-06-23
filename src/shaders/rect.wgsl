@@ -118,9 +118,10 @@ fn text_vertex(draw: TextDraw, vertex_index: u32) -> vec4f {
 }
 
 @vertex
-fn shape_vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
-  let command_index = vertex_index / 6u;
-  let shape_vertex_index = vertex_index % 6u;
+fn shape_vertex_main(
+  @builtin(vertex_index) shape_vertex_index: u32,
+  @builtin(instance_index) command_index: u32,
+) -> VertexOut {
   let command = shape_commands[command_index].kind_index_entity_pad;
 
   var world: vec2f;
@@ -137,8 +138,22 @@ fn shape_vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
     uv = text_position.zw;
   }
 
+  // High bit of the order word flags a dragged command: translate the
+  // rasterized position by the drag offset (font_params.zw). out.world stays in
+  // original geometry space so the fragment coverage is just shifted, not warped.
+  let order = command.w & 0x7fffffffu;
+  var draw_world = world;
+  if ((command.w & 0x80000000u) != 0u) {
+    draw_world = world + u.font_params.zw;
+  }
+
+  // Draw-order index as depth so the depth test resolves z-order across the
+  // separately-drawn static and dynamic passes. Spread across the full [0,1]
+  // range (style.w is the draw-order count) so adjacent orders never quantize
+  // to the same depth; +1 keeps order 0 above the cleared 0.
+  let depth = (f32(order) + 1.0) / (u.style.w + 4.0);
   var out: VertexOut;
-  out.position = vec4f(world_to_clip(world), 0.0, 1.0);
+  out.position = vec4f(world_to_clip(draw_world), depth, 1.0);
   out.world = world;
   out.command_index = command_index;
   out.uv = uv;

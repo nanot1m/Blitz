@@ -123,6 +123,24 @@ body {
   display: none;
 }
 
+#zoom-indicator {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2;
+  padding: 6px 10px;
+  border: 1px solid #d4d9e1;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+  color: #18202b;
+  font:
+    600 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  user-select: none;
+}
+
 @media (max-width: 520px) {
   #tool-island {
     top: 10px;

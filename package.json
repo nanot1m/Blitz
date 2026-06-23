@@ -4,13 +4,18 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "npm run build:wasm",
     "dev": "vite --host 127.0.0.1",
     "build": "npm run build:wasm && tsc && vite build",
-    "build:wasm": "node scripts/build-wasm.mjs",
+    "build:font": "node scripts/compile-font.mjs",
+    "build:wasm": "npm run build:font && node scripts/build-wasm.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.51",
+    "lucide": "^1.21.0",
+    "opentype.js": "^2.0.0",
+    "pngjs": "^7.0.0",
     "typescript": "^5.5.4",
     "vite": "^5.4.19"
   }

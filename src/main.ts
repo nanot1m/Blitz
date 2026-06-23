@@ -1,3 +1,13 @@
+import {
+  BringToFront,
+  Circle,
+  createIcons,
+  SendToBack,
+  Square,
+  Trash2,
+  Triangle,
+  Type as TypeIcon,
+} from "lucide";
 import shaderSource from "./shaders/rect.wgsl?raw";
 import "./style.css";
 
@@ -8,49 +18,86 @@ type BlitzExports = {
   blitz_set_camera(x: number, y: number, zoom: number): void;
   blitz_pan(dxPixels: number, dyPixels: number): void;
   blitz_zoom_at(screenX: number, screenY: number, zoomDelta: number): void;
-  blitz_pointer_down(screenX: number, screenY: number): number;
+  blitz_pointer_down(screenX: number, screenY: number, additive: number): number;
   blitz_pointer_move(screenX: number, screenY: number): void;
   blitz_pointer_up(): void;
-  blitz_set_interaction_mode(mode: number): void;
-  blitz_interaction_move(screenX: number, screenY: number): void;
-  blitz_interaction_click(screenX: number, screenY: number): void;
-  blitz_interaction_leave(): void;
-  blitz_adjust_interaction_radius(deltaSteps: number): void;
+  blitz_add_rect(): void;
+  blitz_add_circle(): void;
+  blitz_add_triangle(): void;
+  blitz_add_text(): void;
+  blitz_delete_selected(): void;
+  blitz_has_selection(): number;
+  blitz_bring_to_front(): void;
+  blitz_send_to_back(): void;
   blitz_uniform_ptr(): number;
   blitz_uniform_f32_count(): number;
+  blitz_shape_command_ptr(): number;
+  blitz_shape_command_u32_count(): number;
+  blitz_shape_command_count(): number;
+  blitz_shape_command_version(): number;
   blitz_rect_draw_ptr(): number;
   blitz_rect_draw_f32_count(): number;
   blitz_rect_draw_count(): number;
-  blitz_rect_draw_version(): number;
   blitz_triangle_draw_ptr(): number;
   blitz_triangle_draw_f32_count(): number;
   blitz_triangle_draw_count(): number;
-  blitz_triangle_draw_version(): number;
   blitz_circle_draw_ptr(): number;
   blitz_circle_draw_f32_count(): number;
   blitz_circle_draw_count(): number;
-  blitz_circle_draw_version(): number;
+  blitz_text_draw_ptr(): number;
+  blitz_text_draw_f32_count(): number;
+  blitz_text_draw_count(): number;
   blitz_entity_count(): number;
   blitz_render_chunk_rects(): number;
-  blitz_time(seconds: number): void;
+  blitz_render_max_shapes(): number;
+  blitz_render_max_text_draws(): number;
 };
 
 const canvasElement = document.querySelector<HTMLCanvasElement>("#blitz-canvas");
 const fallbackElement = document.querySelector<HTMLDivElement>("#fallback");
+const addRectElement = document.querySelector<HTMLButtonElement>("#add-rect");
+const addCircleElement = document.querySelector<HTMLButtonElement>("#add-circle");
+const addTriangleElement = document.querySelector<HTMLButtonElement>("#add-triangle");
+const addTextElement = document.querySelector<HTMLButtonElement>("#add-text");
+const sendToBackElement = document.querySelector<HTMLButtonElement>("#send-to-back");
+const bringToFrontElement = document.querySelector<HTMLButtonElement>("#bring-to-front");
+const deleteElement = document.querySelector<HTMLButtonElement>("#delete-selected");
 
-if (!canvasElement || !fallbackElement) {
-  throw new Error("Blitz canvas was not found.");
+if (
+  !canvasElement ||
+  !fallbackElement ||
+  !addRectElement ||
+  !addCircleElement ||
+  !addTriangleElement ||
+  !addTextElement ||
+  !sendToBackElement ||
+  !bringToFrontElement ||
+  !deleteElement
+) {
+  throw new Error("Blitz interface was not found.");
 }
 
 const canvas = canvasElement;
 const fallback = fallbackElement;
-const InteractionMode = {
-  Drag: 0,
-  Pushback: 1,
-  Triangle: 2,
-  Circle: 3,
-  Rect: 4,
-} as const;
+const addRectButton = addRectElement;
+const addCircleButton = addCircleElement;
+const addTriangleButton = addTriangleElement;
+const addTextButton = addTextElement;
+const sendToBackButton = sendToBackElement;
+const bringToFrontButton = bringToFrontElement;
+const deleteButton = deleteElement;
+
+createIcons({
+  icons: {
+    BringToFront,
+    Circle,
+    SendToBack,
+    Square,
+    Trash2,
+    Triangle,
+    Type: TypeIcon,
+  },
+});
 
 const showFallback = (message: string) => {
   fallback.textContent = message;
@@ -103,16 +150,41 @@ async function boot() {
     size: uniformByteLength,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
+  const maxShapes = wasm.blitz_render_max_shapes();
+  const shapeCommandU32Count = wasm.blitz_shape_command_u32_count();
+  const shapeCommandBufferByteLength = maxShapes * shapeCommandU32Count * Uint32Array.BYTES_PER_ELEMENT;
   const rectDrawF32Count = wasm.blitz_rect_draw_f32_count();
-  const rectDrawStrideBytes = rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const rectDrawBufferByteLength = maxShapes * rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const triangleDrawF32Count = wasm.blitz_triangle_draw_f32_count();
-  const triangleDrawStrideBytes = triangleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const triangleDrawBufferByteLength = maxShapes * triangleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const circleDrawF32Count = wasm.blitz_circle_draw_f32_count();
-  const circleDrawStrideBytes = circleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
-  const rectDrawChunkSize = wasm.blitz_render_chunk_rects();
-  const rectDrawChunkByteLength = rectDrawChunkSize * rectDrawStrideBytes;
-  const triangleDrawChunkByteLength = rectDrawChunkSize * triangleDrawStrideBytes;
-  const circleDrawChunkByteLength = rectDrawChunkSize * circleDrawStrideBytes;
+  const circleDrawBufferByteLength = maxShapes * circleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const textDrawF32Count = wasm.blitz_text_draw_f32_count();
+  const textDrawBufferByteLength =
+    wasm.blitz_render_max_text_draws() * textDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+
+  const atlasResponse = await fetch(`${import.meta.env.BASE_URL}font-atlas.png`);
+  if (!atlasResponse.ok) {
+    throw new Error("Font atlas could not be loaded.");
+  }
+  const atlasBitmap = await createImageBitmap(await atlasResponse.blob());
+  const fontAtlasTexture = device.createTexture({
+    label: "Blitz Font Atlas",
+    size: [atlasBitmap.width, atlasBitmap.height],
+    format: "rgba8unorm",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  device.queue.copyExternalImageToTexture(
+    { source: atlasBitmap },
+    { texture: fontAtlasTexture },
+    [atlasBitmap.width, atlasBitmap.height],
+  );
+  atlasBitmap.close();
+  const fontSampler = device.createSampler({
+    label: "Blitz Font Sampler",
+    magFilter: "linear",
+    minFilter: "linear",
+  });
 
   const shader = device.createShaderModule({
     label: "Blitz Shape Shader",
@@ -142,6 +214,26 @@ async function boot() {
         visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
         buffer: { type: "read-only-storage" },
       },
+      {
+        binding: 4,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: "read-only-storage" },
+      },
+      {
+        binding: 5,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: "read-only-storage" },
+      },
+      {
+        binding: 6,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: "float" },
+      },
+      {
+        binding: 7,
+        visibility: GPUShaderStage.FRAGMENT,
+        sampler: { type: "filtering" },
+      },
     ],
   });
   const pipelineLayout = device.createPipelineLayout({
@@ -149,92 +241,81 @@ async function boot() {
     bindGroupLayouts: [bindGroupLayout],
   });
 
-  const rectPipeline = device.createRenderPipeline({
-    label: "Blitz Stroked Rect Pipeline",
+  const shapePipeline = device.createRenderPipeline({
+    label: "Blitz Shape Pipeline",
     layout: pipelineLayout,
     vertex: {
       module: shader,
-      entryPoint: "rect_vertex_main",
+      entryPoint: "shape_vertex_main",
     },
     fragment: {
       module: shader,
-      entryPoint: "rect_fragment_main",
-      targets: [{ format }],
-    },
-    primitive: {
-      topology: "triangle-list",
-    },
-  });
-
-  const trianglePipeline = device.createRenderPipeline({
-    label: "Blitz Stroked Triangle Pipeline",
-    layout: pipelineLayout,
-    vertex: {
-      module: shader,
-      entryPoint: "triangle_vertex_main",
-    },
-    fragment: {
-      module: shader,
-      entryPoint: "triangle_fragment_main",
-      targets: [{ format }],
-    },
-    primitive: {
-      topology: "triangle-list",
-    },
-  });
-
-  const circlePipeline = device.createRenderPipeline({
-    label: "Blitz Stroked Circle Pipeline",
-    layout: pipelineLayout,
-    vertex: {
-      module: shader,
-      entryPoint: "circle_vertex_main",
-    },
-    fragment: {
-      module: shader,
-      entryPoint: "circle_fragment_main",
-      targets: [{ format }],
-    },
-    primitive: {
-      topology: "triangle-list",
-    },
-  });
-
-  const rectChunks = Array.from({ length: 4 }, (_, index) => {
-    const rectStorageBuffer = device.createBuffer({
-      label: `Blitz Rect Draw Storage ${index}`,
-      size: rectDrawChunkByteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    const triangleStorageBuffer = device.createBuffer({
-      label: `Blitz Triangle Draw Storage ${index}`,
-      size: triangleDrawChunkByteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    const circleStorageBuffer = device.createBuffer({
-      label: `Blitz Circle Draw Storage ${index}`,
-      size: circleDrawChunkByteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    const bindGroup = device.createBindGroup({
-      label: `Blitz Bind Group ${index}`,
-      layout: bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: uniformBuffer } },
-        { binding: 1, resource: { buffer: rectStorageBuffer } },
-        { binding: 2, resource: { buffer: triangleStorageBuffer } },
-        { binding: 3, resource: { buffer: circleStorageBuffer } },
+      entryPoint: "shape_fragment_main",
+      targets: [
+        {
+          format,
+          blend: {
+            color: {
+              srcFactor: "src-alpha",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+            alpha: {
+              srcFactor: "one",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+          },
+        },
       ],
-    });
-    return { bindGroup, rectStorageBuffer, triangleStorageBuffer, circleStorageBuffer };
+    },
+    primitive: {
+      topology: "triangle-list",
+    },
   });
 
-  let lastUploadedRectDrawVersion = -1;
-  let lastUploadedTriangleDrawVersion = -1;
-  let lastUploadedCircleDrawVersion = -1;
-  let currentRectDrawCount = 0;
-  let currentTriangleDrawCount = 0;
-  let currentCircleDrawCount = 0;
+  const shapeCommandStorageBuffer = device.createBuffer({
+    label: "Blitz Shape Command Storage",
+    size: shapeCommandBufferByteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const rectStorageBuffer = device.createBuffer({
+    label: "Blitz Rect Draw Storage",
+    size: rectDrawBufferByteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const triangleStorageBuffer = device.createBuffer({
+    label: "Blitz Triangle Draw Storage",
+    size: triangleDrawBufferByteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const circleStorageBuffer = device.createBuffer({
+    label: "Blitz Circle Draw Storage",
+    size: circleDrawBufferByteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const textStorageBuffer = device.createBuffer({
+    label: "Blitz Text Draw Storage",
+    size: textDrawBufferByteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const bindGroup = device.createBindGroup({
+    label: "Blitz Bind Group",
+    layout: bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuffer } },
+      { binding: 1, resource: { buffer: shapeCommandStorageBuffer } },
+      { binding: 2, resource: { buffer: rectStorageBuffer } },
+      { binding: 3, resource: { buffer: triangleStorageBuffer } },
+      { binding: 4, resource: { buffer: circleStorageBuffer } },
+      { binding: 5, resource: { buffer: textStorageBuffer } },
+      { binding: 6, resource: fontAtlasTexture.createView() },
+      { binding: 7, resource: fontSampler },
+    ],
+  });
+
+  let lastUploadedShapeCommandVersion = -1;
+  let currentShapeCommandCount = 0;
 
   const resize = () => {
     const dpr = window.devicePixelRatio || 1;
@@ -248,10 +329,17 @@ async function boot() {
   };
 
   let draggingCamera = false;
-  let draggingRect = false;
+  let draggingEntity = false;
+  let selectingArea = false;
   let lastX = 0;
   let lastY = 0;
-  let interactionMode: number = InteractionMode.Drag;
+
+  const updateSelectionState = () => {
+    const disabled = wasm.blitz_has_selection() === 0;
+    sendToBackButton.disabled = disabled;
+    bringToFrontButton.disabled = disabled;
+    deleteButton.disabled = disabled;
+  };
 
   const eventToCanvasPixels = (event: PointerEvent | WheelEvent) => {
     const rect = canvas.getBoundingClientRect();
@@ -264,44 +352,34 @@ async function boot() {
 
   const stopDragging = () => {
     draggingCamera = false;
-    draggingRect = false;
+    draggingEntity = false;
+    selectingArea = false;
+    canvas.classList.remove("is-dragging-entity", "is-panning", "is-selecting");
     wasm.blitz_pointer_up();
-  };
-
-  const setInteractionMode = (mode: number) => {
-    interactionMode = mode;
-    stopDragging();
-    wasm.blitz_set_interaction_mode(mode);
-    if (mode === InteractionMode.Drag) {
-      wasm.blitz_interaction_leave();
-    }
   };
 
   canvas.addEventListener("pointerdown", (event) => {
     const isPrimaryButton = event.button === 0;
     const isMiddleButton = event.button === 1;
-    if (!isPrimaryButton && !isMiddleButton) {
+    const isRightButton = event.button === 2;
+    if (!isPrimaryButton && !isMiddleButton && !isRightButton) {
       return;
     }
 
     event.preventDefault();
-    if (isMiddleButton) {
+    if (isMiddleButton || isRightButton) {
       stopDragging();
       draggingCamera = true;
-    } else if (interactionMode === InteractionMode.Pushback) {
-      const point = eventToCanvasPixels(event);
-      wasm.blitz_interaction_move(point.x, point.y);
-    } else if (
-      interactionMode === InteractionMode.Triangle ||
-      interactionMode === InteractionMode.Circle ||
-      interactionMode === InteractionMode.Rect
-    ) {
-      const point = eventToCanvasPixels(event);
-      wasm.blitz_interaction_click(point.x, point.y);
+      canvas.classList.add("is-panning");
     } else {
       const point = eventToCanvasPixels(event);
-      draggingRect = wasm.blitz_pointer_down(point.x, point.y) === 1;
-      draggingCamera = !draggingRect;
+      const additive = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 0;
+      const pointerMode = wasm.blitz_pointer_down(point.x, point.y, additive);
+      draggingEntity = pointerMode === 1;
+      selectingArea = pointerMode === 2;
+      canvas.classList.toggle("is-dragging-entity", draggingEntity);
+      canvas.classList.toggle("is-selecting", selectingArea);
+      updateSelectionState();
     }
 
     lastX = event.clientX;
@@ -310,12 +388,12 @@ async function boot() {
   });
 
   canvas.addEventListener("pointermove", (event) => {
-    if (!draggingCamera && !draggingRect) {
+    if (!draggingCamera && !draggingEntity && !selectingArea) {
       return;
     }
 
     const dpr = window.devicePixelRatio || 1;
-    if (draggingRect) {
+    if (draggingEntity || selectingArea) {
       const point = eventToCanvasPixels(event);
       wasm.blitz_pointer_move(point.x, point.y);
     } else {
@@ -325,24 +403,9 @@ async function boot() {
     lastY = event.clientY;
   });
 
-  canvas.addEventListener("pointermove", (event) => {
-    if (
-      draggingCamera ||
-      draggingRect ||
-      (interactionMode !== InteractionMode.Pushback &&
-        interactionMode !== InteractionMode.Triangle &&
-        interactionMode !== InteractionMode.Circle &&
-        interactionMode !== InteractionMode.Rect)
-    ) {
-      return;
-    }
-
-    const point = eventToCanvasPixels(event);
-    wasm.blitz_interaction_move(point.x, point.y);
-  });
-
   canvas.addEventListener("pointerup", (event) => {
     stopDragging();
+    updateSelectionState();
     canvas.releasePointerCapture(event.pointerId);
   });
 
@@ -351,13 +414,71 @@ async function boot() {
     canvas.releasePointerCapture(event.pointerId);
   });
 
-  canvas.addEventListener("pointerleave", () => {
-    wasm.blitz_interaction_leave();
+  canvas.addEventListener("auxclick", (event) => {
+    if (event.button === 1 || event.button === 2) {
+      event.preventDefault();
+    }
   });
 
-  canvas.addEventListener("auxclick", (event) => {
-    if (event.button === 1) {
+  canvas.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+  });
+
+  addRectButton.addEventListener("click", () => {
+    stopDragging();
+    wasm.blitz_add_rect();
+    updateSelectionState();
+  });
+
+  addCircleButton.addEventListener("click", () => {
+    stopDragging();
+    wasm.blitz_add_circle();
+    updateSelectionState();
+  });
+
+  addTriangleButton.addEventListener("click", () => {
+    stopDragging();
+    wasm.blitz_add_triangle();
+    updateSelectionState();
+  });
+
+  addTextButton.addEventListener("click", () => {
+    stopDragging();
+    wasm.blitz_add_text();
+    updateSelectionState();
+  });
+
+  const deleteSelection = () => {
+    if (wasm.blitz_has_selection() === 0) {
+      return;
+    }
+    stopDragging();
+    wasm.blitz_delete_selected();
+    updateSelectionState();
+  };
+
+  deleteButton.addEventListener("click", deleteSelection);
+
+  sendToBackButton.addEventListener("click", () => {
+    wasm.blitz_send_to_back();
+  });
+
+  bringToFrontButton.addEventListener("click", () => {
+    wasm.blitz_bring_to_front();
+  });
+
+  window.addEventListener("keydown", (event) => {
+    if (
+      event.target instanceof HTMLInputElement ||
+      event.target instanceof HTMLTextAreaElement ||
+      event.target instanceof HTMLSelectElement ||
+      (event.target instanceof HTMLElement && event.target.isContentEditable)
+    ) {
+      return;
+    }
+    if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
+      deleteSelection();
     }
   });
 
@@ -368,7 +489,7 @@ async function boot() {
       const dpr = window.devicePixelRatio || 1;
       if (event.ctrlKey || event.metaKey) {
         const point = eventToCanvasPixels(event);
-        const zoomDelta = Math.exp(-event.deltaY * 0.0015);
+        const zoomDelta = Math.exp(-event.deltaY * 0.007);
         wasm.blitz_zoom_at(point.x, point.y, zoomDelta);
       } else {
         wasm.blitz_pan(-event.deltaX * dpr, -event.deltaY * dpr);
@@ -377,103 +498,60 @@ async function boot() {
     { passive: false },
   );
 
-  window.addEventListener("keydown", (event) => {
-    if (event.repeat || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
-      return;
-    }
-
-    if (event.key.toLowerCase() === "p") {
-      setInteractionMode(
-        interactionMode === InteractionMode.Pushback ? InteractionMode.Drag : InteractionMode.Pushback,
-      );
-    } else if (event.key.toLowerCase() === "r") {
-      setInteractionMode(interactionMode === InteractionMode.Rect ? InteractionMode.Drag : InteractionMode.Rect);
-    } else if (event.key.toLowerCase() === "t") {
-      setInteractionMode(
-        interactionMode === InteractionMode.Triangle ? InteractionMode.Drag : InteractionMode.Triangle,
-      );
-    } else if (event.key.toLowerCase() === "c") {
-      setInteractionMode(
-        interactionMode === InteractionMode.Circle ? InteractionMode.Drag : InteractionMode.Circle,
-      );
-    } else if (event.key === "[") {
-      wasm.blitz_adjust_interaction_radius(1);
-    } else if (event.key === "]") {
-      wasm.blitz_adjust_interaction_radius(-1);
-    } else if (event.key === "Escape") {
-      setInteractionMode(InteractionMode.Drag);
-    }
-  });
-
-  const render = (timeMs: number) => {
+  const render = () => {
     resize();
-    wasm.blitz_time(timeMs / 1000);
 
+    const shapeCommandPtr = wasm.blitz_shape_command_ptr();
+    const shapeCommandCount = wasm.blitz_shape_command_count();
+    const shapeCommandVersion = wasm.blitz_shape_command_version();
     const rectDrawPtr = wasm.blitz_rect_draw_ptr();
     const rectDrawCount = wasm.blitz_rect_draw_count();
-    const rectDrawVersion = wasm.blitz_rect_draw_version();
     const triangleDrawPtr = wasm.blitz_triangle_draw_ptr();
     const triangleDrawCount = wasm.blitz_triangle_draw_count();
-    const triangleDrawVersion = wasm.blitz_triangle_draw_version();
     const circleDrawPtr = wasm.blitz_circle_draw_ptr();
     const circleDrawCount = wasm.blitz_circle_draw_count();
-    const circleDrawVersion = wasm.blitz_circle_draw_version();
+    const textDrawPtr = wasm.blitz_text_draw_ptr();
+    const textDrawCount = wasm.blitz_text_draw_count();
 
-    if (rectDrawVersion !== lastUploadedRectDrawVersion) {
-      currentRectDrawCount = rectDrawCount;
-      for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
-        const chunkStart = chunkIndex * rectDrawChunkSize;
-        const chunkRectCount = Math.max(0, Math.min(rectDrawChunkSize, rectDrawCount - chunkStart));
-        if (chunkRectCount === 0) {
-          continue;
-        }
-
-        const wasmRectDraws = new Float32Array(
+    if (shapeCommandVersion !== lastUploadedShapeCommandVersion) {
+      currentShapeCommandCount = shapeCommandCount;
+      if (shapeCommandCount > 0) {
+        const wasmShapeCommands = new Uint32Array(
           wasm.memory.buffer,
-          rectDrawPtr + chunkStart * rectDrawStrideBytes,
-          chunkRectCount * rectDrawF32Count,
+          shapeCommandPtr,
+          shapeCommandCount * shapeCommandU32Count,
         );
-        device.queue.writeBuffer(rectChunks[chunkIndex].rectStorageBuffer, 0, wasmRectDraws);
+        device.queue.writeBuffer(shapeCommandStorageBuffer, 0, wasmShapeCommands);
       }
-      lastUploadedRectDrawVersion = rectDrawVersion;
-    }
-
-    if (triangleDrawVersion !== lastUploadedTriangleDrawVersion) {
-      currentTriangleDrawCount = triangleDrawCount;
-      for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
-        const chunkStart = chunkIndex * rectDrawChunkSize;
-        const chunkTriangleCount = Math.max(0, Math.min(rectDrawChunkSize, triangleDrawCount - chunkStart));
-        if (chunkTriangleCount === 0) {
-          continue;
-        }
-
+      if (rectDrawCount > 0) {
+        const wasmRectDraws = new Float32Array(wasm.memory.buffer, rectDrawPtr, rectDrawCount * rectDrawF32Count);
+        device.queue.writeBuffer(rectStorageBuffer, 0, wasmRectDraws);
+      }
+      if (triangleDrawCount > 0) {
         const wasmTriangleDraws = new Float32Array(
           wasm.memory.buffer,
-          triangleDrawPtr + chunkStart * triangleDrawStrideBytes,
-          chunkTriangleCount * triangleDrawF32Count,
+          triangleDrawPtr,
+          triangleDrawCount * triangleDrawF32Count,
         );
-        device.queue.writeBuffer(rectChunks[chunkIndex].triangleStorageBuffer, 0, wasmTriangleDraws);
+        device.queue.writeBuffer(triangleStorageBuffer, 0, wasmTriangleDraws);
       }
-      lastUploadedTriangleDrawVersion = triangleDrawVersion;
-    }
-
-    if (circleDrawVersion !== lastUploadedCircleDrawVersion) {
-      currentCircleDrawCount = circleDrawCount;
-      for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
-        const chunkStart = chunkIndex * rectDrawChunkSize;
-        const chunkCircleCount = Math.max(0, Math.min(rectDrawChunkSize, circleDrawCount - chunkStart));
-        if (chunkCircleCount === 0) {
-          continue;
-        }
-
+      if (circleDrawCount > 0) {
         const wasmCircleDraws = new Float32Array(
           wasm.memory.buffer,
-          circleDrawPtr + chunkStart * circleDrawStrideBytes,
-          chunkCircleCount * circleDrawF32Count,
+          circleDrawPtr,
+          circleDrawCount * circleDrawF32Count,
         );
-        device.queue.writeBuffer(rectChunks[chunkIndex].circleStorageBuffer, 0, wasmCircleDraws);
+        device.queue.writeBuffer(circleStorageBuffer, 0, wasmCircleDraws);
       }
-      lastUploadedCircleDrawVersion = circleDrawVersion;
+      if (textDrawCount > 0) {
+        const wasmTextDraws = new Float32Array(
+          wasm.memory.buffer,
+          textDrawPtr,
+          textDrawCount * textDrawF32Count,
+        );
+        device.queue.writeBuffer(textStorageBuffer, 0, wasmTextDraws);
+      }
+      lastUploadedShapeCommandVersion = shapeCommandVersion;
     }
 
     const uniforms = new Float32Array(wasm.memory.buffer, uniformPtr, wasm.blitz_uniform_f32_count());
@@ -491,40 +569,10 @@ async function boot() {
         },
       ],
     });
-    pass.setPipeline(rectPipeline);
-    for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
-      const chunkStart = chunkIndex * rectDrawChunkSize;
-      const chunkRectCount = Math.max(0, Math.min(rectDrawChunkSize, currentRectDrawCount - chunkStart));
-      if (chunkRectCount === 0) {
-        continue;
-      }
-
-      pass.setBindGroup(0, rectChunks[chunkIndex].bindGroup);
-      pass.draw(6 * chunkRectCount);
-    }
-
-    pass.setPipeline(trianglePipeline);
-    for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
-      const chunkStart = chunkIndex * rectDrawChunkSize;
-      const chunkTriangleCount = Math.max(0, Math.min(rectDrawChunkSize, currentTriangleDrawCount - chunkStart));
-      if (chunkTriangleCount === 0) {
-        continue;
-      }
-
-      pass.setBindGroup(0, rectChunks[chunkIndex].bindGroup);
-      pass.draw(3 * chunkTriangleCount);
-    }
-
-    pass.setPipeline(circlePipeline);
-    for (let chunkIndex = 0; chunkIndex < rectChunks.length; chunkIndex += 1) {
-      const chunkStart = chunkIndex * rectDrawChunkSize;
-      const chunkCircleCount = Math.max(0, Math.min(rectDrawChunkSize, currentCircleDrawCount - chunkStart));
-      if (chunkCircleCount === 0) {
-        continue;
-      }
-
-      pass.setBindGroup(0, rectChunks[chunkIndex].bindGroup);
-      pass.draw(6 * chunkCircleCount);
+    pass.setPipeline(shapePipeline);
+    if (currentShapeCommandCount > 0) {
+      pass.setBindGroup(0, bindGroup);
+      pass.draw(6 * currentShapeCommandCount);
     }
     pass.end();
 
@@ -534,6 +582,7 @@ async function boot() {
 
   window.addEventListener("resize", resize);
   resize();
+  updateSelectionState();
   requestAnimationFrame(render);
 }
 

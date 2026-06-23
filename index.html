@@ -7,6 +7,31 @@
   </head>
   <body>
     <canvas id="blitz-canvas" aria-label="Blitz WebGPU canvas"></canvas>
+    <div id="tool-island" role="toolbar" aria-label="Canvas tools">
+      <button id="add-rect" type="button" aria-label="Add rectangle" title="Add rectangle">
+        <i data-lucide="square" aria-hidden="true"></i>
+      </button>
+      <button id="add-circle" type="button" aria-label="Add circle" title="Add circle">
+        <i data-lucide="circle" aria-hidden="true"></i>
+      </button>
+      <button id="add-triangle" type="button" aria-label="Add triangle" title="Add triangle">
+        <i data-lucide="triangle" aria-hidden="true"></i>
+      </button>
+      <button id="add-text" type="button" aria-label="Add text" title="Add text">
+        <i data-lucide="type" aria-hidden="true"></i>
+      </button>
+      <span class="tool-divider" aria-hidden="true"></span>
+      <button id="send-to-back" type="button" aria-label="Send to back" title="Send to back" disabled>
+        <i data-lucide="send-to-back" aria-hidden="true"></i>
+      </button>
+      <button id="bring-to-front" type="button" aria-label="Bring to front" title="Bring to front" disabled>
+        <i data-lucide="bring-to-front" aria-hidden="true"></i>
+      </button>
+      <span class="tool-divider" aria-hidden="true"></span>
+      <button id="delete-selected" type="button" aria-label="Delete selected" title="Delete selected" disabled>
+        <i data-lucide="trash-2" aria-hidden="true"></i>
+      </button>
+    </div>
     <div id="fallback" role="status"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -1,3 +1,13 @@
+import {
+  BringToFront,
+  Circle,
+  createIcons,
+  SendToBack,
+  Square,
+  Trash2,
+  Triangle,
+  Type as TypeIcon,
+} from "lucide";
 import shaderSource from "./shaders/rect.wgsl?raw";
 import "./style.css";
 
@@ -8,9 +18,17 @@ type BlitzExports = {
   blitz_set_camera(x: number, y: number, zoom: number): void;
   blitz_pan(dxPixels: number, dyPixels: number): void;
   blitz_zoom_at(screenX: number, screenY: number, zoomDelta: number): void;
-  blitz_pointer_down(screenX: number, screenY: number): number;
+  blitz_pointer_down(screenX: number, screenY: number, additive: number): number;
   blitz_pointer_move(screenX: number, screenY: number): void;
   blitz_pointer_up(): void;
+  blitz_add_rect(): void;
+  blitz_add_circle(): void;
+  blitz_add_triangle(): void;
+  blitz_add_text(): void;
+  blitz_delete_selected(): void;
+  blitz_has_selection(): number;
+  blitz_bring_to_front(): void;
+  blitz_send_to_back(): void;
   blitz_uniform_ptr(): number;
   blitz_uniform_f32_count(): number;
   blitz_shape_command_ptr(): number;
@@ -37,13 +55,49 @@ type BlitzExports = {
 
 const canvasElement = document.querySelector<HTMLCanvasElement>("#blitz-canvas");
 const fallbackElement = document.querySelector<HTMLDivElement>("#fallback");
+const addRectElement = document.querySelector<HTMLButtonElement>("#add-rect");
+const addCircleElement = document.querySelector<HTMLButtonElement>("#add-circle");
+const addTriangleElement = document.querySelector<HTMLButtonElement>("#add-triangle");
+const addTextElement = document.querySelector<HTMLButtonElement>("#add-text");
+const sendToBackElement = document.querySelector<HTMLButtonElement>("#send-to-back");
+const bringToFrontElement = document.querySelector<HTMLButtonElement>("#bring-to-front");
+const deleteElement = document.querySelector<HTMLButtonElement>("#delete-selected");
 
-if (!canvasElement || !fallbackElement) {
-  throw new Error("Blitz canvas was not found.");
+if (
+  !canvasElement ||
+  !fallbackElement ||
+  !addRectElement ||
+  !addCircleElement ||
+  !addTriangleElement ||
+  !addTextElement ||
+  !sendToBackElement ||
+  !bringToFrontElement ||
+  !deleteElement
+) {
+  throw new Error("Blitz interface was not found.");
 }
 
 const canvas = canvasElement;
 const fallback = fallbackElement;
+const addRectButton = addRectElement;
+const addCircleButton = addCircleElement;
+const addTriangleButton = addTriangleElement;
+const addTextButton = addTextElement;
+const sendToBackButton = sendToBackElement;
+const bringToFrontButton = bringToFrontElement;
+const deleteButton = deleteElement;
+
+createIcons({
+  icons: {
+    BringToFront,
+    Circle,
+    SendToBack,
+    Square,
+    Trash2,
+    Triangle,
+    Type: TypeIcon,
+  },
+});
 
 const showFallback = (message: string) => {
   fallback.textContent = message;
@@ -276,8 +330,16 @@ async function boot() {
 
   let draggingCamera = false;
   let draggingEntity = false;
+  let selectingArea = false;
   let lastX = 0;
   let lastY = 0;
+
+  const updateSelectionState = () => {
+    const disabled = wasm.blitz_has_selection() === 0;
+    sendToBackButton.disabled = disabled;
+    bringToFrontButton.disabled = disabled;
+    deleteButton.disabled = disabled;
+  };
 
   const eventToCanvasPixels = (event: PointerEvent | WheelEvent) => {
     const rect = canvas.getBoundingClientRect();
@@ -291,24 +353,33 @@ async function boot() {
   const stopDragging = () => {
     draggingCamera = false;
     draggingEntity = false;
+    selectingArea = false;
+    canvas.classList.remove("is-dragging-entity", "is-panning", "is-selecting");
     wasm.blitz_pointer_up();
   };
 
   canvas.addEventListener("pointerdown", (event) => {
     const isPrimaryButton = event.button === 0;
     const isMiddleButton = event.button === 1;
-    if (!isPrimaryButton && !isMiddleButton) {
+    const isRightButton = event.button === 2;
+    if (!isPrimaryButton && !isMiddleButton && !isRightButton) {
       return;
     }
 
     event.preventDefault();
-    if (isMiddleButton) {
+    if (isMiddleButton || isRightButton) {
       stopDragging();
       draggingCamera = true;
+      canvas.classList.add("is-panning");
     } else {
       const point = eventToCanvasPixels(event);
-      draggingEntity = wasm.blitz_pointer_down(point.x, point.y) === 1;
-      draggingCamera = !draggingEntity;
+      const additive = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 0;
+      const pointerMode = wasm.blitz_pointer_down(point.x, point.y, additive);
+      draggingEntity = pointerMode === 1;
+      selectingArea = pointerMode === 2;
+      canvas.classList.toggle("is-dragging-entity", draggingEntity);
+      canvas.classList.toggle("is-selecting", selectingArea);
+      updateSelectionState();
     }
 
     lastX = event.clientX;
@@ -317,12 +388,12 @@ async function boot() {
   });
 
   canvas.addEventListener("pointermove", (event) => {
-    if (!draggingCamera && !draggingEntity) {
+    if (!draggingCamera && !draggingEntity && !selectingArea) {
       return;
     }
 
     const dpr = window.devicePixelRatio || 1;
-    if (draggingEntity) {
+    if (draggingEntity || selectingArea) {
       const point = eventToCanvasPixels(event);
       wasm.blitz_pointer_move(point.x, point.y);
     } else {
@@ -334,6 +405,7 @@ async function boot() {
 
   canvas.addEventListener("pointerup", (event) => {
     stopDragging();
+    updateSelectionState();
     canvas.releasePointerCapture(event.pointerId);
   });
 
@@ -343,8 +415,70 @@ async function boot() {
   });
 
   canvas.addEventListener("auxclick", (event) => {
-    if (event.button === 1) {
+    if (event.button === 1 || event.button === 2) {
       event.preventDefault();
+    }
+  });
+
+  canvas.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+  });
+
+  addRectButton.addEventListener("click", () => {
+    stopDragging();
+    wasm.blitz_add_rect();
+    updateSelectionState();
+  });
+
+  addCircleButton.addEventListener("click", () => {
+    stopDragging();
+    wasm.blitz_add_circle();
+    updateSelectionState();
+  });
+
+  addTriangleButton.addEventListener("click", () => {
+    stopDragging();
+    wasm.blitz_add_triangle();
+    updateSelectionState();
+  });
+
+  addTextButton.addEventListener("click", () => {
+    stopDragging();
+    wasm.blitz_add_text();
+    updateSelectionState();
+  });
+
+  const deleteSelection = () => {
+    if (wasm.blitz_has_selection() === 0) {
+      return;
+    }
+    stopDragging();
+    wasm.blitz_delete_selected();
+    updateSelectionState();
+  };
+
+  deleteButton.addEventListener("click", deleteSelection);
+
+  sendToBackButton.addEventListener("click", () => {
+    wasm.blitz_send_to_back();
+  });
+
+  bringToFrontButton.addEventListener("click", () => {
+    wasm.blitz_bring_to_front();
+  });
+
+  window.addEventListener("keydown", (event) => {
+    if (
+      event.target instanceof HTMLInputElement ||
+      event.target instanceof HTMLTextAreaElement ||
+      event.target instanceof HTMLSelectElement ||
+      (event.target instanceof HTMLElement && event.target.isContentEditable)
+    ) {
+      return;
+    }
+    if (event.key === "Delete" || event.key === "Backspace") {
+      event.preventDefault();
+      deleteSelection();
     }
   });
 
@@ -355,7 +489,7 @@ async function boot() {
       const dpr = window.devicePixelRatio || 1;
       if (event.ctrlKey || event.metaKey) {
         const point = eventToCanvasPixels(event);
-        const zoomDelta = Math.exp(-event.deltaY * 0.004);
+        const zoomDelta = Math.exp(-event.deltaY * 0.007);
         wasm.blitz_zoom_at(point.x, point.y, zoomDelta);
       } else {
         wasm.blitz_pan(-event.deltaX * dpr, -event.deltaY * dpr);
@@ -448,6 +582,7 @@ async function boot() {
 
   window.addEventListener("resize", resize);
   resize();
+  updateSelectionState();
   requestAnimationFrame(render);
 }
 

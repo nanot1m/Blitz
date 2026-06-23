@@ -27,12 +27,82 @@ body {
   width: 100vw;
   height: 100vh;
   display: block;
-  cursor: grab;
+  cursor: default;
   touch-action: none;
 }
 
-#blitz-canvas:active {
+#blitz-canvas.is-dragging-entity {
+  cursor: move;
+}
+
+#blitz-canvas.is-panning {
   cursor: grabbing;
+}
+
+#blitz-canvas.is-selecting {
+  cursor: crosshair;
+}
+
+#tool-island {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 44px;
+  padding: 5px;
+  border: 1px solid #d4d9e1;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+  transform: translateX(-50%);
+}
+
+#tool-island button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  width: 34px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #18202b;
+  font: 600 13px/1 inherit;
+  cursor: pointer;
+}
+
+#tool-island button:hover:not(:disabled) {
+  background: #edf3ff;
+  color: #155bd7;
+}
+
+#tool-island button:focus-visible {
+  outline: 2px solid #2673e8;
+  outline-offset: 1px;
+}
+
+#tool-island button:disabled {
+  color: #a5acb7;
+  cursor: default;
+}
+
+#tool-island svg {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  stroke-width: 2;
+}
+
+.tool-divider {
+  width: 1px;
+  height: 22px;
+  margin: 0 2px;
+  background: #dfe3e9;
 }
 
 #fallback {
@@ -51,4 +121,10 @@ body {
 
 #fallback:empty {
   display: none;
+}
+
+@media (max-width: 520px) {
+  #tool-island {
+    top: 10px;
+  }
 }

@@ -31,9 +31,13 @@ type BlitzExports = {
   blitz_circle_draw_ptr(): number;
   blitz_circle_draw_f32_count(): number;
   blitz_circle_draw_count(): number;
+  blitz_text_draw_ptr(): number;
+  blitz_text_draw_f32_count(): number;
+  blitz_text_draw_count(): number;
   blitz_entity_count(): number;
   blitz_render_chunk_rects(): number;
   blitz_render_max_shapes(): number;
+  blitz_render_max_text_draws(): number;
   blitz_time(seconds: number): void;
 };
 
@@ -114,6 +118,32 @@ async function boot() {
   const triangleDrawBufferByteLength = maxShapes * triangleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const circleDrawF32Count = wasm.blitz_circle_draw_f32_count();
   const circleDrawBufferByteLength = maxShapes * circleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const textDrawF32Count = wasm.blitz_text_draw_f32_count();
+  const textDrawBufferByteLength =
+    wasm.blitz_render_max_text_draws() * textDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+
+  const atlasResponse = await fetch(`${import.meta.env.BASE_URL}font-atlas.png`);
+  if (!atlasResponse.ok) {
+    throw new Error("Font atlas could not be loaded.");
+  }
+  const atlasBitmap = await createImageBitmap(await atlasResponse.blob());
+  const fontAtlasTexture = device.createTexture({
+    label: "Blitz Font Atlas",
+    size: [atlasBitmap.width, atlasBitmap.height],
+    format: "rgba8unorm",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  device.queue.copyExternalImageToTexture(
+    { source: atlasBitmap },
+    { texture: fontAtlasTexture },
+    [atlasBitmap.width, atlasBitmap.height],
+  );
+  atlasBitmap.close();
+  const fontSampler = device.createSampler({
+    label: "Blitz Font Sampler",
+    magFilter: "linear",
+    minFilter: "linear",
+  });
 
   const shader = device.createShaderModule({
     label: "Blitz Shape Shader",
@@ -148,6 +178,21 @@ async function boot() {
         visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
         buffer: { type: "read-only-storage" },
       },
+      {
+        binding: 5,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: "read-only-storage" },
+      },
+      {
+        binding: 6,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: "float" },
+      },
+      {
+        binding: 7,
+        visibility: GPUShaderStage.FRAGMENT,
+        sampler: { type: "filtering" },
+      },
     ],
   });
   const pipelineLayout = device.createPipelineLayout({
@@ -165,7 +210,23 @@ async function boot() {
     fragment: {
       module: shader,
       entryPoint: "shape_fragment_main",
-      targets: [{ format }],
+      targets: [
+        {
+          format,
+          blend: {
+            color: {
+              srcFactor: "src-alpha",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+            alpha: {
+              srcFactor: "one",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+          },
+        },
+      ],
     },
     primitive: {
       topology: "triangle-list",
@@ -192,6 +253,11 @@ async function boot() {
     size: circleDrawBufferByteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
+  const textStorageBuffer = device.createBuffer({
+    label: "Blitz Text Draw Storage",
+    size: textDrawBufferByteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
   const bindGroup = device.createBindGroup({
     label: "Blitz Bind Group",
     layout: bindGroupLayout,
@@ -201,6 +267,9 @@ async function boot() {
       { binding: 2, resource: { buffer: rectStorageBuffer } },
       { binding: 3, resource: { buffer: triangleStorageBuffer } },
       { binding: 4, resource: { buffer: circleStorageBuffer } },
+      { binding: 5, resource: { buffer: textStorageBuffer } },
+      { binding: 6, resource: fontAtlasTexture.createView() },
+      { binding: 7, resource: fontSampler },
     ],
   });
 
@@ -339,7 +408,7 @@ async function boot() {
       const dpr = window.devicePixelRatio || 1;
       if (event.ctrlKey || event.metaKey) {
         const point = eventToCanvasPixels(event);
-        const zoomDelta = Math.exp(-event.deltaY * 0.0015);
+        const zoomDelta = Math.exp(-event.deltaY * 0.004);
         wasm.blitz_zoom_at(point.x, point.y, zoomDelta);
       } else {
         wasm.blitz_pan(-event.deltaX * dpr, -event.deltaY * dpr);
@@ -389,6 +458,8 @@ async function boot() {
     const triangleDrawCount = wasm.blitz_triangle_draw_count();
     const circleDrawPtr = wasm.blitz_circle_draw_ptr();
     const circleDrawCount = wasm.blitz_circle_draw_count();
+    const textDrawPtr = wasm.blitz_text_draw_ptr();
+    const textDrawCount = wasm.blitz_text_draw_count();
 
     if (shapeCommandVersion !== lastUploadedShapeCommandVersion) {
       currentShapeCommandCount = shapeCommandCount;
@@ -419,6 +490,14 @@ async function boot() {
           circleDrawCount * circleDrawF32Count,
         );
         device.queue.writeBuffer(circleStorageBuffer, 0, wasmCircleDraws);
+      }
+      if (textDrawCount > 0) {
+        const wasmTextDraws = new Float32Array(
+          wasm.memory.buffer,
+          textDrawPtr,
+          textDrawCount * textDrawF32Count,
+        );
+        device.queue.writeBuffer(textStorageBuffer, 0, wasmTextDraws);
       }
       lastUploadedShapeCommandVersion = shapeCommandVersion;
     }

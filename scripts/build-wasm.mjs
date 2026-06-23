@@ -44,9 +44,13 @@ const wasmExports = [
   "blitz_circle_draw_ptr",
   "blitz_circle_draw_f32_count",
   "blitz_circle_draw_count",
+  "blitz_text_draw_ptr",
+  "blitz_text_draw_f32_count",
+  "blitz_text_draw_count",
   "blitz_entity_count",
   "blitz_render_chunk_rects",
   "blitz_render_max_shapes",
+  "blitz_render_max_text_draws",
   "blitz_time",
 ];
 

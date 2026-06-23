@@ -2,6 +2,7 @@ struct BlitzUniforms {
   viewport_camera: vec4f,
   style: vec4f,
   background_color: vec4f,
+  font_params: vec4f,
 };
 
 struct ShapeCommand {
@@ -30,6 +31,12 @@ struct CircleDraw {
   stroke_width_pad: vec4f,
 };
 
+struct TextDraw {
+  rect: vec4f,
+  uv_rect: vec4f,
+  color: vec4f,
+};
+
 @group(0) @binding(0)
 var<uniform> u: BlitzUniforms;
 
@@ -45,10 +52,20 @@ var<storage, read> triangle_draws: array<TriangleDraw>;
 @group(0) @binding(4)
 var<storage, read> circle_draws: array<CircleDraw>;
 
+@group(0) @binding(5)
+var<storage, read> text_draws: array<TextDraw>;
+
+@group(0) @binding(6)
+var font_atlas: texture_2d<f32>;
+
+@group(0) @binding(7)
+var font_sampler: sampler;
+
 struct VertexOut {
   @builtin(position) position: vec4f,
   @location(0) world: vec2f,
   @location(1) @interpolate(flat) command_index: u32,
+  @location(2) uv: vec2f,
 };
 
 fn world_to_clip(world: vec2f) -> vec2f {
@@ -85,6 +102,21 @@ fn circle_bounds(circle: vec4f, vertex_index: u32) -> vec2f {
   return rect_bounds(vec4f(center - vec2f(radius), vec2f(radius * 2.0)), vertex_index);
 }
 
+fn text_vertex(draw: TextDraw, vertex_index: u32) -> vec4f {
+  let world = rect_bounds(draw.rect, vertex_index);
+  let uv_min = draw.uv_rect.xy;
+  let uv_max = draw.uv_rect.zw;
+  var uvs = array<vec2f, 6>(
+    vec2f(uv_min.x, uv_min.y),
+    vec2f(uv_max.x, uv_min.y),
+    vec2f(uv_min.x, uv_max.y),
+    vec2f(uv_min.x, uv_max.y),
+    vec2f(uv_max.x, uv_min.y),
+    vec2f(uv_max.x, uv_max.y)
+  );
+  return vec4f(world, uvs[vertex_index]);
+}
+
 @vertex
 fn shape_vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
   let command_index = vertex_index / 6u;
@@ -92,18 +124,24 @@ fn shape_vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
   let command = shape_commands[command_index].kind_index_entity_pad;
 
   var world: vec2f;
+  var uv = vec2f(0.0);
   if (command.x == 0u) {
     world = rect_bounds(rect_draws[command.y].rect, shape_vertex_index);
   } else if (command.x == 1u) {
     world = triangle_bounds(triangle_draws[command.y], shape_vertex_index);
-  } else {
+  } else if (command.x == 2u) {
     world = circle_bounds(circle_draws[command.y].circle, shape_vertex_index);
+  } else {
+    let text_position = text_vertex(text_draws[command.y], shape_vertex_index);
+    world = text_position.xy;
+    uv = text_position.zw;
   }
 
   var out: VertexOut;
   out.position = vec4f(world_to_clip(world), 0.0, 1.0);
   out.world = world;
   out.command_index = command_index;
+  out.uv = uv;
   return out;
 }
 
@@ -163,9 +201,32 @@ fn circle_alpha(world: vec2f, draw: CircleDraw, inset: f32, edge_alpha: f32) -> 
   return 1.0 - smoothstep(radius - edge_alpha, radius, distance_to_center);
 }
 
+fn median(value: vec3f) -> f32 {
+  return max(min(value.r, value.g), min(max(value.r, value.g), value.b));
+}
+
+fn msdf_screen_range(uv_width: vec2f) -> f32 {
+  let atlas_size = vec2f(u.font_params.x);
+  let unit_range = vec2f(u.font_params.y) / atlas_size;
+  let screen_tex_size = 1.0 / max(uv_width, vec2f(0.000001));
+  return max(0.5 * dot(unit_range, screen_tex_size), 1.0);
+}
+
 @fragment
 fn shape_fragment_main(in: VertexOut) -> @location(0) vec4f {
+  let uv_width = fwidth(in.uv);
   let command = shape_commands[in.command_index].kind_index_entity_pad;
+  if (command.x == 3u) {
+    let draw = text_draws[command.y];
+    let sample = textureSampleLevel(font_atlas, font_sampler, in.uv, 0.0);
+    let signed_distance = median(sample.rgb) - 0.5;
+    let coverage = clamp(signed_distance * msdf_screen_range(uv_width) + 0.5, 0.0, 1.0);
+    if (coverage <= 0.001) {
+      discard;
+    }
+    return vec4f(draw.color.rgb, draw.color.a * coverage);
+  }
+
   let edge_alpha = 1.0 / max(u.style.x, 0.001);
   var coverage: f32;
   var stroke: f32;

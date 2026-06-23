@@ -1,12 +1,15 @@
 typedef unsigned int u32;
 typedef int i32;
 
+#include "font.generated.h"
+
 #define EXPORT(name) __attribute__((export_name(name)))
 
 #define BLITZ_MAX_ENTITIES 1000000u
 #define BLITZ_RENDER_CHUNK_RECTS 250000u
 #define BLITZ_RENDER_CHUNKS 4u
 #define BLITZ_MAX_RECT_DRAWS (BLITZ_RENDER_CHUNK_RECTS * BLITZ_RENDER_CHUNKS)
+#define BLITZ_MAX_TEXT_DRAWS 4096u
 
 #define BLITZ_GRID_SIZE 1024u
 #define BLITZ_GRID_CELL_SIZE 128.0f
@@ -19,6 +22,7 @@ typedef int i32;
 #define BLITZ_COMPONENT_RECT_VIEW 4u
 #define BLITZ_COMPONENT_TRIANGLE_VIEW 8u
 #define BLITZ_COMPONENT_CIRCLE_VIEW 16u
+#define BLITZ_COMPONENT_TEXT_VIEW 32u
 
 #define BLITZ_MODE_DRAG 0u
 #define BLITZ_MODE_PUSHBACK 1u
@@ -28,6 +32,7 @@ typedef int i32;
 #define BLITZ_SHAPE_RECT 0u
 #define BLITZ_SHAPE_TRIANGLE 1u
 #define BLITZ_SHAPE_CIRCLE 2u
+#define BLITZ_SHAPE_TEXT 3u
 #define BLITZ_PUSHBACK_RADIUS_DEFAULT 140.0f
 #define BLITZ_PUSHBACK_RADIUS_MIN 24.0f
 #define BLITZ_PUSHBACK_RADIUS_MAX 640.0f
@@ -65,10 +70,19 @@ typedef struct CircleView {
   float stroke_width;
 } CircleView;
 
+typedef struct TextView {
+  const char *text;
+  Color color;
+  float font_size;
+  float origin_x;
+  float baseline_offset;
+} TextView;
+
 typedef struct BlitzUniforms {
   float viewport_camera[4];
   float style[4];
   float background_color[4];
+  float font_params[4];
 } BlitzUniforms;
 
 typedef struct ShapeCommand {
@@ -100,6 +114,12 @@ typedef struct CircleDraw {
   float stroke_width_pad[4];
 } CircleDraw;
 
+typedef struct TextDraw {
+  float rect[4];
+  float uv_rect[4];
+  float color[4];
+} TextDraw;
+
 typedef struct World {
   u32 entity_count;
   u32 masks[BLITZ_MAX_ENTITIES];
@@ -109,6 +129,7 @@ typedef struct World {
   RectView rect_views[BLITZ_MAX_ENTITIES];
   TriangleView triangle_views[BLITZ_MAX_ENTITIES];
   CircleView circle_views[BLITZ_MAX_ENTITIES];
+  TextView text_views[BLITZ_MAX_ENTITIES];
   u32 grid_heads[BLITZ_GRID_CELL_COUNT];
   u32 grid_next[BLITZ_MAX_ENTITIES];
   u32 grid_cells[BLITZ_MAX_ENTITIES];
@@ -121,11 +142,13 @@ static ShapeCommand shape_commands[BLITZ_MAX_RECT_DRAWS];
 static RectDraw rect_draws[BLITZ_MAX_RECT_DRAWS];
 static TriangleDraw triangle_draws[BLITZ_MAX_RECT_DRAWS];
 static CircleDraw circle_draws[BLITZ_MAX_RECT_DRAWS];
+static TextDraw text_draws[BLITZ_MAX_TEXT_DRAWS];
 static World world;
 static u32 shape_command_count;
 static u32 rect_draw_count;
 static u32 triangle_draw_count;
 static u32 circle_draw_count;
+static u32 text_draw_count;
 static u32 shape_command_version;
 static u32 render_list_dirty;
 static u32 dragging_entity;
@@ -136,6 +159,7 @@ static u32 pushback_cursor_active;
 static Vec2 pushback_cursor;
 static float pushback_radius;
 static float last_time_seconds;
+static u32 camera_fit_initialized;
 
 static float floorf_local(float value) {
   i32 truncated = (i32)value;
@@ -277,6 +301,20 @@ static void ecs_set_circle_view(u32 entity, Color fill_color,
   world.circle_views[entity].stroke_color = stroke_color;
   world.circle_views[entity].stroke_width = stroke_width;
   world.masks[entity] |= BLITZ_COMPONENT_CIRCLE_VIEW;
+}
+
+static void ecs_set_text_view(u32 entity, const char *text, Color color,
+                              float font_size, float origin_x,
+                              float baseline_offset) {
+  if (entity == BLITZ_INVALID_INDEX) {
+    return;
+  }
+  world.text_views[entity].text = text;
+  world.text_views[entity].color = color;
+  world.text_views[entity].font_size = font_size;
+  world.text_views[entity].origin_x = origin_x;
+  world.text_views[entity].baseline_offset = baseline_offset;
+  world.masks[entity] |= BLITZ_COMPONENT_TEXT_VIEW;
 }
 
 static void grid_insert(u32 entity) {
@@ -474,6 +512,65 @@ static void push_circle_draw(u32 entity) {
   shape_command_count += 1u;
 }
 
+static const FontGlyphMetric *font_glyph_metric(u32 codepoint) {
+  if (codepoint < BLITZ_FONT_FIRST_CODEPOINT ||
+      codepoint > BLITZ_FONT_LAST_CODEPOINT) {
+    codepoint = (u32)'?';
+  }
+  return &blitz_font_glyphs[codepoint - BLITZ_FONT_FIRST_CODEPOINT];
+}
+
+static float font_text_width(const char *text, float font_size) {
+  float width = 0.0f;
+  while (*text != '\0') {
+    const FontGlyphMetric *glyph =
+        font_glyph_metric((u32)(unsigned char)*text);
+    width += glyph->advance * font_size;
+    text += 1;
+  }
+  return width;
+}
+
+static void push_text_draws(u32 entity) {
+  TextView view = world.text_views[entity];
+  Vec2 position = world.positions[entity];
+  const char *text = view.text;
+  float pen_x = position.x + view.origin_x;
+  float baseline_y = position.y + view.baseline_offset;
+  while (*text != '\0') {
+    u32 codepoint = (u32)(unsigned char)*text;
+    const FontGlyphMetric *glyph = font_glyph_metric(codepoint);
+
+    if (codepoint != (u32)' ' &&
+        shape_command_count < BLITZ_MAX_RECT_DRAWS &&
+        text_draw_count < BLITZ_MAX_TEXT_DRAWS) {
+      TextDraw *draw = &text_draws[text_draw_count];
+      draw->rect[0] = pen_x + glyph->plane_left * view.font_size;
+      draw->rect[1] = baseline_y + glyph->plane_top * view.font_size;
+      draw->rect[2] = glyph->plane_width * view.font_size;
+      draw->rect[3] = glyph->plane_height * view.font_size;
+      draw->uv_rect[0] = glyph->uv_left;
+      draw->uv_rect[1] = glyph->uv_top;
+      draw->uv_rect[2] = glyph->uv_right;
+      draw->uv_rect[3] = glyph->uv_bottom;
+      draw->color[0] = view.color.r;
+      draw->color[1] = view.color.g;
+      draw->color[2] = view.color.b;
+      draw->color[3] = view.color.a;
+
+      shape_commands[shape_command_count].shape_kind = BLITZ_SHAPE_TEXT;
+      shape_commands[shape_command_count].shape_index = text_draw_count;
+      shape_commands[shape_command_count].entity = entity;
+      shape_commands[shape_command_count]._pad0 = 0u;
+      text_draw_count += 1u;
+      shape_command_count += 1u;
+    }
+
+    pen_x += glyph->advance * view.font_size;
+    text += 1;
+  }
+}
+
 static int entity_in_cursor_radius_for_mode(u32 entity, u32 mode) {
   if (interaction_mode != mode || !pushback_cursor_active) {
     return 0;
@@ -594,6 +691,7 @@ static void extract_render_draws(void) {
   rect_draw_count = 0u;
   triangle_draw_count = 0u;
   circle_draw_count = 0u;
+  text_draw_count = 0u;
 
   float half_w = uniforms.viewport_camera[0] * 0.5f / uniforms.style[0];
   float half_h = uniforms.viewport_camera[1] * 0.5f / uniforms.style[0];
@@ -610,6 +708,7 @@ static void extract_render_draws(void) {
       u32 has_rect = world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW;
       u32 has_triangle = world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW;
       u32 has_circle = world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW;
+      u32 has_text = world.masks[entity] & BLITZ_COMPONENT_TEXT_VIEW;
       u32 has_shape = has_rect || has_triangle || has_circle;
       u32 draw_circle =
           has_shape &&
@@ -632,6 +731,8 @@ static void extract_render_draws(void) {
         push_circle_draw(entity);
       } else if (has_triangle) {
         push_triangle_draw(entity);
+      } else if (has_text) {
+        push_text_draws(entity);
       }
     }
   }
@@ -834,39 +935,115 @@ static void update_pushback(float dt) {
   }
 }
 
+static void create_slide_rect(float x, float y, float width, float height,
+                              Color fill, Color stroke, float stroke_width) {
+  u32 entity = ecs_create_entity();
+  ecs_set_position(entity, x, y);
+  ecs_set_size(entity, width, height);
+  ecs_set_rect_view(entity, fill, stroke, stroke_width);
+  grid_insert(entity);
+}
+
+static void create_slide_text(const char *text, float x, float baseline_y,
+                              float font_size, Color color) {
+  float padding = 4.0f;
+  float top = baseline_y - BLITZ_FONT_ASCENDER * font_size;
+  float width = font_text_width(text, font_size);
+  float height = BLITZ_FONT_LINE_HEIGHT * font_size;
+  u32 entity = ecs_create_entity();
+  ecs_set_position(entity, x - padding, top - padding);
+  ecs_set_size(entity, width + padding * 2.0f, height + padding * 2.0f);
+  ecs_set_text_view(entity, text, color, font_size, padding,
+                    padding + BLITZ_FONT_ASCENDER * font_size);
+  grid_insert(entity);
+}
+
 static void create_demo_world(void) {
-  u32 columns = 1000u;
-  u32 rows = 1000u;
-  float spacing = 24.0f;
-  float rect_size = 12.0f;
-  float origin = -((float)columns * spacing) * 0.5f;
+  Color transparent = {0.0f, 0.0f, 0.0f, 0.0f};
 
-  for (u32 y = 0u; y < rows; y += 1u) {
-    for (u32 x = 0u; x < columns; x += 1u) {
-      if (world.entity_count >= BLITZ_MAX_ENTITIES) {
-        break;
-      }
+  create_slide_rect(-560.0f, -315.0f, 1120.0f, 630.0f,
+                    (Color){0.965f, 0.972f, 0.984f, 1.0f}, transparent, 0.0f);
+  create_slide_rect(-560.0f, -315.0f, 300.0f, 630.0f,
+                    (Color){0.075f, 0.095f, 0.13f, 1.0f}, transparent, 0.0f);
+  create_slide_rect(-560.0f, -315.0f, 300.0f, 9.0f,
+                    (Color){0.11f, 0.72f, 0.61f, 1.0f}, transparent, 0.0f);
+  create_slide_rect(-260.0f, -315.0f, 820.0f, 9.0f,
+                    (Color){0.91f, 0.31f, 0.27f, 1.0f}, transparent, 0.0f);
 
-      u32 entity = ecs_create_entity();
-      float px = origin + (float)x * spacing;
-      float py = origin + (float)y * spacing;
-      float hue_a = (float)(x % 17u) / 17.0f;
-      float hue_b = (float)(y % 19u) / 19.0f;
+  create_slide_rect(-500.0f, 20.0f, 190.0f, 2.0f,
+                    (Color){0.23f, 0.28f, 0.35f, 1.0f}, transparent, 0.0f);
+  create_slide_rect(-500.0f, 74.0f, 150.0f, 2.0f,
+                    (Color){0.23f, 0.28f, 0.35f, 1.0f}, transparent, 0.0f);
+  create_slide_rect(-500.0f, 128.0f, 110.0f, 2.0f,
+                    (Color){0.23f, 0.28f, 0.35f, 1.0f}, transparent, 0.0f);
 
-      ecs_set_position(entity, px, py);
-      ecs_set_size(entity, rect_size, rect_size);
-      ecs_set_rect_view(
-          entity, (Color){0.12f + hue_a * 0.55f, 0.25f + hue_b * 0.45f, 0.68f, 1.0f},
-          (Color){0.08f, 0.32f, 1.0f, 1.0f}, 1.5f);
-      ecs_set_triangle_view(
-          entity, (Color){0.12f + hue_a * 0.55f, 0.25f + hue_b * 0.45f, 0.68f, 1.0f},
-          (Color){1.0f, 0.86f, 0.1f, 1.0f}, 1.5f);
-      ecs_set_circle_view(
-          entity, (Color){0.12f + hue_a * 0.55f, 0.25f + hue_b * 0.45f, 0.68f, 1.0f},
-          (Color){1.0f, 1.0f, 1.0f, 1.0f}, 1.5f);
-      grid_insert(entity);
-    }
-  }
+  create_slide_rect(-205.0f, 15.0f, 338.0f, 100.0f,
+                    (Color){1.0f, 1.0f, 1.0f, 1.0f},
+                    (Color){0.86f, 0.88f, 0.91f, 1.0f}, 1.0f);
+  create_slide_rect(161.0f, 15.0f, 338.0f, 100.0f,
+                    (Color){1.0f, 1.0f, 1.0f, 1.0f},
+                    (Color){0.86f, 0.88f, 0.91f, 1.0f}, 1.0f);
+
+  create_slide_rect(-205.0f, 145.0f, 704.0f, 154.0f,
+                    (Color){0.925f, 0.94f, 0.96f, 1.0f}, transparent, 0.0f);
+  create_slide_rect(-42.0f, 188.0f, 480.0f, 13.0f,
+                    (Color){0.86f, 0.88f, 0.91f, 1.0f}, transparent, 0.0f);
+  create_slide_rect(-42.0f, 188.0f, 398.0f, 13.0f,
+                    (Color){0.91f, 0.31f, 0.27f, 1.0f}, transparent, 0.0f);
+  create_slide_rect(-42.0f, 230.0f, 480.0f, 13.0f,
+                    (Color){0.86f, 0.88f, 0.91f, 1.0f}, transparent, 0.0f);
+  create_slide_rect(-42.0f, 230.0f, 318.0f, 13.0f,
+                    (Color){0.11f, 0.72f, 0.61f, 1.0f}, transparent, 0.0f);
+  create_slide_rect(-42.0f, 272.0f, 480.0f, 13.0f,
+                    (Color){0.86f, 0.88f, 0.91f, 1.0f}, transparent, 0.0f);
+  create_slide_rect(-42.0f, 272.0f, 226.0f, 13.0f,
+                    (Color){0.27f, 0.43f, 0.89f, 1.0f}, transparent, 0.0f);
+
+  create_slide_text("BLITZ", -500.0f, -222.0f, 52.0f,
+                    (Color){1.0f, 1.0f, 1.0f, 1.0f});
+  create_slide_text("GPU-NATIVE CANVAS", -500.0f, -172.0f, 16.0f,
+                    (Color){0.55f, 0.90f, 0.82f, 1.0f});
+  create_slide_text("One draw call.", -205.0f, -184.0f, 58.0f,
+                    (Color){0.08f, 0.10f, 0.13f, 1.0f});
+  create_slide_text("Every visual layer.", -205.0f, -122.0f, 58.0f,
+                    (Color){0.08f, 0.10f, 0.13f, 1.0f});
+  create_slide_text("Shapes and MSDF text share one ordered command stream.",
+                    -202.0f, -65.0f, 20.0f,
+                    (Color){0.32f, 0.36f, 0.42f, 1.0f});
+
+  create_slide_text("RENDER MODEL", -500.0f, -45.0f, 14.0f,
+                    (Color){0.55f, 0.90f, 0.82f, 1.0f});
+  create_slide_text("Rects", -500.0f, 1.0f, 21.0f,
+                    (Color){0.95f, 0.97f, 1.0f, 1.0f});
+  create_slide_text("Text", -500.0f, 55.0f, 21.0f,
+                    (Color){0.95f, 0.97f, 1.0f, 1.0f});
+  create_slide_text("Z-order", -500.0f, 109.0f, 21.0f,
+                    (Color){0.95f, 0.97f, 1.0f, 1.0f});
+  create_slide_text("1 pipeline", -500.0f, 232.0f, 17.0f,
+                    (Color){0.68f, 0.72f, 0.78f, 1.0f});
+
+  create_slide_text("01", -178.0f, 57.0f, 18.0f,
+                    (Color){0.91f, 0.31f, 0.27f, 1.0f});
+  create_slide_text("Unified", -130.0f, 55.0f, 24.0f,
+                    (Color){0.08f, 0.10f, 0.13f, 1.0f});
+  create_slide_text("Command order preserves every layer.", -178.0f, 91.0f,
+                    15.0f, (Color){0.36f, 0.40f, 0.46f, 1.0f});
+
+  create_slide_text("02", 188.0f, 57.0f, 18.0f,
+                    (Color){0.08f, 0.55f, 0.48f, 1.0f});
+  create_slide_text("Scalable", 236.0f, 55.0f, 24.0f,
+                    (Color){0.08f, 0.10f, 0.13f, 1.0f});
+  create_slide_text("Storage buffers keep CPU work flat.", 188.0f, 91.0f,
+                    15.0f, (Color){0.36f, 0.40f, 0.46f, 1.0f});
+
+  create_slide_text("FRAME COMPOSITION", -178.0f, 159.0f, 14.0f,
+                    (Color){0.36f, 0.40f, 0.46f, 1.0f});
+  create_slide_text("Geometry", -178.0f, 204.0f, 15.0f,
+                    (Color){0.19f, 0.22f, 0.27f, 1.0f});
+  create_slide_text("Typography", -178.0f, 246.0f, 15.0f,
+                    (Color){0.19f, 0.22f, 0.27f, 1.0f});
+  create_slide_text("Interaction", -178.0f, 288.0f, 15.0f,
+                    (Color){0.19f, 0.22f, 0.27f, 1.0f});
 }
 
 EXPORT("blitz_init")
@@ -876,6 +1053,7 @@ void blitz_init(void) {
   rect_draw_count = 0u;
   triangle_draw_count = 0u;
   circle_draw_count = 0u;
+  text_draw_count = 0u;
   shape_command_version = 0u;
   render_list_dirty = 1u;
   dragging_entity = BLITZ_INVALID_INDEX;
@@ -888,6 +1066,7 @@ void blitz_init(void) {
   pushback_cursor.y = 0.0f;
   pushback_radius = BLITZ_PUSHBACK_RADIUS_DEFAULT;
   last_time_seconds = 0.0f;
+  camera_fit_initialized = 0u;
   grid_clear();
 
   uniforms.viewport_camera[0] = 1.0f;
@@ -904,6 +1083,11 @@ void blitz_init(void) {
   uniforms.background_color[2] = 0.092f;
   uniforms.background_color[3] = 1.0f;
 
+  uniforms.font_params[0] = BLITZ_FONT_ATLAS_SIZE;
+  uniforms.font_params[1] = BLITZ_FONT_MSDF_SPREAD;
+  uniforms.font_params[2] = 0.0f;
+  uniforms.font_params[3] = 0.0f;
+
   create_demo_world();
   extract_render_draws();
 }
@@ -916,6 +1100,12 @@ void blitz_resize(float width, float height) {
       uniforms.viewport_camera[1] != next_height) {
     uniforms.viewport_camera[0] = next_width;
     uniforms.viewport_camera[1] = next_height;
+    if (!camera_fit_initialized) {
+      uniforms.style[0] =
+          clampf(minf_local(next_width / 1200.0f, next_height / 675.0f),
+                 0.15f, 12.0f);
+      camera_fit_initialized = 1u;
+    }
     mark_render_list_dirty();
   }
 }
@@ -961,6 +1151,9 @@ u32 blitz_pointer_down(float screen_x, float screen_y) {
   for (u32 i = shape_command_count; i > 0u; i -= 1u) {
     ShapeCommand command = shape_commands[i - 1u];
     u32 entity = command.entity;
+    if (entity == BLITZ_INVALID_INDEX) {
+      continue;
+    }
     u32 hit = 0u;
     if (command.shape_kind == BLITZ_SHAPE_CIRCLE) {
       hit = (u32)point_in_circle(world_x, world_y, entity);
@@ -1134,6 +1327,27 @@ u32 blitz_circle_draw_f32_count(void) {
 EXPORT("blitz_circle_draw_count")
 u32 blitz_circle_draw_count(void) {
   return circle_draw_count;
+}
+
+EXPORT("blitz_text_draw_ptr")
+u32 blitz_text_draw_ptr(void) {
+  extract_render_draws();
+  return (u32)&text_draws[0];
+}
+
+EXPORT("blitz_text_draw_f32_count")
+u32 blitz_text_draw_f32_count(void) {
+  return sizeof(TextDraw) / sizeof(float);
+}
+
+EXPORT("blitz_text_draw_count")
+u32 blitz_text_draw_count(void) {
+  return text_draw_count;
+}
+
+EXPORT("blitz_render_max_text_draws")
+u32 blitz_render_max_text_draws(void) {
+  return BLITZ_MAX_TEXT_DRAWS;
 }
 
 EXPORT("blitz_entity_count")

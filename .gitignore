@@ -1,6 +1,8 @@
 node_modules/
 dist/
 public/blitz.wasm
+public/font-atlas.png
+src/wasm/font.generated.h
 *.log
 .env
 .env.*

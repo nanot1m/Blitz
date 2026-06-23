@@ -60,6 +60,7 @@ const wasmExports = [
   "blitz_render_max_dyn_rects",
   "blitz_entity_count",
   "blitz_selected_count",
+  "blitz_wasm_live_bytes",
   "blitz_render_chunk_rects",
   "blitz_render_max_shapes",
   "blitz_render_max_text_draws",

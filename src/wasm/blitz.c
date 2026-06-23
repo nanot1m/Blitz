@@ -1487,6 +1487,26 @@ u32 blitz_selected_count(void) {
   return selected_count;
 }
 
+// Estimated bytes actually written (a proxy for committed RAM): per-entity
+// arrays up to the high-water entity count, plus the populated draw buffers.
+// The statically reserved arrays are far larger but their untouched pages
+// stay demand-zero and cost no physical memory.
+EXPORT("blitz_wasm_live_bytes")
+u32 blitz_wasm_live_bytes(void) {
+  u32 per_entity = 6u * (u32)sizeof(u32) + 2u * (u32)sizeof(Vec2) +
+                   (u32)sizeof(RectView) + (u32)sizeof(TriangleView) +
+                   (u32)sizeof(CircleView) + (u32)sizeof(TextView);
+  u32 entity_bytes = world.entity_count * per_entity;
+  u32 draw_bytes = shape_command_count * (u32)sizeof(ShapeCommand) +
+                   rect_draw_count * (u32)sizeof(RectDraw) +
+                   triangle_draw_count * (u32)sizeof(TriangleDraw) +
+                   circle_draw_count * (u32)sizeof(CircleDraw) +
+                   text_draw_count * (u32)sizeof(TextDraw) +
+                   dyn_command_count * (u32)sizeof(ShapeCommand) +
+                   dyn_rect_count * (u32)sizeof(RectDraw);
+  return entity_bytes + draw_bytes;
+}
+
 EXPORT("blitz_render_chunk_rects")
 u32 blitz_render_chunk_rects(void) {
   return BLITZ_RENDER_CHUNK_RECTS;

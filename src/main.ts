@@ -60,6 +60,7 @@ type BlitzExports = {
   blitz_render_max_dyn_rects(): number;
   blitz_entity_count(): number;
   blitz_selected_count(): number;
+  blitz_wasm_live_bytes(): number;
   blitz_render_chunk_rects(): number;
   blitz_render_max_shapes(): number;
   blitz_render_max_text_draws(): number;
@@ -480,7 +481,8 @@ async function boot() {
       `text glyphs ${wasm.blitz_text_draw_count().toLocaleString()}`,
       `dyn cmds    ${wasm.blitz_dyn_command_count().toLocaleString()}`,
       `selected    ${wasm.blitz_selected_count().toLocaleString()}`,
-      `wasm mem    ${formatBytes(wasm.memory.buffer.byteLength)}`,
+      `wasm rsvd   ${formatBytes(wasm.memory.buffer.byteLength)}`,
+      `wasm live~  ${formatBytes(wasm.blitz_wasm_live_bytes())}`,
       `gpu bufs    ${formatBytes(gpuBufferBytes)}`,
       `depth tex   ${formatBytes(canvas.width * canvas.height * 4)}`,
     ];

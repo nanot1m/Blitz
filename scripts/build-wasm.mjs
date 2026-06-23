@@ -28,6 +28,7 @@ const wasmExports = [
   "blitz_add_circle",
   "blitz_add_triangle",
   "blitz_add_text",
+  "blitz_stress_test",
   "blitz_delete_selected",
   "blitz_has_selection",
   "blitz_bring_to_front",

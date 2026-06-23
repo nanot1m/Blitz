@@ -1,18 +1,39 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import opentype from "opentype.js";
 import { PNG } from "pngjs";
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const scriptPath = fileURLToPath(import.meta.url);
+const root = resolve(dirname(scriptPath), "..");
 const input = resolve(root, "src/assets/OpenSans-Regular.ttf");
 const atlasOutput = resolve(root, "public/font-atlas.png");
 const headerOutput = resolve(root, "src/wasm/font.generated.h");
+const metaOutput = resolve(root, ".cache/font-meta.json");
 const fontSize = 64;
 const padding = 8;
 const spread = 6;
 
-const font = opentype.parse(readFileSync(input).buffer);
+const fontBytes = readFileSync(input);
+const inputHash = createHash("sha256")
+  .update(fontBytes)
+  .update(readFileSync(scriptPath))
+  .update(JSON.stringify({ fontSize, padding, spread }))
+  .digest("hex");
+
+if (existsSync(atlasOutput) && existsSync(headerOutput) && existsSync(metaOutput)) {
+  try {
+    if (JSON.parse(readFileSync(metaOutput, "utf8")).hash === inputHash) {
+      console.log("Font assets up to date; skipping compilation.");
+      process.exit(0);
+    }
+  } catch {
+    // Regenerate on unreadable/corrupt meta.
+  }
+}
+
+const font = opentype.parse(fontBytes.buffer);
 const codepoints = [...new Set(Object.keys(font.encoding.cmap.glyphIndexMap).map(Number))]
   .filter((codepoint) => codepoint !== 0 && codepoint !== 13)
   .sort((a, b) => a - b);
@@ -310,7 +331,9 @@ ${metrics}
 
 mkdirSync(dirname(atlasOutput), { recursive: true });
 mkdirSync(dirname(headerOutput), { recursive: true });
+mkdirSync(dirname(metaOutput), { recursive: true });
 writeFileSync(atlasOutput, PNG.sync.write(png));
 writeFileSync(headerOutput, header);
+writeFileSync(metaOutput, JSON.stringify({ hash: inputHash, atlasSize, glyphCount: glyphs.length }, null, 2));
 console.log(`Wrote ${atlasOutput}`);
 console.log(`Wrote ${headerOutput}`);

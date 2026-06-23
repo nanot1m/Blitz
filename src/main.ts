@@ -2,6 +2,7 @@ import {
   BringToFront,
   Circle,
   createIcons,
+  LayoutGrid,
   SendToBack,
   Square,
   Trash2,
@@ -25,6 +26,7 @@ type BlitzExports = {
   blitz_add_circle(): void;
   blitz_add_triangle(): void;
   blitz_add_text(): void;
+  blitz_stress_test(): void;
   blitz_delete_selected(): void;
   blitz_has_selection(): number;
   blitz_bring_to_front(): void;
@@ -59,6 +61,7 @@ const addRectElement = document.querySelector<HTMLButtonElement>("#add-rect");
 const addCircleElement = document.querySelector<HTMLButtonElement>("#add-circle");
 const addTriangleElement = document.querySelector<HTMLButtonElement>("#add-triangle");
 const addTextElement = document.querySelector<HTMLButtonElement>("#add-text");
+const stressTestElement = document.querySelector<HTMLButtonElement>("#stress-test");
 const sendToBackElement = document.querySelector<HTMLButtonElement>("#send-to-back");
 const bringToFrontElement = document.querySelector<HTMLButtonElement>("#bring-to-front");
 const deleteElement = document.querySelector<HTMLButtonElement>("#delete-selected");
@@ -70,6 +73,7 @@ if (
   !addCircleElement ||
   !addTriangleElement ||
   !addTextElement ||
+  !stressTestElement ||
   !sendToBackElement ||
   !bringToFrontElement ||
   !deleteElement
@@ -83,6 +87,7 @@ const addRectButton = addRectElement;
 const addCircleButton = addCircleElement;
 const addTriangleButton = addTriangleElement;
 const addTextButton = addTextElement;
+const stressTestButton = stressTestElement;
 const sendToBackButton = sendToBackElement;
 const bringToFrontButton = bringToFrontElement;
 const deleteButton = deleteElement;
@@ -91,6 +96,7 @@ createIcons({
   icons: {
     BringToFront,
     Circle,
+    LayoutGrid,
     SendToBack,
     Square,
     Trash2,
@@ -445,6 +451,12 @@ async function boot() {
   addTextButton.addEventListener("click", () => {
     stopDragging();
     wasm.blitz_add_text();
+    updateSelectionState();
+  });
+
+  stressTestButton.addEventListener("click", () => {
+    stopDragging();
+    wasm.blitz_stress_test();
     updateSelectionState();
   });
 

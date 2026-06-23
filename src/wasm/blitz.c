@@ -4,11 +4,11 @@ typedef unsigned int u32;
 
 #define EXPORT(name) __attribute__((export_name(name)))
 
-#define BLITZ_MAX_ENTITIES 1000000u
+#define BLITZ_MAX_ENTITIES 2000000u
 #define BLITZ_RENDER_CHUNK_RECTS 250000u
 #define BLITZ_RENDER_CHUNKS 4u
 #define BLITZ_MAX_RECT_DRAWS (BLITZ_RENDER_CHUNK_RECTS * BLITZ_RENDER_CHUNKS)
-#define BLITZ_MAX_TEXT_DRAWS 4096u
+#define BLITZ_MAX_TEXT_DRAWS 262144u
 
 #define BLITZ_INVALID_INDEX 0xffffffffu
 
@@ -597,16 +597,26 @@ static void push_text_draws(u32 entity) {
   }
 }
 
-static int rect_intersects_view(u32 entity, float min_x, float min_y,
-                                float max_x, float max_y) {
+#define BLITZ_MIN_SCREEN_PX 1.0f
+
+static int rect_visible_in_view(u32 entity, float scale, float min_x,
+                                float min_y, float max_x, float max_y) {
   Vec2 position = world.positions[entity];
   Vec2 size = world.sizes[entity];
   float rect_min_x = position.x;
   float rect_min_y = position.y;
   float rect_max_x = position.x + size.x;
   float rect_max_y = position.y + size.y;
-  return rect_max_x >= min_x && rect_min_x <= max_x && rect_max_y >= min_y &&
-         rect_min_y <= max_y;
+  if (rect_max_x < min_x || rect_min_x > max_x || rect_max_y < min_y ||
+      rect_min_y > max_y) {
+    return 0;
+  }
+  // Only cull when sub-pixel in both axes so thin lines still render.
+  if (size.x * scale < BLITZ_MIN_SCREEN_PX &&
+      size.y * scale < BLITZ_MIN_SCREEN_PX) {
+    return 0;
+  }
+  return 1;
 }
 
 static void extract_render_draws(void) {
@@ -632,8 +642,8 @@ static void extract_render_draws(void) {
        order_index += 1u) {
     u32 entity = world.draw_order[order_index];
     if ((world.masks[entity] & base_required) == base_required &&
-        rect_intersects_view(entity, view_min_x, view_min_y, view_max_x,
-                             view_max_y)) {
+        rect_visible_in_view(entity, uniforms.style[0], view_min_x, view_min_y,
+                             view_max_x, view_max_y)) {
       u32 has_rect = world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW;
       u32 has_triangle = world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW;
       u32 has_circle = world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW;
@@ -713,10 +723,15 @@ static int point_in_circle(float world_x, float world_y, u32 entity) {
   return dx * dx + dy * dy <= radius * radius;
 }
 
+// Translates demo-slide coordinates so create_demo_world can be instanced
+// at grid offsets without touching its hardcoded layout.
+static float slide_origin_x = 0.0f;
+static float slide_origin_y = 0.0f;
+
 static u32 create_slide_rect(float x, float y, float width, float height,
                              Color fill, Color stroke, float stroke_width) {
   u32 entity = ecs_create_entity();
-  ecs_set_position(entity, x, y);
+  ecs_set_position(entity, slide_origin_x + x, slide_origin_y + y);
   ecs_set_size(entity, width, height);
   ecs_set_rect_view(entity, fill, stroke, stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
@@ -730,7 +745,8 @@ static void create_slide_text(const char *text, float x, float baseline_y,
   float width = font_text_width(text, font_size);
   float height = BLITZ_FONT_LINE_HEIGHT * font_size;
   u32 entity = ecs_create_entity();
-  ecs_set_position(entity, x - padding, top - padding);
+  ecs_set_position(entity, slide_origin_x + x - padding,
+                   slide_origin_y + top - padding);
   ecs_set_size(entity, width + padding * 2.0f, height + padding * 2.0f);
   ecs_set_text_view(entity, text, color, font_size, padding,
                     padding + BLITZ_FONT_ASCENDER * font_size);
@@ -936,7 +952,7 @@ void blitz_resize(float width, float height) {
     if (!camera_fit_initialized) {
       uniforms.style[0] =
           clampf(minf_local(next_width / 1200.0f, next_height / 675.0f),
-                 0.15f, 12.0f);
+                 0.005f, 12.0f);
       camera_fit_initialized = 1u;
     }
     mark_render_list_dirty();
@@ -1144,6 +1160,26 @@ void blitz_add_text(void) {
                                 uniforms.viewport_camera[3] + offset);
   spawn_count += 1u;
   select_only(entity);
+}
+
+EXPORT("blitz_stress_test")
+void blitz_stress_test(void) {
+  const u32 columns = 200u;
+  const u32 rows = 200u;
+  const float pitch_x = 1240.0f;
+  const float pitch_y = 750.0f;
+  float base_x = -0.5f * (float)(columns - 1u) * pitch_x;
+  float base_y = -0.5f * (float)(rows - 1u) * pitch_y;
+  for (u32 row = 0u; row < rows; row += 1u) {
+    for (u32 col = 0u; col < columns; col += 1u) {
+      slide_origin_x = base_x + (float)col * pitch_x;
+      slide_origin_y = base_y + (float)row * pitch_y;
+      create_demo_world();
+    }
+  }
+  slide_origin_x = 0.0f;
+  slide_origin_y = 0.0f;
+  mark_render_list_dirty();
 }
 
 EXPORT("blitz_delete_selected")

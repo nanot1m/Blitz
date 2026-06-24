@@ -8,5 +8,6 @@ src/wasm/font.generated.h
 .env
 .env.*
 !.env.example
+.cert/
 .DS_Store
 Thumbs.db

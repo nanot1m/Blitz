@@ -52,6 +52,7 @@ const wasmExports = [
   "blitz_stress_test",
   "blitz_delete_selected",
   "blitz_has_selection",
+  "blitz_select_all",
   "blitz_bring_to_front",
   "blitz_send_to_back",
   "blitz_uniform_ptr",

@@ -47,6 +47,13 @@ npm run preview     # Serve the production bundle locally
 The toolbar can add rectangles, circles, triangles, and text; change selection z-order; delete selected objects; show rendering statistics; and configure the MCP bridge.
 On touch-first screens up to 620 CSS pixels wide, the shape actions collapse into a dropdown and the toolbar remains at least 10 pixels from the viewport edges. Narrow desktop windows keep the full toolbar.
 
+Keyboard shortcuts:
+
+- `Ctrl/Cmd+A`: select all objects
+- `Ctrl/Cmd+O`: open the file picker
+- `Ctrl/Cmd+S`: save the current file
+- `Ctrl/Cmd+R`: open and focus the recent-files list
+
 ## Local scene files
 
 Click the Open action to show **Open File**, a divider, and the recent-file list. Click the Save action to show **Save**, **Save As**, and a **Save current viewpoint** option.
@@ -54,7 +61,6 @@ Click the Open action to show **Open File**, a divider, and the recent-file list
 The binary format is serialized and deserialized entirely inside WASM. It preserves:
 
 - Shape type, position, size, styles, text, and draw order
-- Current selection
 - An optional starting viewpoint
 
 Chromium browsers use the File System Access API, allowing subsequent saves to overwrite the selected file. Browsers without that API use file upload and download fallbacks.
@@ -63,7 +69,9 @@ When supported, the most recent ten file handles are stored in IndexedDB. Reopen
 
 Panning and zooming are view-only operations: they do not mark the scene as modified and regular saves preserve the file's existing starting viewpoint. Enable **Save current viewpoint** to make the current camera center and zoom the viewpoint restored the next time the file opens.
 
-WASM exposes a monotonic scene revision covering persisted changes such as geometry, text, selection, and z-order. A gray dot appears on the Save icon while the current revision differs from the last successful save or load. Closing or reloading a page with unsaved changes triggers the browser's standard unsaved-changes confirmation. Browsers do not permit reliable asynchronous saving during page unload, so the application warns rather than attempting a silent final save.
+Selection is session-only UI state. Selecting, deselecting, or marquee-selecting objects is not written to scene files and does not mark the scene as modified.
+
+WASM exposes a monotonic scene revision covering persisted changes such as geometry, text, and z-order. A gray dot appears on the Save icon while the current revision differs from the last successful save or load. Closing or reloading a page with unsaved changes triggers the browser's standard unsaved-changes confirmation. Browsers do not permit reliable asynchronous saving during page unload, so the application warns rather than attempting a silent final save.
 
 The current version uses a 16 MB WASM file buffer. Files include a magic number, format version, total byte count, camera header, and variable-length shape records. Invalid files are fully validated before the live scene is replaced.
 

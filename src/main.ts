@@ -98,6 +98,7 @@ type BlitzExports = {
   blitz_stress_test(): void;
   blitz_delete_selected(): void;
   blitz_has_selection(): number;
+  blitz_select_all(): void;
   blitz_bring_to_front(): void;
   blitz_send_to_back(): void;
   blitz_uniform_ptr(): number;
@@ -554,6 +555,9 @@ async function boot() {
   let draggingCamera = false;
   let draggingEntity = false;
   let selectingArea = false;
+  let mouseEntityDragPending = false;
+  let mouseDragStartX = 0;
+  let mouseDragStartY = 0;
   let lastX = 0;
   let lastY = 0;
   const activeTouches = new Map<number, { x: number; y: number }>();
@@ -565,6 +569,7 @@ async function boot() {
   let touchStartY = 0;
   let longPressTimer: number | undefined;
   const touchMoveThreshold = 8;
+  const mouseDragThreshold = 4;
   const longPressDelay = 450;
 
   const updateSelectionState = () => {
@@ -659,6 +664,7 @@ async function boot() {
     draggingCamera = false;
     draggingEntity = false;
     selectingArea = false;
+    mouseEntityDragPending = false;
     canvas.classList.remove("is-dragging-entity", "is-panning", "is-selecting");
     wasm.blitz_pointer_up();
   };
@@ -714,7 +720,10 @@ async function boot() {
       const pointerMode = wasm.blitz_pointer_down(point.x, point.y, additive);
       draggingEntity = pointerMode === 1;
       selectingArea = pointerMode === 2;
-      canvas.classList.toggle("is-dragging-entity", draggingEntity);
+      mouseEntityDragPending = event.pointerType === "mouse" && draggingEntity;
+      mouseDragStartX = event.clientX;
+      mouseDragStartY = event.clientY;
+      canvas.classList.toggle("is-dragging-entity", draggingEntity && !mouseEntityDragPending);
       canvas.classList.toggle("is-selecting", selectingArea);
       updateSelectionState();
     }
@@ -778,6 +787,17 @@ async function boot() {
 
     const dpr = window.devicePixelRatio || 1;
     if (draggingEntity || selectingArea) {
+      if (draggingEntity && mouseEntityDragPending) {
+        const moved = Math.hypot(
+          event.clientX - mouseDragStartX,
+          event.clientY - mouseDragStartY,
+        );
+        if (moved < mouseDragThreshold) {
+          return;
+        }
+        mouseEntityDragPending = false;
+        canvas.classList.add("is-dragging-entity");
+      }
       const point = eventToCanvasPixels(event);
       wasm.blitz_pointer_move(point.x, point.y);
     } else {
@@ -1030,6 +1050,36 @@ async function boot() {
       (event.target instanceof HTMLElement && event.target.isContentEditable)
     ) {
       return;
+    }
+    if (document.querySelector("dialog[open]")) {
+      return;
+    }
+
+    const commandKey = event.ctrlKey || event.metaKey;
+    if (commandKey && !event.altKey) {
+      const key = event.key.toLowerCase();
+      if (key === "a") {
+        event.preventDefault();
+        stopDragging();
+        wasm.blitz_select_all();
+        updateSelectionState();
+        return;
+      }
+      if (key === "o") {
+        event.preventDefault();
+        sceneFileStorage.openFile();
+        return;
+      }
+      if (key === "s") {
+        event.preventDefault();
+        sceneFileStorage.saveFile();
+        return;
+      }
+      if (key === "r") {
+        event.preventDefault();
+        sceneFileStorage.showRecentFiles();
+        return;
+      }
     }
     if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();

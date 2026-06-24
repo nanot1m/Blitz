@@ -271,7 +271,6 @@ static void mark_render_list_dirty(void) {
 
 static void mark_dynamic_dirty(void) {
   dynamic_dirty = 1u;
-  scene_revision += 1u;
 }
 
 static void mark_view_dirty(void) {
@@ -1732,7 +1731,8 @@ u32 blitz_scene_serialize(void) {
     Vec2 size = world.sizes[entity];
     write_u32(scene_file_buffer, offset, kind);
     write_u32(scene_file_buffer, offset + 4u, record_bytes);
-    write_u32(scene_file_buffer, offset + 8u, world.selected[entity]);
+    // Reserved for backward compatibility. Selection is session-only state.
+    write_u32(scene_file_buffer, offset + 8u, 0u);
     write_u32(scene_file_buffer, offset + 12u, text_length);
     write_f32(scene_file_buffer, offset + 16u, position.x);
     write_f32(scene_file_buffer, offset + 20u, position.y);
@@ -1837,7 +1837,6 @@ u32 blitz_scene_deserialize(u32 byte_count) {
   for (u32 index = 0u; index < object_count; index += 1u) {
     u32 kind = read_u32(scene_file_buffer, offset);
     u32 record_bytes = read_u32(scene_file_buffer, offset + 4u);
-    u32 selected = read_u32(scene_file_buffer, offset + 8u);
     u32 text_length = read_u32(scene_file_buffer, offset + 12u);
     float x = read_f32(scene_file_buffer, offset + 16u);
     float y = read_f32(scene_file_buffer, offset + 20u);
@@ -1881,8 +1880,7 @@ u32 blitz_scene_deserialize(u32 byte_count) {
                         baseline_offset);
     }
     world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
-    world.selected[entity] = selected ? 1u : 0u;
-    selected_count += world.selected[entity];
+    world.selected[entity] = 0u;
     offset += record_bytes;
   }
 
@@ -1949,6 +1947,18 @@ void blitz_delete_selected(void) {
 EXPORT("blitz_has_selection")
 u32 blitz_has_selection(void) {
   return selected_count > 0u;
+}
+
+EXPORT("blitz_select_all")
+void blitz_select_all(void) {
+  selected_count = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    u32 selected =
+        world.masks[entity] & BLITZ_COMPONENT_SELECTABLE ? 1u : 0u;
+    world.selected[entity] = selected;
+    selected_count += selected;
+  }
+  mark_dynamic_dirty();
 }
 
 EXPORT("blitz_bring_to_front")

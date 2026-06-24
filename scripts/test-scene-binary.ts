@@ -34,7 +34,19 @@ if (wasm.blitz_scene_revision() === emptyRevision) {
 }
 
 const originalEntities = wasm.blitz_entity_count();
-const originalSelected = wasm.blitz_selected_count();
+const revisionBeforeSelectAll = wasm.blitz_scene_revision();
+wasm.blitz_select_all();
+if (wasm.blitz_selected_count() !== originalEntities) {
+  throw new Error("Select all did not select every scene object.");
+}
+if (wasm.blitz_scene_revision() !== revisionBeforeSelectAll) {
+  throw new Error("Select all should not mark the scene as modified.");
+}
+const revisionBeforeSelectionChange = wasm.blitz_scene_revision();
+wasm.blitz_clear_selection();
+if (wasm.blitz_scene_revision() !== revisionBeforeSelectionChange) {
+  throw new Error("Changing selection should not mark the scene as modified.");
+}
 const defaultViewByteCount = wasm.blitz_scene_serialize();
 if (defaultViewByteCount <= 32) {
   throw new Error(`Serialization failed with byte count ${defaultViewByteCount}.`);
@@ -62,6 +74,8 @@ const fileBytes = new Uint8Array(
   wasm.blitz_scene_file_buffer_ptr(),
   byteCount,
 ).slice();
+// Older files may contain selection flags in this reserved record field.
+new DataView(fileBytes.buffer, fileBytes.byteOffset, fileBytes.byteLength).setUint32(32 + 8, 1, true);
 
 wasm.blitz_clear_scene();
 if (wasm.blitz_entity_count() !== 0) {
@@ -72,11 +86,11 @@ const loadError = wasm.blitz_scene_deserialize(byteCount);
 if (loadError !== 0) {
   throw new Error(`Deserialization failed with error ${loadError}.`);
 }
-if (
-  wasm.blitz_entity_count() !== originalEntities ||
-  wasm.blitz_selected_count() !== originalSelected
-) {
-  throw new Error("Entity or selection counts changed during the binary round trip.");
+if (wasm.blitz_entity_count() !== originalEntities) {
+  throw new Error("Entity count changed during the binary round trip.");
+}
+if (wasm.blitz_selected_count() !== 0) {
+  throw new Error("Selection state should not be restored from a scene file.");
 }
 
 const uniforms = new Float32Array(

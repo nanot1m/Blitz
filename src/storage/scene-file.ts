@@ -49,6 +49,8 @@ type SceneFileOptions = {
 export type SceneFileController = {
   markClean(): void;
   openFile(): void;
+  saveFile(): void;
+  showRecentFiles(): void;
   syncDirtyState(): void;
 };
 
@@ -353,9 +355,7 @@ export function setupSceneFileStorage(
     });
   };
 
-  elements.chooseFileButton.addEventListener("click", openFile);
-
-  elements.saveButton.addEventListener("click", () => {
+  const saveFile = () => {
     void run(async () => {
       if (currentHandle) {
         await saveToHandle(currentHandle);
@@ -363,7 +363,28 @@ export function setupSceneFileStorage(
         await saveAs();
       }
     });
-  });
+  };
+
+  const showRecentFiles = () => {
+    const fileMenu = elements.openMenu.closest<HTMLDetailsElement>("#file-menu");
+    if (fileMenu) {
+      fileMenu.open = true;
+    }
+    elements.saveMenu.open = false;
+    elements.openMenu.open = true;
+    void refreshRecent()
+      .then(() => {
+        const firstRecent =
+          elements.openMenu.querySelector<HTMLButtonElement>(".recent-scene-open");
+        (firstRecent ?? elements.chooseFileButton).focus();
+      })
+      .catch(() => {
+        elements.chooseFileButton.focus();
+      });
+  };
+
+  elements.chooseFileButton.addEventListener("click", openFile);
+  elements.saveButton.addEventListener("click", saveFile);
   elements.saveAsButton.addEventListener("click", () => void run(saveAs));
 
   window.addEventListener("beforeunload", (event) => {
@@ -375,5 +396,5 @@ export function setupSceneFileStorage(
     event.returnValue = "";
   });
 
-  return { markClean, openFile, syncDirtyState };
+  return { markClean, openFile, saveFile, showRecentFiles, syncDirtyState };
 }

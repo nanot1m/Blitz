@@ -87,6 +87,64 @@
         <i data-lucide="settings" aria-hidden="true"></i>
       </button>
     </div>
+    <div id="style-island" role="toolbar" aria-label="Selected item styles" hidden>
+      <div id="selected-geometry-controls" class="selected-style-group">
+        <label class="style-control">
+          <span>Fill</span>
+          <input id="selected-fill" type="color" aria-label="Fill color" />
+          <input
+            id="selected-fill-opacity"
+            class="style-opacity"
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            aria-label="Fill opacity"
+          />
+        </label>
+        <span class="style-divider" aria-hidden="true"></span>
+        <div class="selected-stroke-controls">
+          <label class="style-control">
+            <span>Stroke</span>
+            <input id="selected-stroke" type="color" aria-label="Stroke color" />
+            <input
+              id="selected-stroke-opacity"
+              class="style-opacity"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              aria-label="Stroke opacity"
+            />
+          </label>
+          <label class="style-control style-width-control">
+            <span>Width</span>
+            <input
+              id="selected-stroke-width"
+              type="number"
+              min="0"
+              max="64"
+              step="0.5"
+              aria-label="Stroke width"
+            />
+          </label>
+        </div>
+      </div>
+      <span id="selected-mixed-divider" class="style-divider" aria-hidden="true" hidden></span>
+      <label id="selected-text-controls" class="style-control" hidden>
+        <span>Text</span>
+        <input id="selected-text-color" type="color" aria-label="Text color" />
+        <input
+          id="selected-text-opacity"
+          class="style-opacity"
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          aria-label="Text opacity"
+        />
+      </label>
+    </div>
     <section id="empty-state" class="empty-state" aria-labelledby="empty-state-title">
       <div class="empty-state-card">
         <h1 id="empty-state-title">Start a new canvas</h1>

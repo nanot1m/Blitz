@@ -20,6 +20,28 @@ wasm.blitz_clear_scene();
 wasm.blitz_resize(1000, 1000);
 wasm.blitz_set_camera(0, 0, 1);
 wasm.blitz_create_rect(-100, -50, 200, 100, 0.2, 0.4, 0.8, 1, 0.1, 0.2, 0.3, 1, 2);
+if (wasm.blitz_selected_style_kind() !== 1) {
+  throw new Error("A selected rectangle did not expose geometric styles.");
+}
+wasm.blitz_set_selected_fill(0.9, 0.1, 0.2);
+wasm.blitz_set_selected_fill_opacity(0.4);
+wasm.blitz_set_selected_stroke(0.2, 0.8, 0.3);
+wasm.blitz_set_selected_stroke_opacity(0.65);
+wasm.blitz_set_selected_stroke_width(6);
+const selectedStyle = new Float32Array(
+  wasm.memory.buffer,
+  wasm.blitz_selected_style_ptr(),
+  wasm.blitz_selected_style_f32_count(),
+);
+if (
+  Math.abs(selectedStyle[0] - 0.9) > 0.001 ||
+  Math.abs(selectedStyle[3] - 0.4) > 0.001 ||
+  Math.abs(selectedStyle[5] - 0.8) > 0.001 ||
+  Math.abs(selectedStyle[7] - 0.65) > 0.001 ||
+  Math.abs(selectedStyle[8] - 6) > 0.001
+) {
+  throw new Error("Selected shape style updates were not written to ECS components.");
+}
 if (wasm.blitz_pointer_down(400, 450, 0) !== 3) {
   throw new Error("The rectangle northwest resize handle was not detected.");
 }
@@ -77,6 +99,24 @@ if (wasm.blitz_selected_count() !== originalEntities) {
 }
 if (wasm.blitz_scene_revision() !== revisionBeforeSelectAll) {
   throw new Error("Select all should not mark the scene as modified.");
+}
+if (wasm.blitz_selected_style_kind() !== 3) {
+  throw new Error("Mixed selection did not expose geometry and text style capabilities.");
+}
+wasm.blitz_set_selected_fill(0.15, 0.25, 0.35);
+wasm.blitz_set_selected_text_color(0.7, 0.6, 0.5);
+wasm.blitz_set_selected_text_opacity(0.45);
+const mixedStyle = new Float32Array(
+  wasm.memory.buffer,
+  wasm.blitz_selected_style_ptr(),
+  wasm.blitz_selected_style_f32_count(),
+);
+if (
+  Math.abs(mixedStyle[0] - 0.15) > 0.001 ||
+  Math.abs(mixedStyle[9] - 0.7) > 0.001 ||
+  Math.abs(mixedStyle[12] - 0.45) > 0.001
+) {
+  throw new Error("Mixed selection styles were not applied to supported entities.");
 }
 const revisionBeforeSelectionChange = wasm.blitz_scene_revision();
 wasm.blitz_clear_selection();

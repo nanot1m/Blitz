@@ -21,7 +21,6 @@ type KeyboardShortcutOptions = {
   openFile(): void;
   saveFile(): void;
   selectAll(): void;
-  showRecentFiles(): void;
   stopDragging(): void;
 };
 
@@ -53,6 +52,26 @@ type UiActions = {
   sendToBack(): void;
   stressTest(): void;
   toggleStats(): void;
+};
+
+type StyleControlElements = {
+  fillInput: HTMLInputElement;
+  fillOpacityInput: HTMLInputElement;
+  strokeInput: HTMLInputElement;
+  strokeOpacityInput: HTMLInputElement;
+  strokeWidthInput: HTMLInputElement;
+  textColorInput: HTMLInputElement;
+  textOpacityInput: HTMLInputElement;
+};
+
+type StyleActions = {
+  setFill(red: number, green: number, blue: number): void;
+  setFillOpacity(opacity: number): void;
+  setStroke(red: number, green: number, blue: number): void;
+  setStrokeOpacity(opacity: number): void;
+  setStrokeWidth(width: number): void;
+  setTextColor(red: number, green: number, blue: number): void;
+  setTextOpacity(opacity: number): void;
 };
 
 type TouchMode =
@@ -511,11 +530,6 @@ export function setupKeyboardShortcuts(options: KeyboardShortcutOptions): void {
         options.saveFile();
         return;
       }
-      if (key === "r") {
-        event.preventDefault();
-        options.showRecentFiles();
-        return;
-      }
     }
     if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
@@ -539,5 +553,43 @@ export function setupUiActions(elements: UiActionElements, actions: UiActions): 
   elements.emptyAddItemButton.addEventListener("click", () => {
     elements.shapeMenu.open = true;
     elements.addRectButton.focus();
+  });
+}
+
+function colorChannels(value: string): [number, number, number] {
+  return [
+    Number.parseInt(value.slice(1, 3), 16) / 255,
+    Number.parseInt(value.slice(3, 5), 16) / 255,
+    Number.parseInt(value.slice(5, 7), 16) / 255,
+  ];
+}
+
+export function setupStyleControls(
+  elements: StyleControlElements,
+  actions: StyleActions,
+): void {
+  elements.fillInput.addEventListener("input", () => {
+    actions.setFill(...colorChannels(elements.fillInput.value));
+  });
+  elements.fillOpacityInput.addEventListener("input", () => {
+    actions.setFillOpacity(Number(elements.fillOpacityInput.value));
+  });
+  elements.strokeInput.addEventListener("input", () => {
+    actions.setStroke(...colorChannels(elements.strokeInput.value));
+  });
+  elements.strokeOpacityInput.addEventListener("input", () => {
+    actions.setStrokeOpacity(Number(elements.strokeOpacityInput.value));
+  });
+  elements.strokeWidthInput.addEventListener("input", () => {
+    const width = Number(elements.strokeWidthInput.value);
+    if (Number.isFinite(width)) {
+      actions.setStrokeWidth(width);
+    }
+  });
+  elements.textColorInput.addEventListener("input", () => {
+    actions.setTextColor(...colorChannels(elements.textColorInput.value));
+  });
+  elements.textOpacityInput.addEventListener("input", () => {
+    actions.setTextOpacity(Number(elements.textOpacityInput.value));
   });
 }

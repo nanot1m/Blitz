@@ -108,6 +108,90 @@ dialog {
   transform: translateX(-50%);
 }
 
+#style-island {
+  position: fixed;
+  top: 72px;
+  left: 50%;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 6px 10px;
+  border: 1px solid #d4d9e1;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+  color: #313b48;
+  transform: translateX(-50%);
+}
+
+#style-island[hidden],
+.selected-style-group[hidden],
+.style-control[hidden],
+.style-divider[hidden] {
+  display: none;
+}
+
+.selected-style-group,
+.selected-stroke-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.style-control {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #657080;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.style-control input[type="color"] {
+  width: 28px;
+  height: 28px;
+  padding: 2px;
+  border: 1px solid #c8ced8;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.style-control input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.style-control input[type="color"]::-webkit-color-swatch {
+  border: 0;
+  border-radius: 3px;
+}
+
+.style-opacity {
+  width: 72px;
+  accent-color: #155bd7;
+  cursor: pointer;
+}
+
+.style-width-control input {
+  width: 58px;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid #c8ced8;
+  border-radius: 6px;
+  background: #fff;
+  color: #18202b;
+  font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.style-divider {
+  width: 1px;
+  height: 24px;
+  background: #dfe3e9;
+}
+
 #tool-island button,
 #tool-island summary {
   display: inline-flex;
@@ -740,6 +824,21 @@ dialog::backdrop {
 }
 
 @media (max-width: 620px) and (hover: none) and (pointer: coarse) {
+  #style-island {
+    top: 62px;
+    max-width: calc(100vw - 20px);
+    gap: 7px;
+    padding: 6px 8px;
+  }
+
+  .selected-stroke-controls {
+    gap: 7px;
+  }
+
+  .style-control {
+    gap: 5px;
+  }
+
   .empty-state {
     inset: 66px max(10px, env(safe-area-inset-right))
       max(10px, env(safe-area-inset-bottom))

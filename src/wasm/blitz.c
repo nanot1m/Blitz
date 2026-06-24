@@ -165,6 +165,7 @@ static SceneItem scene_query_items[BLITZ_MAX_SCENE_QUERY_ITEMS];
 static u32 scene_query_count;
 static u32 scene_query_total;
 static unsigned char scene_file_buffer[BLITZ_SCENE_FILE_BUFFER_BYTES];
+static float selected_style[13];
 static World world;
 static u32 shape_command_count;
 static u32 rect_draw_count;
@@ -1140,15 +1141,13 @@ static u32 hit_test_entity(float world_x, float world_y) {
   return BLITZ_INVALID_INDEX;
 }
 
-// Translates demo-slide coordinates so create_demo_world can be instanced
-// at grid offsets without touching its hardcoded layout.
-static float slide_origin_x = 0.0f;
-static float slide_origin_y = 0.0f;
-
-static u32 create_slide_rect(float x, float y, float width, float height,
-                             Color fill, Color stroke, float stroke_width) {
+static u32 create_base_rect(float x, float y, float width, float height,
+                            Color fill, Color stroke, float stroke_width) {
   u32 entity = ecs_create_entity();
-  ecs_set_position(entity, slide_origin_x + x, slide_origin_y + y);
+  if (entity == BLITZ_INVALID_INDEX) {
+    return entity;
+  }
+  ecs_set_position(entity, x, y);
   ecs_set_size(entity, width, height);
   ecs_set_rect_view(entity, fill, stroke, stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
@@ -1156,69 +1155,96 @@ static u32 create_slide_rect(float x, float y, float width, float height,
   return entity;
 }
 
-static void create_slide_text(const char *text, float x, float baseline_y,
-                              float font_size, Color color) {
+static u32 create_base_circle(float x, float y, float width, float height,
+                              Color fill, Color stroke, float stroke_width) {
+  u32 entity = ecs_create_entity();
+  if (entity == BLITZ_INVALID_INDEX) {
+    return entity;
+  }
+  ecs_set_position(entity, x, y);
+  ecs_set_size(entity, width, height);
+  ecs_set_circle_view(entity, fill, stroke, stroke_width);
+  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  ecs_set_resizable(entity);
+  return entity;
+}
+
+static u32 create_base_triangle(float x, float y, float width, float height,
+                                Color fill, Color stroke,
+                                float stroke_width) {
+  u32 entity = ecs_create_entity();
+  if (entity == BLITZ_INVALID_INDEX) {
+    return entity;
+  }
+  ecs_set_position(entity, x, y);
+  ecs_set_size(entity, width, height);
+  ecs_set_triangle_view(entity, fill, stroke, stroke_width);
+  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  ecs_set_resizable(entity);
+  return entity;
+}
+
+static u32 create_base_text(const char *text, float x, float top,
+                            float font_size, Color color) {
   float padding = 4.0f;
-  float top = baseline_y - BLITZ_FONT_ASCENDER * font_size;
   float width = font_text_width(text, font_size);
   float height = BLITZ_FONT_LINE_HEIGHT * font_size;
   u32 entity = ecs_create_entity();
-  ecs_set_position(entity, slide_origin_x + x - padding,
-                   slide_origin_y + top - padding);
+  if (entity == BLITZ_INVALID_INDEX) {
+    return entity;
+  }
+  ecs_set_position(entity, x - padding, top - padding);
   ecs_set_size(entity, width + padding * 2.0f, height + padding * 2.0f);
   ecs_set_text_view(entity, text, color, font_size, padding,
                     padding + BLITZ_FONT_ASCENDER * font_size);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  return entity;
+}
+
+// Template coordinates are translated before calling the same base-shape
+// constructors used by user and MCP-created content.
+static float slide_origin_x = 0.0f;
+static float slide_origin_y = 0.0f;
+
+static u32 create_slide_rect(float x, float y, float width, float height,
+                             Color fill, Color stroke, float stroke_width) {
+  return create_base_rect(slide_origin_x + x, slide_origin_y + y, width,
+                          height, fill, stroke, stroke_width);
+}
+
+static u32 create_slide_text(const char *text, float x, float baseline_y,
+                             float font_size, Color color) {
+  float top = baseline_y - BLITZ_FONT_ASCENDER * font_size;
+  return create_base_text(text, slide_origin_x + x, slide_origin_y + top,
+                          font_size, color);
 }
 
 static u32 create_user_rect(float x, float y) {
-  u32 entity = ecs_create_entity();
-  ecs_set_position(entity, x - 90.0f, y - 55.0f);
-  ecs_set_size(entity, 180.0f, 110.0f);
-  ecs_set_rect_view(entity, (Color){0.86f, 0.92f, 1.0f, 1.0f},
-                    (Color){0.20f, 0.43f, 0.85f, 1.0f}, 2.0f);
-  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
-  ecs_set_resizable(entity);
-  return entity;
+  return create_base_rect(x - 90.0f, y - 55.0f, 180.0f, 110.0f,
+                          (Color){0.86f, 0.92f, 1.0f, 1.0f},
+                          (Color){0.20f, 0.43f, 0.85f, 1.0f}, 2.0f);
 }
 
 static u32 create_user_circle(float x, float y) {
-  u32 entity = ecs_create_entity();
-  ecs_set_position(entity, x - 65.0f, y - 65.0f);
-  ecs_set_size(entity, 130.0f, 130.0f);
-  ecs_set_circle_view(entity, (Color){0.86f, 0.97f, 0.93f, 1.0f},
-                      (Color){0.08f, 0.58f, 0.46f, 1.0f}, 2.0f);
-  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
-  ecs_set_resizable(entity);
-  return entity;
+  return create_base_circle(x - 65.0f, y - 65.0f, 130.0f, 130.0f,
+                            (Color){0.86f, 0.97f, 0.93f, 1.0f},
+                            (Color){0.08f, 0.58f, 0.46f, 1.0f}, 2.0f);
 }
 
 static u32 create_user_triangle(float x, float y) {
-  u32 entity = ecs_create_entity();
-  ecs_set_position(entity, x - 75.0f, y - 65.0f);
-  ecs_set_size(entity, 150.0f, 130.0f);
-  ecs_set_triangle_view(entity, (Color){1.0f, 0.92f, 0.85f, 1.0f},
-                        (Color){0.91f, 0.31f, 0.27f, 1.0f}, 2.0f);
-  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
-  ecs_set_resizable(entity);
-  return entity;
+  return create_base_triangle(x - 75.0f, y - 65.0f, 150.0f, 130.0f,
+                              (Color){1.0f, 0.92f, 0.85f, 1.0f},
+                              (Color){0.91f, 0.31f, 0.27f, 1.0f}, 2.0f);
 }
 
 static u32 create_user_text(float x, float y) {
   const char *text = "New text";
   float font_size = 30.0f;
-  float padding = 4.0f;
   float width = font_text_width(text, font_size);
   float height = BLITZ_FONT_LINE_HEIGHT * font_size;
-  u32 entity = ecs_create_entity();
-  ecs_set_position(entity, x - width * 0.5f - padding,
-                   y - height * 0.5f - padding);
-  ecs_set_size(entity, width + padding * 2.0f, height + padding * 2.0f);
-  ecs_set_text_view(entity, text, (Color){0.08f, 0.10f, 0.13f, 1.0f},
-                    font_size, padding,
-                    padding + BLITZ_FONT_ASCENDER * font_size);
-  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
-  return entity;
+  return create_base_text(text, x - width * 0.5f, y - height * 0.5f,
+                          font_size,
+                          (Color){0.08f, 0.10f, 0.13f, 1.0f});
 }
 
 static const char *copy_text_input(u32 text_length) {
@@ -1691,17 +1717,12 @@ u32 blitz_create_rect(float x, float y, float width, float height,
   if (width <= 0.0f || height <= 0.0f) {
     return BLITZ_INVALID_INDEX;
   }
-  u32 entity = ecs_create_entity();
+  u32 entity = create_base_rect(
+      x, y, width, height, (Color){fill_r, fill_g, fill_b, fill_a},
+      (Color){stroke_r, stroke_g, stroke_b, stroke_a}, stroke_width);
   if (entity == BLITZ_INVALID_INDEX) {
     return entity;
   }
-  ecs_set_position(entity, x, y);
-  ecs_set_size(entity, width, height);
-  ecs_set_rect_view(entity, (Color){fill_r, fill_g, fill_b, fill_a},
-                    (Color){stroke_r, stroke_g, stroke_b, stroke_a},
-                    stroke_width);
-  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
-  ecs_set_resizable(entity);
   select_only(entity);
   mark_render_list_dirty();
   return entity;
@@ -1715,17 +1736,13 @@ u32 blitz_create_circle(float center_x, float center_y, float radius,
   if (radius <= 0.0f) {
     return BLITZ_INVALID_INDEX;
   }
-  u32 entity = ecs_create_entity();
+  u32 entity = create_base_circle(
+      center_x - radius, center_y - radius, radius * 2.0f, radius * 2.0f,
+      (Color){fill_r, fill_g, fill_b, fill_a},
+      (Color){stroke_r, stroke_g, stroke_b, stroke_a}, stroke_width);
   if (entity == BLITZ_INVALID_INDEX) {
     return entity;
   }
-  ecs_set_position(entity, center_x - radius, center_y - radius);
-  ecs_set_size(entity, radius * 2.0f, radius * 2.0f);
-  ecs_set_circle_view(entity, (Color){fill_r, fill_g, fill_b, fill_a},
-                      (Color){stroke_r, stroke_g, stroke_b, stroke_a},
-                      stroke_width);
-  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
-  ecs_set_resizable(entity);
   select_only(entity);
   mark_render_list_dirty();
   return entity;
@@ -1739,17 +1756,12 @@ u32 blitz_create_triangle(float x, float y, float width, float height,
   if (width <= 0.0f || height <= 0.0f) {
     return BLITZ_INVALID_INDEX;
   }
-  u32 entity = ecs_create_entity();
+  u32 entity = create_base_triangle(
+      x, y, width, height, (Color){fill_r, fill_g, fill_b, fill_a},
+      (Color){stroke_r, stroke_g, stroke_b, stroke_a}, stroke_width);
   if (entity == BLITZ_INVALID_INDEX) {
     return entity;
   }
-  ecs_set_position(entity, x, y);
-  ecs_set_size(entity, width, height);
-  ecs_set_triangle_view(entity, (Color){fill_r, fill_g, fill_b, fill_a},
-                        (Color){stroke_r, stroke_g, stroke_b, stroke_a},
-                        stroke_width);
-  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
-  ecs_set_resizable(entity);
   select_only(entity);
   mark_render_list_dirty();
   return entity;
@@ -1776,19 +1788,11 @@ u32 blitz_create_text(float x, float y, float font_size, float color_r,
   if (!text) {
     return BLITZ_INVALID_INDEX;
   }
-  float padding = 4.0f;
-  float width = font_text_width(text, font_size);
-  float height = BLITZ_FONT_LINE_HEIGHT * font_size;
-  u32 entity = ecs_create_entity();
+  u32 entity = create_base_text(
+      text, x, y, font_size, (Color){color_r, color_g, color_b, color_a});
   if (entity == BLITZ_INVALID_INDEX) {
     return entity;
   }
-  ecs_set_position(entity, x - padding, y - padding);
-  ecs_set_size(entity, width + padding * 2.0f, height + padding * 2.0f);
-  ecs_set_text_view(entity, text, (Color){color_r, color_g, color_b, color_a},
-                    font_size, padding,
-                    padding + BLITZ_FONT_ASCENDER * font_size);
-  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
   select_only(entity);
   mark_render_list_dirty();
   return entity;
@@ -2204,6 +2208,230 @@ void blitz_delete_selected(void) {
 EXPORT("blitz_has_selection")
 u32 blitz_has_selection(void) {
   return selected_count > 0u;
+}
+
+// Capability mask: bit 0 = geometric styles, bit 1 = text color.
+EXPORT("blitz_selected_style_kind")
+u32 blitz_selected_style_kind(void) {
+  u32 kind = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity]) {
+      continue;
+    }
+    if (world.masks[entity] & BLITZ_COMPONENT_TEXT_VIEW) {
+      kind |= 2u;
+    }
+    if (world.masks[entity] & (BLITZ_COMPONENT_RECT_VIEW |
+                               BLITZ_COMPONENT_TRIANGLE_VIEW |
+                               BLITZ_COMPONENT_CIRCLE_VIEW)) {
+      kind |= 1u;
+    }
+  }
+  return kind;
+}
+
+EXPORT("blitz_selected_style_ptr")
+u32 blitz_selected_style_ptr(void) {
+  Color fill = {0.0f, 0.0f, 0.0f, 1.0f};
+  Color stroke = {0.0f, 0.0f, 0.0f, 1.0f};
+  Color text_color = {0.0f, 0.0f, 0.0f, 1.0f};
+  float stroke_width = 0.0f;
+  u32 found_geometry = 0u;
+  u32 found_text = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity]) {
+      continue;
+    }
+    if (!found_geometry &&
+        (world.masks[entity] & (BLITZ_COMPONENT_RECT_VIEW |
+                                BLITZ_COMPONENT_TRIANGLE_VIEW |
+                                BLITZ_COMPONENT_CIRCLE_VIEW))) {
+      found_geometry = 1u;
+      if (world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW) {
+        RectView view = world.rect_views[entity];
+        fill = view.fill_color;
+        stroke = view.stroke_color;
+        stroke_width = view.stroke_width;
+      } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
+        TriangleView view = world.triangle_views[entity];
+        fill = view.fill_color;
+        stroke = view.stroke_color;
+        stroke_width = view.stroke_width;
+      } else {
+        CircleView view = world.circle_views[entity];
+        fill = view.fill_color;
+        stroke = view.stroke_color;
+        stroke_width = view.stroke_width;
+      }
+    }
+    if (!found_text && (world.masks[entity] & BLITZ_COMPONENT_TEXT_VIEW)) {
+      found_text = 1u;
+      text_color = world.text_views[entity].color;
+    }
+    if (found_geometry && found_text) {
+      break;
+    }
+  }
+  selected_style[0] = fill.r;
+  selected_style[1] = fill.g;
+  selected_style[2] = fill.b;
+  selected_style[3] = fill.a;
+  selected_style[4] = stroke.r;
+  selected_style[5] = stroke.g;
+  selected_style[6] = stroke.b;
+  selected_style[7] = stroke.a;
+  selected_style[8] = stroke_width;
+  selected_style[9] = text_color.r;
+  selected_style[10] = text_color.g;
+  selected_style[11] = text_color.b;
+  selected_style[12] = text_color.a;
+  return (u32)&selected_style[0];
+}
+
+EXPORT("blitz_selected_style_f32_count")
+u32 blitz_selected_style_f32_count(void) {
+  return 13u;
+}
+
+EXPORT("blitz_set_selected_fill")
+void blitz_set_selected_fill(float r, float g, float b) {
+  u32 changed = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity]) continue;
+    if (world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW) {
+      world.rect_views[entity].fill_color.r = r;
+      world.rect_views[entity].fill_color.g = g;
+      world.rect_views[entity].fill_color.b = b;
+      changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
+      world.triangle_views[entity].fill_color.r = r;
+      world.triangle_views[entity].fill_color.g = g;
+      world.triangle_views[entity].fill_color.b = b;
+      changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW) {
+      world.circle_views[entity].fill_color.r = r;
+      world.circle_views[entity].fill_color.g = g;
+      world.circle_views[entity].fill_color.b = b;
+      changed = 1u;
+    }
+  }
+  if (changed) mark_render_list_dirty();
+}
+
+EXPORT("blitz_set_selected_fill_opacity")
+void blitz_set_selected_fill_opacity(float opacity) {
+  opacity = clampf(opacity, 0.0f, 1.0f);
+  u32 changed = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity]) continue;
+    if (world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW) {
+      world.rect_views[entity].fill_color.a = opacity;
+      changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
+      world.triangle_views[entity].fill_color.a = opacity;
+      changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW) {
+      world.circle_views[entity].fill_color.a = opacity;
+      changed = 1u;
+    }
+  }
+  if (changed) mark_render_list_dirty();
+}
+
+EXPORT("blitz_set_selected_stroke")
+void blitz_set_selected_stroke(float r, float g, float b) {
+  u32 changed = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity]) continue;
+    if (world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW) {
+      world.rect_views[entity].stroke_color.r = r;
+      world.rect_views[entity].stroke_color.g = g;
+      world.rect_views[entity].stroke_color.b = b;
+      changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
+      world.triangle_views[entity].stroke_color.r = r;
+      world.triangle_views[entity].stroke_color.g = g;
+      world.triangle_views[entity].stroke_color.b = b;
+      changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW) {
+      world.circle_views[entity].stroke_color.r = r;
+      world.circle_views[entity].stroke_color.g = g;
+      world.circle_views[entity].stroke_color.b = b;
+      changed = 1u;
+    }
+  }
+  if (changed) mark_render_list_dirty();
+}
+
+EXPORT("blitz_set_selected_stroke_opacity")
+void blitz_set_selected_stroke_opacity(float opacity) {
+  opacity = clampf(opacity, 0.0f, 1.0f);
+  u32 changed = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity]) continue;
+    if (world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW) {
+      world.rect_views[entity].stroke_color.a = opacity;
+      changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
+      world.triangle_views[entity].stroke_color.a = opacity;
+      changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW) {
+      world.circle_views[entity].stroke_color.a = opacity;
+      changed = 1u;
+    }
+  }
+  if (changed) mark_render_list_dirty();
+}
+
+EXPORT("blitz_set_selected_stroke_width")
+void blitz_set_selected_stroke_width(float width) {
+  width = clampf(width, 0.0f, 64.0f);
+  u32 changed = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity]) continue;
+    if (world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW) {
+      world.rect_views[entity].stroke_width = width;
+      changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
+      world.triangle_views[entity].stroke_width = width;
+      changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW) {
+      world.circle_views[entity].stroke_width = width;
+      changed = 1u;
+    }
+  }
+  if (changed) mark_render_list_dirty();
+}
+
+EXPORT("blitz_set_selected_text_color")
+void blitz_set_selected_text_color(float r, float g, float b) {
+  u32 changed = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity] ||
+        !(world.masks[entity] & BLITZ_COMPONENT_TEXT_VIEW)) {
+      continue;
+    }
+    world.text_views[entity].color.r = r;
+    world.text_views[entity].color.g = g;
+    world.text_views[entity].color.b = b;
+    changed = 1u;
+  }
+  if (changed) mark_render_list_dirty();
+}
+
+EXPORT("blitz_set_selected_text_opacity")
+void blitz_set_selected_text_opacity(float opacity) {
+  opacity = clampf(opacity, 0.0f, 1.0f);
+  u32 changed = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity] ||
+        !(world.masks[entity] & BLITZ_COMPONENT_TEXT_VIEW)) {
+      continue;
+    }
+    world.text_views[entity].color.a = opacity;
+    changed = 1u;
+  }
+  if (changed) mark_render_list_dirty();
 }
 
 EXPORT("blitz_select_all")

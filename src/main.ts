@@ -3,6 +3,7 @@ import { setupMcpBridge } from "./mcp/bridge";
 import {
   setupCanvasInteractions,
   setupKeyboardShortcuts,
+  setupStyleControls,
   setupUiActions,
 } from "./input/user-events";
 import shaderSource from "./shaders/rect.wgsl?raw";
@@ -104,6 +105,16 @@ type BlitzExports = {
   blitz_stress_test(): void;
   blitz_delete_selected(): void;
   blitz_has_selection(): number;
+  blitz_selected_style_kind(): number;
+  blitz_selected_style_ptr(): number;
+  blitz_selected_style_f32_count(): number;
+  blitz_set_selected_fill(red: number, green: number, blue: number): void;
+  blitz_set_selected_fill_opacity(opacity: number): void;
+  blitz_set_selected_stroke(red: number, green: number, blue: number): void;
+  blitz_set_selected_stroke_opacity(opacity: number): void;
+  blitz_set_selected_stroke_width(width: number): void;
+  blitz_set_selected_text_color(red: number, green: number, blue: number): void;
+  blitz_set_selected_text_opacity(opacity: number): void;
   blitz_select_all(): void;
   blitz_bring_to_front(): void;
   blitz_send_to_back(): void;
@@ -158,6 +169,17 @@ const {
   emptyRecentSection,
   emptyRecentScenes,
   emptyDemoTemplateButton,
+  styleIsland,
+  selectedGeometryControls,
+  selectedFillInput,
+  selectedFillOpacityInput,
+  selectedStrokeInput,
+  selectedStrokeOpacityInput,
+  selectedStrokeWidthInput,
+  selectedMixedDivider,
+  selectedTextControls,
+  selectedTextColorInput,
+  selectedTextOpacityInput,
   addRectButton,
   addCircleButton,
   addTriangleButton,
@@ -558,11 +580,50 @@ async function boot() {
     }
   };
 
+  const colorHex = (red: number, green: number, blue: number) =>
+    `#${[red, green, blue]
+      .map((channel) =>
+        Math.round(Math.min(1, Math.max(0, channel)) * 255)
+          .toString(16)
+          .padStart(2, "0"),
+      )
+      .join("")}`;
+
+  const updateStyleIsland = () => {
+    const kind = wasm.blitz_selected_style_kind();
+    styleIsland.hidden = kind === 0;
+    if (kind === 0) {
+      return;
+    }
+    const style = new Float32Array(
+      wasm.memory.buffer,
+      wasm.blitz_selected_style_ptr(),
+      wasm.blitz_selected_style_f32_count(),
+    );
+    const geometric = (kind & 1) !== 0;
+    const text = (kind & 2) !== 0;
+    selectedGeometryControls.hidden = !geometric;
+    selectedTextControls.hidden = !text;
+    selectedMixedDivider.hidden = !(geometric && text);
+    if (geometric) {
+      selectedFillInput.value = colorHex(style[0], style[1], style[2]);
+      selectedFillOpacityInput.value = String(style[3]);
+      selectedStrokeInput.value = colorHex(style[4], style[5], style[6]);
+      selectedStrokeOpacityInput.value = String(style[7]);
+      selectedStrokeWidthInput.value = String(Number(style[8].toFixed(2)));
+    }
+    if (text) {
+      selectedTextColorInput.value = colorHex(style[9], style[10], style[11]);
+      selectedTextOpacityInput.value = String(style[12]);
+    }
+  };
+
   const updateSelectionState = () => {
     const disabled = wasm.blitz_has_selection() === 0;
     sendToBackButton.disabled = disabled;
     bringToFrontButton.disabled = disabled;
     deleteButton.disabled = disabled;
+    updateStyleIsland();
   };
 
   let emptyStateVisible = false;
@@ -685,6 +746,48 @@ async function boot() {
     },
   );
 
+  setupStyleControls(
+    {
+      fillInput: selectedFillInput,
+      fillOpacityInput: selectedFillOpacityInput,
+      strokeInput: selectedStrokeInput,
+      strokeOpacityInput: selectedStrokeOpacityInput,
+      strokeWidthInput: selectedStrokeWidthInput,
+      textColorInput: selectedTextColorInput,
+      textOpacityInput: selectedTextOpacityInput,
+    },
+    {
+      setFill(red, green, blue) {
+        wasm.blitz_set_selected_fill(red, green, blue);
+        updateStyleIsland();
+      },
+      setFillOpacity(opacity) {
+        wasm.blitz_set_selected_fill_opacity(opacity);
+        updateStyleIsland();
+      },
+      setStroke(red, green, blue) {
+        wasm.blitz_set_selected_stroke(red, green, blue);
+        updateStyleIsland();
+      },
+      setStrokeOpacity(opacity) {
+        wasm.blitz_set_selected_stroke_opacity(opacity);
+        updateStyleIsland();
+      },
+      setStrokeWidth(width) {
+        wasm.blitz_set_selected_stroke_width(width);
+        updateStyleIsland();
+      },
+      setTextColor(red, green, blue) {
+        wasm.blitz_set_selected_text_color(red, green, blue);
+        updateStyleIsland();
+      },
+      setTextOpacity(opacity) {
+        wasm.blitz_set_selected_text_opacity(opacity);
+        updateStyleIsland();
+      },
+    },
+  );
+
   setupKeyboardShortcuts({
     deleteSelection,
     openFile: sceneFileStorage.openFile,
@@ -693,7 +796,6 @@ async function boot() {
       wasm.blitz_select_all();
       updateSelectionState();
     },
-    showRecentFiles: sceneFileStorage.showRecentFiles,
     stopDragging,
   });
 

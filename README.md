@@ -6,6 +6,8 @@ The WASM module owns entities, components, selection, camera state, z-order, sce
 
 Blitz starts with an empty canvas. The initial panel can open a local scene, reopen a recent scene, focus the shape tools, or create the built-in demo slide template. The panel disappears as soon as the scene contains an object and returns when the scene becomes empty.
 
+The demo slide is composed from the same base rectangle and text ECS constructors used by user-created and agent-created content; the template only supplies positions and styles.
+
 ## Requirements
 
 - Node.js 20 or newer
@@ -48,12 +50,13 @@ npm run preview     # Serve the production bundle locally
 The toolbar can add rectangles, circles, triangles, and text; change selection z-order; delete selected objects; show rendering statistics; and configure the MCP bridge.
 On touch-first screens up to 620 CSS pixels wide, the shape actions collapse into a dropdown and the toolbar remains at least 10 pixels from the viewport edges. Narrow desktop windows keep the full toolbar.
 
+Selecting items opens a contextual style island containing every style supported by the selection. Color controls include an opacity slider from `0` to `1`. Geometric controls apply to selected rectangles, circles, and triangles; text color applies only to selected text. Unsupported entities are skipped. Style edits update ECS view components directly and mark the scene as modified.
+
 Keyboard shortcuts:
 
 - `Ctrl/Cmd+A`: select all objects
 - `Ctrl/Cmd+O`: open the file picker
 - `Ctrl/Cmd+S`: save the current file
-- `Ctrl/Cmd+R`: open and focus the recent-files list
 
 ## Local scene files
 

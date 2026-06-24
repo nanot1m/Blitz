@@ -1,37 +1,85 @@
 # Blitz
 
-Blitz is a tiny Clang-to-WASM canvas experiment with WebGPU rendering. The C module owns the ECS world, camera, spatial index, and visible render extraction. TypeScript reads the extracted render IR directly from exported WASM memory, uploads changed visible chunks to WebGPU, and a WGSL shader renders analytic stroked rectangles.
+Blitz is a WebGPU canvas experiment backed by a C ECS compiled to WebAssembly.
+
+The WASM module owns entities, components, selection, camera state, z-order, scene queries, and render extraction. TypeScript reads packed render data from WASM memory and uploads it to WebGPU. WGSL compute and render shaders cull and draw rectangles, triangles, circles, text, and interaction overlays.
 
 ## Requirements
 
-- Node.js 20+
-- A browser with WebGPU enabled
-- Clang with WebAssembly target support for `npm run build`
+- Node.js 20 or newer
+- A browser with WebGPU support
+- LLVM/Clang with `wasm-ld`, or Emscripten
+- `mkcert` only when using the local MCP bridge
 
-## Run
+## Development
 
 ```sh
 npm install
-npm run build:wasm
 npm run dev
 ```
 
-Open the local Vite URL and drag to pan. Use the mouse wheel or trackpad scroll to zoom around the cursor.
-Press `P` for pushback mode, `R` for rect mode, `T` for triangle mode, or `C` for circle mode. Click in a shape mode to replace nearby shapes with that shape. Use `[` and `]` to adjust the active cursor radius.
+`npm run dev` rebuilds the font assets and WASM module before starting Vite.
 
-## Local MCP Bridge
+Other commands:
 
-Blitz includes a project-scoped MCP server that lets an AI agent add shapes to the canvas open in your browser. The MCP server communicates with the page over a TLS WebSocket bound only to `127.0.0.1`.
+```sh
+npm run build       # Build WASM, type-check, and create the production bundle
+npm run typecheck   # Type-check the browser and MCP code
+npm run test:mcp    # Test the WASM adapter and secure MCP bridge
+npm run preview     # Serve the production bundle locally
+```
 
-The connection requires all three controls:
+## Canvas controls
+
+### Mouse and trackpad
+
+- Primary click: select an object
+- Primary drag on an object: move the current selection
+- Primary drag on empty space: marquee-select
+- Middle- or right-button drag: pan
+- Wheel or two-axis trackpad scroll: pan
+- Pinch gesture reported by the trackpad: zoom around the cursor
+- `Delete` or `Backspace`: delete the current selection
+
+The toolbar can add rectangles, circles, triangles, and text; change selection z-order; delete selected objects; show rendering statistics; and configure the MCP bridge.
+
+### Phones and tablets
+
+- Tap an object: select it
+- Tap empty space: clear selection
+- Drag an object: move it
+- Drag empty space: pan
+- Long-press empty space, then drag: marquee-select
+- Two-finger pinch: pan and zoom
+
+Moving more than eight CSS pixels changes a touch from a tap into a drag. An empty-space long press activates after 450 milliseconds.
+
+## Local MCP bridge
+
+Blitz includes a project-scoped MCP server that allows Codex or another MCP client to inspect and modify the canvas currently open in a browser.
+
+```text
+MCP client
+    │ stdio
+    ▼
+mcp/server.ts
+    │ authenticated WSS on 127.0.0.1
+    ▼
+browser bridge
+    │ typed WASM calls
+    ▼
+Blitz ECS
+```
+
+The local connection requires:
 
 - A locally trusted TLS certificate
 - An exact browser-origin allowlist
-- A shared token of at least 24 characters
+- A shared token containing at least 24 characters
 
-### One-time certificate setup
+### Certificate and token setup
 
-Install [`mkcert`](https://github.com/FiloSottile/mkcert), then create a certificate:
+Install [`mkcert`](https://github.com/FiloSottile/mkcert), then run:
 
 ```sh
 mkcert -install
@@ -40,48 +88,65 @@ mkcert \
   -key-file .cert/localhost-key.pem \
   -cert-file .cert/localhost.pem \
   localhost 127.0.0.1 ::1
+
+openssl rand -hex 32 > .cert/bridge-token
+chmod 600 .cert/bridge-token
 ```
 
 The `.cert` directory is ignored by Git.
 
-### Start Codex with bridge credentials
+### Start the connection
 
-Generate a token and export the exact origins allowed to connect:
+1. Start or restart Codex from this repository. The project configuration at `.codex/config.toml` starts `blitz_canvas`.
+2. Run the frontend:
+
+   ```sh
+   npm run dev
+   ```
+
+3. Open the settings button in the Blitz toolbar.
+4. Enter:
+
+   - URL: `wss://127.0.0.1:8787`
+   - Token: the output of `cat .cert/bridge-token`
+
+The bridge URL is stored in local storage. The token is stored only in the browser tab's session storage and is removed when the tab closes or **Disconnect** is selected.
+
+Do not also run `npm run mcp:server` when Codex is already managing the server. Only one process can bind to port `8787`. Likewise, two Codex clients using this project simultaneously will compete for that port.
+
+Vite normally uses port `5173`. If it selects another port because `5173` is occupied, add that exact origin to `BLITZ_BRIDGE_ORIGINS` and restart the MCP client.
+
+### Allowed browser origins
+
+The default allowlist is:
+
+```text
+http://127.0.0.1:5173
+http://localhost:5173
+https://nanot1m.github.io
+```
+
+Override it before starting Codex when necessary:
 
 ```sh
-openssl rand -hex 32 > .cert/bridge-token
-chmod 600 .cert/bridge-token
 export BLITZ_BRIDGE_ORIGINS="http://127.0.0.1:5173,https://nanot1m.github.io"
 ```
 
-The token file is ignored by Git. `BLITZ_BRIDGE_ORIGINS` is optional because the server includes the local Vite origins and `https://nanot1m.github.io` by default. Start or restart Codex in this repository; the project configuration in `.codex/config.toml` starts the MCP server automatically.
+For GitHub Pages, use the site origin without the repository path. WebSocket `Origin` values contain the scheme, host, and port—not the page path.
 
-Run Blitz:
-
-```sh
-npm run dev
-```
-
-Open the settings button in the Blitz toolbar and enter:
-
-- URL: `wss://127.0.0.1:8787`
-- Token: the output of `cat .cert/bridge-token`
-
-The URL is stored in local storage. The token is stored only in session storage and is removed when the tab closes or you select **Disconnect**.
-
-For GitHub Pages, retain the exact origin `https://nanot1m.github.io`. URL paths are not part of a browser WebSocket `Origin`, so the repository path is not included.
+GitHub Pages can host the static Blitz frontend, WASM, shaders, and font atlas. It cannot run the MCP server. The local MCP process must still run on the user's computer, and the Pages origin must be allowed by that process.
 
 ### MCP tools
 
-- `canvas_add_shapes`: add styled rectangles, circles, triangles, or text at explicit world-space coordinates
-- `canvas_get_state`: return entity and selection counts
-- `canvas_get_scene`: inspect visible or explicitly bounded ECS objects, including geometry, styles, text, order, and selection
-- `canvas_find_empty_space`: find a viewport rectangle that does not overlap existing object bounds
-- `canvas_delete_selected`: delete the current canvas selection
+- `canvas_add_shapes`: add styled rectangles, triangles, circles, and text at explicit world-space coordinates
+- `canvas_get_state`: return entity counts, selection count, camera center, zoom, and viewport size
+- `canvas_get_scene`: return objects intersecting the viewport or supplied bounds, including geometry, styles, text, z-order, and selection state
+- `canvas_find_empty_space`: find a non-overlapping rectangle within the visible viewport
+- `canvas_delete_selected`: delete the current selection
 
-The bridge intentionally exposes only these operations; it does not permit arbitrary JavaScript or WASM calls.
+The bridge exposes only these operations. It cannot execute arbitrary JavaScript or arbitrary WASM functions.
 
-Example:
+### Shape input
 
 ```json
 {
@@ -97,6 +162,15 @@ Example:
       "strokeWidth": 4
     },
     {
+      "type": "circle",
+      "x": 520,
+      "y": 220,
+      "radius": 64,
+      "backgroundColor": "#33CC99",
+      "strokeColor": "#075E54",
+      "strokeWidth": 2
+    },
+    {
       "type": "text",
       "x": 140,
       "y": 130,
@@ -108,29 +182,62 @@ Example:
 }
 ```
 
-Rectangle and triangle coordinates refer to the top-left of their bounds. Circle coordinates refer to its center. Text coordinates refer to the top-left of its line box. Colors accept `#RRGGBB` and `#RRGGBBAA`.
+Coordinate rules:
 
-The browser-side MCP implementation is isolated under `src/mcp/`:
+- Rectangle and triangle `x`/`y`: top-left of the bounds
+- Circle `x`/`y`: center
+- Text `x`/`y`: top-left of the line box
+- Colors: `#RRGGBB` or `#RRGGBBAA`
 
-- `bridge.ts` owns the authenticated WebSocket protocol and request validation.
-- `canvas-adapter.ts` translates protocol operations into WASM calls and scene queries.
-- `main.ts` only wires the adapter to the initialized Blitz WASM instance and settings UI.
+Agents should call `canvas_get_scene` before editing an existing composition and use `canvas_find_empty_space` when new content must avoid overlaps.
 
-## ECS Shape
+## Architecture
 
-- Entity: a plain integer index
-- Components: `position`, `size`, and `rect-view`
-- Capacity: 1,000,000 stored rect entities
-- Spatial index: fixed uniform grid for camera culling
-- Render IR: visible packed `RectDraw` records exported through WASM linear memory
-- Uploads: 65,536-rect WebGPU chunks, refreshed only when the render-list version changes
+### WASM ECS
 
-## Build Details
+- Maximum entity slots: 2,000,000
+- Components: position, size, selectable, rectangle view, triangle view, circle view, and text view
+- Draw order: one entity-order stream shared by all shape types
+- Selection: hit testing, dragging, marquee selection, deletion, and z-order changes run in C
+- Scene inspection: a bounded packed query buffer exposes up to 65,536 ECS objects per browser query
+- Text input: UTF-8 strings copied into a WASM-owned text pool
 
-The WASM build command compiles `src/wasm/blitz.c` with:
+### Rendering
 
-```sh
-clang --target=wasm32 -O3 -nostdlib -Wl,--no-entry -Wl,--export=memory
+- Static shape IR: rectangle, triangle, and circle buffers plus a unified shape-command stream
+- Dynamic IR: visible text glyphs and selection/marquee overlays
+- GPU culling: a compute pass culls the static command stream against the camera
+- Static capacity: four chunks of 250,000 shapes
+- Upload policy: static buffers are refreshed only when their version changes
+- Text: generated from the compiled font atlas and rendered through the same ordered pipeline
+
+### TypeScript modules
+
+- `src/main.ts`: WASM/WebGPU initialization, rendering loop, input coordination, and application wiring
+- `src/ui.ts`: typed DOM lookup, icon initialization, and fallback presentation
+- `src/mcp/bridge.ts`: authenticated browser WebSocket protocol and request validation
+- `src/mcp/canvas-adapter.ts`: MCP-to-WASM operations, scene decoding, and empty-space search
+- `mcp/server.ts`: stdio MCP server and secure local WSS endpoint
+
+## WASM build
+
+`scripts/build-wasm.mjs` first tries LLVM/Clang when `wasm-ld` is available and otherwise falls back to Emscripten. The output is written to:
+
+```text
+public/blitz.wasm
 ```
 
-The produced module is written to `public/blitz.wasm`.
+The core Clang flags are:
+
+```sh
+clang \
+  --target=wasm32 \
+  -O3 \
+  -nostdlib \
+  -Wl,--no-entry \
+  -Wl,--export-memory \
+  -o public/blitz.wasm \
+  src/wasm/blitz.c
+```
+
+The build script also supplies an explicit linker export for every browser-facing WASM function.

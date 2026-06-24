@@ -1,20 +1,8 @@
-import {
-  Activity,
-  BringToFront,
-  Circle,
-  createIcons,
-  LayoutGrid,
-  SendToBack,
-  Settings,
-  Square,
-  Trash2,
-  Triangle,
-  Type as TypeIcon,
-} from "lucide";
 import { createCanvasMcpAdapter } from "./mcp/canvas-adapter";
 import { setupMcpBridge } from "./mcp/bridge";
 import shaderSource from "./shaders/rect.wgsl?raw";
 import cullSource from "./shaders/cull.wgsl?raw";
+import { createBlitzUi } from "./ui";
 import "./style.css";
 
 type BlitzExports = {
@@ -24,6 +12,7 @@ type BlitzExports = {
   blitz_set_camera(x: number, y: number, zoom: number): void;
   blitz_pan(dxPixels: number, dyPixels: number): void;
   blitz_zoom_at(screenX: number, screenY: number, zoomDelta: number): void;
+  blitz_hit_test(screenX: number, screenY: number): number;
   blitz_pointer_down(screenX: number, screenY: number, additive: number): number;
   blitz_pointer_move(screenX: number, screenY: number): void;
   blitz_pointer_up(): void;
@@ -136,98 +125,30 @@ type BlitzExports = {
   blitz_render_max_text_draws(): number;
 };
 
-const canvasElement = document.querySelector<HTMLCanvasElement>("#blitz-canvas");
-const fallbackElement = document.querySelector<HTMLDivElement>("#fallback");
-const addRectElement = document.querySelector<HTMLButtonElement>("#add-rect");
-const addCircleElement = document.querySelector<HTMLButtonElement>("#add-circle");
-const addTriangleElement = document.querySelector<HTMLButtonElement>("#add-triangle");
-const addTextElement = document.querySelector<HTMLButtonElement>("#add-text");
-const stressTestElement = document.querySelector<HTMLButtonElement>("#stress-test");
-const sendToBackElement = document.querySelector<HTMLButtonElement>("#send-to-back");
-const bringToFrontElement = document.querySelector<HTMLButtonElement>("#bring-to-front");
-const deleteElement = document.querySelector<HTMLButtonElement>("#delete-selected");
-const zoomIndicatorElement = document.querySelector<HTMLDivElement>("#zoom-indicator");
-const toggleStatsElement = document.querySelector<HTMLButtonElement>("#toggle-stats");
-const statsPanelElement = document.querySelector<HTMLDivElement>("#stats-panel");
-const statsBodyElement = document.querySelector<HTMLPreElement>("#stats-body");
-const openMcpSettingsElement = document.querySelector<HTMLButtonElement>("#open-mcp-settings");
-const mcpSettingsDialogElement = document.querySelector<HTMLDialogElement>("#mcp-settings-dialog");
-const mcpSettingsFormElement = document.querySelector<HTMLFormElement>("#mcp-settings-form");
-const closeMcpSettingsElement = document.querySelector<HTMLButtonElement>("#close-mcp-settings");
-const mcpBridgeUrlElement = document.querySelector<HTMLInputElement>("#mcp-bridge-url");
-const mcpBridgeTokenElement = document.querySelector<HTMLInputElement>("#mcp-bridge-token");
-const disconnectMcpBridgeElement = document.querySelector<HTMLButtonElement>("#disconnect-mcp-bridge");
-const mcpBridgeStatusElement = document.querySelector<HTMLElement>("#mcp-bridge-status");
-
-if (
-  !canvasElement ||
-  !fallbackElement ||
-  !addRectElement ||
-  !addCircleElement ||
-  !addTriangleElement ||
-  !addTextElement ||
-  !stressTestElement ||
-  !sendToBackElement ||
-  !bringToFrontElement ||
-  !deleteElement ||
-  !zoomIndicatorElement ||
-  !toggleStatsElement ||
-  !statsPanelElement ||
-  !statsBodyElement ||
-  !openMcpSettingsElement ||
-  !mcpSettingsDialogElement ||
-  !mcpSettingsFormElement ||
-  !closeMcpSettingsElement ||
-  !mcpBridgeUrlElement ||
-  !mcpBridgeTokenElement ||
-  !disconnectMcpBridgeElement ||
-  !mcpBridgeStatusElement
-) {
-  throw new Error("Blitz interface was not found.");
-}
-
-const canvas = canvasElement;
-const fallback = fallbackElement;
-const addRectButton = addRectElement;
-const addCircleButton = addCircleElement;
-const addTriangleButton = addTriangleElement;
-const addTextButton = addTextElement;
-const stressTestButton = stressTestElement;
-const sendToBackButton = sendToBackElement;
-const bringToFrontButton = bringToFrontElement;
-const deleteButton = deleteElement;
-const zoomIndicator = zoomIndicatorElement;
-const toggleStatsButton = toggleStatsElement;
-const statsPanel = statsPanelElement;
-const statsBody = statsBodyElement;
-const openMcpSettingsButton = openMcpSettingsElement;
-const mcpSettingsDialog = mcpSettingsDialogElement;
-const mcpSettingsForm = mcpSettingsFormElement;
-const closeMcpSettingsButton = closeMcpSettingsElement;
-const mcpBridgeUrlInput = mcpBridgeUrlElement;
-const mcpBridgeTokenInput = mcpBridgeTokenElement;
-const disconnectMcpBridgeButton = disconnectMcpBridgeElement;
-const mcpBridgeStatus = mcpBridgeStatusElement;
-
-createIcons({
-  icons: {
-    Activity,
-    BringToFront,
-    Circle,
-    LayoutGrid,
-    SendToBack,
-    Settings,
-    Square,
-    Trash2,
-    Triangle,
-    Type: TypeIcon,
-  },
-});
-
-const showFallback = (message: string) => {
-  fallback.textContent = message;
-  fallback.hidden = false;
-};
+const {
+  canvas,
+  addRectButton,
+  addCircleButton,
+  addTriangleButton,
+  addTextButton,
+  stressTestButton,
+  sendToBackButton,
+  bringToFrontButton,
+  deleteButton,
+  zoomIndicator,
+  toggleStatsButton,
+  statsPanel,
+  statsBody,
+  openMcpSettingsButton,
+  mcpSettingsDialog,
+  mcpSettingsForm,
+  closeMcpSettingsButton,
+  mcpBridgeUrlInput,
+  mcpBridgeTokenInput,
+  disconnectMcpBridgeButton,
+  mcpBridgeStatus,
+  showFallback,
+} = createBlitzUi();
 
 async function loadWasm(): Promise<BlitzExports> {
   const response = await fetch(`${import.meta.env.BASE_URL}blitz.wasm`, { cache: "no-store" });
@@ -611,6 +532,16 @@ async function boot() {
   let selectingArea = false;
   let lastX = 0;
   let lastY = 0;
+  const activeTouches = new Map<number, { x: number; y: number }>();
+  let lastPinchDistance = 0;
+  type TouchMode = "idle" | "pending-object" | "pending-empty" | "entity" | "pan" | "marquee" | "pinch";
+  let touchMode: TouchMode = "idle";
+  let primaryTouchId: number | null = null;
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let longPressTimer: number | undefined;
+  const touchMoveThreshold = 8;
+  const longPressDelay = 450;
 
   const updateSelectionState = () => {
     const disabled = wasm.blitz_has_selection() === 0;
@@ -628,7 +559,69 @@ async function boot() {
     };
   };
 
+  const clientPointToCanvasPixels = (clientX: number, clientY: number) => {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    return {
+      x: (clientX - rect.left) * dpr,
+      y: (clientY - rect.top) * dpr,
+    };
+  };
+
+  const touchGesture = () => {
+    const points = Array.from(activeTouches.values());
+    const center = points.reduce(
+      (result, point) => ({
+        x: result.x + point.x / points.length,
+        y: result.y + point.y / points.length,
+      }),
+      { x: 0, y: 0 },
+    );
+    const distance =
+      points.length >= 2
+        ? Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y)
+        : 0;
+    return { center, distance };
+  };
+
+  const clearLongPressTimer = () => {
+    if (longPressTimer !== undefined) {
+      window.clearTimeout(longPressTimer);
+      longPressTimer = undefined;
+    }
+  };
+
+  const beginTouchPointerInteraction = (mode: "entity" | "marquee") => {
+    const start = clientPointToCanvasPixels(touchStartX, touchStartY);
+    wasm.blitz_pointer_down(start.x, start.y, 0);
+    touchMode = mode;
+    draggingEntity = mode === "entity";
+    selectingArea = mode === "marquee";
+    canvas.classList.toggle("is-dragging-entity", draggingEntity);
+    canvas.classList.toggle("is-selecting", selectingArea);
+    updateSelectionState();
+  };
+
+  const beginPinch = () => {
+    clearLongPressTimer();
+    if (touchMode === "entity" || touchMode === "marquee") {
+      wasm.blitz_pointer_up();
+      updateSelectionState();
+    }
+    draggingEntity = false;
+    selectingArea = false;
+    draggingCamera = true;
+    touchMode = "pinch";
+    canvas.classList.remove("is-dragging-entity", "is-selecting");
+    canvas.classList.add("is-panning");
+    const gesture = touchGesture();
+    lastX = gesture.center.x;
+    lastY = gesture.center.y;
+    lastPinchDistance = gesture.distance;
+  };
+
   const stopDragging = () => {
+    clearLongPressTimer();
     draggingCamera = false;
     draggingEntity = false;
     selectingArea = false;
@@ -637,6 +630,38 @@ async function boot() {
   };
 
   canvas.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "touch") {
+      event.preventDefault();
+      activeTouches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      canvas.setPointerCapture(event.pointerId);
+      if (activeTouches.size >= 2) {
+        beginPinch();
+        return;
+      }
+
+      stopDragging();
+      primaryTouchId = event.pointerId;
+      touchStartX = event.clientX;
+      touchStartY = event.clientY;
+      lastX = event.clientX;
+      lastY = event.clientY;
+      const point = eventToCanvasPixels(event);
+      touchMode =
+        wasm.blitz_hit_test(point.x, point.y) === -1 ? "pending-empty" : "pending-object";
+      if (touchMode === "pending-empty") {
+        longPressTimer = window.setTimeout(() => {
+          longPressTimer = undefined;
+          if (touchMode === "pending-empty" && primaryTouchId !== null) {
+            const current = activeTouches.get(primaryTouchId);
+            if (current) {
+              beginTouchPointerInteraction("marquee");
+            }
+          }
+        }, longPressDelay);
+      }
+      return;
+    }
+
     const isPrimaryButton = event.button === 0;
     const isMiddleButton = event.button === 1;
     const isRightButton = event.button === 2;
@@ -666,6 +691,53 @@ async function boot() {
   });
 
   canvas.addEventListener("pointermove", (event) => {
+    if (event.pointerType === "touch") {
+      if (!activeTouches.has(event.pointerId)) {
+        return;
+      }
+      event.preventDefault();
+      activeTouches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (activeTouches.size >= 2 && touchMode !== "pinch") {
+        beginPinch();
+        return;
+      }
+      const gesture = touchGesture();
+      const dpr = window.devicePixelRatio || 1;
+      if (touchMode === "pinch") {
+        wasm.blitz_pan((gesture.center.x - lastX) * dpr, (gesture.center.y - lastY) * dpr);
+        if (lastPinchDistance > 0 && gesture.distance > 0) {
+          const zoomCenter = clientPointToCanvasPixels(gesture.center.x, gesture.center.y);
+          const zoomDelta = Math.min(2, Math.max(0.5, gesture.distance / lastPinchDistance));
+          wasm.blitz_zoom_at(zoomCenter.x, zoomCenter.y, zoomDelta);
+        }
+        lastX = gesture.center.x;
+        lastY = gesture.center.y;
+        lastPinchDistance = gesture.distance;
+        return;
+      }
+
+      const moved = Math.hypot(event.clientX - touchStartX, event.clientY - touchStartY);
+      if (touchMode === "pending-object" && moved >= touchMoveThreshold) {
+        clearLongPressTimer();
+        beginTouchPointerInteraction("entity");
+      } else if (touchMode === "pending-empty" && moved >= touchMoveThreshold) {
+        clearLongPressTimer();
+        touchMode = "pan";
+        draggingCamera = true;
+        canvas.classList.add("is-panning");
+      }
+
+      if (touchMode === "entity" || touchMode === "marquee") {
+        const point = eventToCanvasPixels(event);
+        wasm.blitz_pointer_move(point.x, point.y);
+      } else if (touchMode === "pan") {
+        wasm.blitz_pan((event.clientX - lastX) * dpr, (event.clientY - lastY) * dpr);
+      }
+      lastX = event.clientX;
+      lastY = event.clientY;
+      return;
+    }
+
     if (!draggingCamera && !draggingEntity && !selectingArea) {
       return;
     }
@@ -682,14 +754,84 @@ async function boot() {
   });
 
   canvas.addEventListener("pointerup", (event) => {
+    if (event.pointerType === "touch") {
+      clearLongPressTimer();
+      const wasPrimary = event.pointerId === primaryTouchId;
+      activeTouches.delete(event.pointerId);
+      if (touchMode === "pinch" && activeTouches.size > 0) {
+        const gesture = touchGesture();
+        lastX = gesture.center.x;
+        lastY = gesture.center.y;
+        lastPinchDistance = gesture.distance;
+        touchMode = "pan";
+        primaryTouchId = activeTouches.keys().next().value ?? null;
+      } else if (activeTouches.size > 0) {
+        const gesture = touchGesture();
+        lastX = gesture.center.x;
+        lastY = gesture.center.y;
+      } else {
+        if (wasPrimary && (touchMode === "pending-object" || touchMode === "pending-empty")) {
+          const point = eventToCanvasPixels(event);
+          wasm.blitz_pointer_down(point.x, point.y, 0);
+          wasm.blitz_pointer_up();
+        } else if (touchMode === "entity" || touchMode === "marquee") {
+          wasm.blitz_pointer_up();
+        }
+        lastPinchDistance = 0;
+        touchMode = "idle";
+        primaryTouchId = null;
+        draggingCamera = false;
+        draggingEntity = false;
+        selectingArea = false;
+        canvas.classList.remove("is-dragging-entity", "is-panning", "is-selecting");
+        updateSelectionState();
+      }
+      if (canvas.hasPointerCapture(event.pointerId)) {
+        canvas.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
+
     stopDragging();
     updateSelectionState();
-    canvas.releasePointerCapture(event.pointerId);
+    if (canvas.hasPointerCapture(event.pointerId)) {
+      canvas.releasePointerCapture(event.pointerId);
+    }
   });
 
   canvas.addEventListener("pointercancel", (event) => {
+    if (event.pointerType === "touch") {
+      clearLongPressTimer();
+      activeTouches.delete(event.pointerId);
+      if (touchMode === "entity" || touchMode === "marquee") {
+        wasm.blitz_pointer_up();
+      }
+      if (activeTouches.size > 0) {
+        const gesture = touchGesture();
+        lastX = gesture.center.x;
+        lastY = gesture.center.y;
+        lastPinchDistance = gesture.distance;
+        touchMode = "pan";
+        primaryTouchId = activeTouches.keys().next().value ?? null;
+      } else {
+        lastPinchDistance = 0;
+        touchMode = "idle";
+        primaryTouchId = null;
+        draggingCamera = false;
+        draggingEntity = false;
+        selectingArea = false;
+        canvas.classList.remove("is-dragging-entity", "is-panning", "is-selecting");
+      }
+      if (canvas.hasPointerCapture(event.pointerId)) {
+        canvas.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
+
     stopDragging();
-    canvas.releasePointerCapture(event.pointerId);
+    if (canvas.hasPointerCapture(event.pointerId)) {
+      canvas.releasePointerCapture(event.pointerId);
+    }
   });
 
   canvas.addEventListener("auxclick", (event) => {

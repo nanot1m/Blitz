@@ -246,7 +246,7 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
       options.stopDragging();
       const ids = shapes.map((shape) => {
         const id = addShape(shape);
-        if (id === INVALID_ENTITY) {
+        if ((id >>> 0) === INVALID_ENTITY) {
           throw new Error("Blitz could not allocate the requested shape.");
         }
         return id;

@@ -866,6 +866,27 @@ static int point_in_circle(float world_x, float world_y, u32 entity) {
   return dx * dx + dy * dy <= radius * radius;
 }
 
+static u32 hit_test_entity(float world_x, float world_y) {
+  for (u32 i = world.draw_order_count; i > 0u; i -= 1u) {
+    u32 entity = world.draw_order[i - 1u];
+    if (!(world.masks[entity] & BLITZ_COMPONENT_SELECTABLE)) {
+      continue;
+    }
+    u32 hit = 0u;
+    if (world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW) {
+      hit = (u32)point_in_circle(world_x, world_y, entity);
+    } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
+      hit = (u32)point_in_triangle(world_x, world_y, entity);
+    } else {
+      hit = (u32)point_in_rect(world_x, world_y, entity);
+    }
+    if (hit) {
+      return entity;
+    }
+  }
+  return BLITZ_INVALID_INDEX;
+}
+
 // Translates demo-slide coordinates so create_demo_world can be instanced
 // at grid offsets without touching its hardcoded layout.
 static float slide_origin_x = 0.0f;
@@ -1161,30 +1182,17 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
   float world_y = 0.0f;
   screen_to_world(screen_x, screen_y, &world_x, &world_y);
 
-  for (u32 i = world.draw_order_count; i > 0u; i -= 1u) {
-    u32 entity = world.draw_order[i - 1u];
-    if (!(world.masks[entity] & BLITZ_COMPONENT_SELECTABLE)) {
-      continue;
+  u32 entity = hit_test_entity(world_x, world_y);
+  if (entity != BLITZ_INVALID_INDEX) {
+    if (additive) {
+      toggle_selection(entity);
+    } else if (!world.selected[entity]) {
+      select_only(entity);
     }
-    u32 hit = 0u;
-    if (world.masks[entity] & BLITZ_COMPONENT_CIRCLE_VIEW) {
-      hit = (u32)point_in_circle(world_x, world_y, entity);
-    } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
-      hit = (u32)point_in_triangle(world_x, world_y, entity);
-    } else {
-      hit = (u32)point_in_rect(world_x, world_y, entity);
-    }
-    if (hit) {
-      if (additive) {
-        toggle_selection(entity);
-      } else if (!world.selected[entity]) {
-        select_only(entity);
-      }
-      dragging_selection = world.selected[entity];
-      drag_last_world.x = world_x;
-      drag_last_world.y = world_y;
-      return 1u;
-    }
+    dragging_selection = world.selected[entity];
+    drag_last_world.x = world_x;
+    drag_last_world.y = world_y;
+    return 1u;
   }
 
   dragging_selection = 0u;
@@ -1200,6 +1208,14 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
   snapshot_selection_base();
   mark_dynamic_dirty();
   return 2u;
+}
+
+EXPORT("blitz_hit_test")
+u32 blitz_hit_test(float screen_x, float screen_y) {
+  float world_x = 0.0f;
+  float world_y = 0.0f;
+  screen_to_world(screen_x, screen_y, &world_x, &world_y);
+  return hit_test_entity(world_x, world_y);
 }
 
 EXPORT("blitz_pointer_move")

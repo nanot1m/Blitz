@@ -4,12 +4,12 @@ typedef unsigned int u32;
 
 #define EXPORT(name) __attribute__((export_name(name)))
 
-#define BLITZ_MAX_ENTITIES 2000000u
+#define BLITZ_MAX_ENTITIES 1000000u
 #define BLITZ_RENDER_CHUNK_RECTS 250000u
 #define BLITZ_RENDER_CHUNKS 4u
 #define BLITZ_MAX_RECT_DRAWS (BLITZ_RENDER_CHUNK_RECTS * BLITZ_RENDER_CHUNKS)
 #define BLITZ_MAX_TEXT_DRAWS 262144u
-#define BLITZ_MAX_DYN_RECTS 2000000u
+#define BLITZ_MAX_DYN_RECTS 1000000u
 #define BLITZ_MAX_DYN_COMMANDS (BLITZ_MAX_TEXT_DRAWS + BLITZ_MAX_DYN_RECTS)
 #define BLITZ_MIN_TEXT_PX 3.0f
 #define BLITZ_TEXT_INPUT_BYTES 4096u
@@ -33,6 +33,7 @@ typedef unsigned int u32;
 #define BLITZ_COMPONENT_CIRCLE_VIEW 16u
 #define BLITZ_COMPONENT_TEXT_VIEW 32u
 #define BLITZ_COMPONENT_SELECTABLE 64u
+#define BLITZ_COMPONENT_RESIZABLE 128u
 
 #define BLITZ_SHAPE_RECT 0u
 #define BLITZ_SHAPE_TRIANGLE 1u
@@ -185,6 +186,11 @@ static u32 spawn_count;
 static Vec2 drag_last_world;
 static Vec2 drag_offset;
 static u32 drag_active;
+static u32 resize_active;
+static u32 resize_entity;
+static u32 resize_handle;
+static Vec2 resize_start_position;
+static Vec2 resize_start_size;
 // Selection state captured when a marquee starts, so each marquee move can
 // recompute live selection as base ∪ (entities inside the current box).
 static u32 marquee_base_selected[BLITZ_MAX_ENTITIES];
@@ -312,6 +318,12 @@ static void ecs_set_size(u32 entity, float width, float height) {
   world.sizes[entity].x = width;
   world.sizes[entity].y = height;
   world.masks[entity] |= BLITZ_COMPONENT_SIZE;
+}
+
+static void ecs_set_resizable(u32 entity) {
+  if (entity != BLITZ_INVALID_INDEX) {
+    world.masks[entity] |= BLITZ_COMPONENT_RESIZABLE;
+  }
 }
 
 static void ecs_set_rect_view(u32 entity, Color fill_color, Color stroke_color,
@@ -491,6 +503,39 @@ static void push_selection_draw(u32 entity, u32 order) {
   draw->fill_color[1] = 0.0f;
   draw->fill_color[2] = 0.0f;
   draw->fill_color[3] = 0.0f;
+  draw->stroke_color[0] = 0.12f;
+  draw->stroke_color[1] = 0.48f;
+  draw->stroke_color[2] = 1.0f;
+  draw->stroke_color[3] = 1.0f;
+  draw->stroke_width_pad[0] = 2.0f / uniforms.style[0];
+  draw->stroke_width_pad[1] = 0.0f;
+  draw->stroke_width_pad[2] = 0.0f;
+  draw->stroke_width_pad[3] = 0.0f;
+
+  dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_RECT;
+  dyn_commands[dyn_command_count].shape_index = dyn_rect_count;
+  dyn_commands[dyn_command_count].entity = BLITZ_INVALID_INDEX;
+  dyn_commands[dyn_command_count]._pad0 = order;
+  dyn_rect_count += 1u;
+  dyn_command_count += 1u;
+}
+
+static void push_resize_handle_draw(float center_x, float center_y, u32 order) {
+  if (dyn_command_count >= BLITZ_MAX_DYN_COMMANDS ||
+      dyn_rect_count >= BLITZ_MAX_DYN_RECTS) {
+    return;
+  }
+
+  float size = 9.0f / uniforms.style[0];
+  RectDraw *draw = &dyn_rects[dyn_rect_count];
+  draw->rect[0] = center_x - size * 0.5f;
+  draw->rect[1] = center_y - size * 0.5f;
+  draw->rect[2] = size;
+  draw->rect[3] = size;
+  draw->fill_color[0] = 1.0f;
+  draw->fill_color[1] = 1.0f;
+  draw->fill_color[2] = 1.0f;
+  draw->fill_color[3] = 1.0f;
   draw->stroke_color[0] = 0.12f;
   draw->stroke_color[1] = 0.48f;
   draw->stroke_color[2] = 1.0f;
@@ -858,8 +903,27 @@ static void extract_dynamic(void) {
       continue;
     }
     push_selection_draw(entity, overlay_order);
+    if (selected_count == 1u &&
+        (world.masks[entity] & BLITZ_COMPONENT_RESIZABLE)) {
+      float left = position.x;
+      float top = position.y;
+      float right = position.x + size.x;
+      float bottom = position.y + size.y;
+      push_resize_handle_draw(left, top, overlay_order + 1u);
+      push_resize_handle_draw(right, top, overlay_order + 1u);
+      push_resize_handle_draw(right, bottom, overlay_order + 1u);
+      push_resize_handle_draw(left, bottom, overlay_order + 1u);
+      push_resize_handle_draw((left + right) * 0.5f, top,
+                              overlay_order + 1u);
+      push_resize_handle_draw(right, (top + bottom) * 0.5f,
+                              overlay_order + 1u);
+      push_resize_handle_draw((left + right) * 0.5f, bottom,
+                              overlay_order + 1u);
+      push_resize_handle_draw(left, (top + bottom) * 0.5f,
+                              overlay_order + 1u);
+    }
   }
-  push_marquee_draw(world.draw_order_count + 2u);
+  push_marquee_draw(world.draw_order_count + 3u);
   uniforms.style[3] = (float)world.draw_order_count;
   dyn_version += 1u;
   dynamic_dirty = 0u;
@@ -916,7 +980,146 @@ static int point_in_circle(float world_x, float world_y, u32 entity) {
   return dx * dx + dy * dy <= radius * radius;
 }
 
+static u32 selected_resizable_entity(void) {
+  if (selected_count != 1u) {
+    return BLITZ_INVALID_INDEX;
+  }
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.selected[entity] &&
+        (world.masks[entity] & BLITZ_COMPONENT_RESIZABLE)) {
+      return entity;
+    }
+  }
+  return BLITZ_INVALID_INDEX;
+}
+
+static u32 hit_test_resize_handle(float world_x, float world_y, u32 entity) {
+  if (entity == BLITZ_INVALID_INDEX) {
+    return BLITZ_INVALID_INDEX;
+  }
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  float hit_radius = 10.0f / uniforms.style[0];
+  float centers[16] = {
+      position.x,          position.y,
+      position.x + size.x, position.y,
+      position.x + size.x, position.y + size.y,
+      position.x,          position.y + size.y,
+      position.x + size.x * 0.5f, position.y,
+      position.x + size.x, position.y + size.y * 0.5f,
+      position.x + size.x * 0.5f, position.y + size.y,
+      position.x, position.y + size.y * 0.5f,
+  };
+  for (u32 handle = 0u; handle < 8u; handle += 1u) {
+    float dx = world_x - centers[handle * 2u];
+    float dy = world_y - centers[handle * 2u + 1u];
+    if (dx >= -hit_radius && dx <= hit_radius &&
+        dy >= -hit_radius && dy <= hit_radius) {
+      return handle;
+    }
+  }
+  return BLITZ_INVALID_INDEX;
+}
+
+static void resize_entity_to(float world_x, float world_y) {
+  if (!resize_active || resize_entity == BLITZ_INVALID_INDEX) {
+    return;
+  }
+
+  float min_size = 12.0f / uniforms.style[0];
+  float left = resize_start_position.x;
+  float top = resize_start_position.y;
+  float right = left + resize_start_size.x;
+  float bottom = top + resize_start_size.y;
+  float center_x = (left + right) * 0.5f;
+  float center_y = (top + bottom) * 0.5f;
+  float anchor_x =
+      (resize_handle == 0u || resize_handle == 3u || resize_handle == 7u)
+          ? right
+          : left;
+  float anchor_y =
+      (resize_handle == 0u || resize_handle == 1u || resize_handle == 4u)
+          ? bottom
+          : top;
+  float next_x = left;
+  float next_y = top;
+  float next_width = resize_start_size.x;
+  float next_height = resize_start_size.y;
+
+  if (world.masks[resize_entity] & BLITZ_COMPONENT_CIRCLE_VIEW) {
+    float side = resize_start_size.x;
+    if (resize_handle < 4u) {
+      float width =
+          world_x > anchor_x ? world_x - anchor_x : anchor_x - world_x;
+      float height =
+          world_y > anchor_y ? world_y - anchor_y : anchor_y - world_y;
+      side = width > height ? width : height;
+    } else if (resize_handle == 4u) {
+      side = bottom - world_y;
+    } else if (resize_handle == 5u) {
+      side = world_x - left;
+    } else if (resize_handle == 6u) {
+      side = world_y - top;
+    } else {
+      side = right - world_x;
+    }
+    if (side < min_size) {
+      side = min_size;
+    }
+    if (resize_handle < 4u) {
+      next_x = (resize_handle == 0u || resize_handle == 3u)
+                   ? anchor_x - side
+                   : anchor_x;
+      next_y = (resize_handle == 0u || resize_handle == 1u)
+                   ? anchor_y - side
+                   : anchor_y;
+    } else if (resize_handle == 4u) {
+      next_x = center_x - side * 0.5f;
+      next_y = bottom - side;
+    } else if (resize_handle == 5u) {
+      next_x = left;
+      next_y = center_y - side * 0.5f;
+    } else if (resize_handle == 6u) {
+      next_x = center_x - side * 0.5f;
+      next_y = top;
+    } else {
+      next_x = right - side;
+      next_y = center_y - side * 0.5f;
+    }
+    next_width = side;
+    next_height = side;
+  } else {
+    if (resize_handle == 0u || resize_handle == 3u || resize_handle == 7u) {
+      next_x = world_x < anchor_x - min_size ? world_x : anchor_x - min_size;
+      next_width = anchor_x - next_x;
+    } else if (resize_handle == 1u || resize_handle == 2u ||
+               resize_handle == 5u) {
+      next_x = anchor_x;
+      next_width = world_x > anchor_x + min_size ? world_x - anchor_x : min_size;
+    }
+    if (resize_handle == 0u || resize_handle == 1u || resize_handle == 4u) {
+      next_y = world_y < anchor_y - min_size ? world_y : anchor_y - min_size;
+      next_height = anchor_y - next_y;
+    } else if (resize_handle == 2u || resize_handle == 3u ||
+               resize_handle == 6u) {
+      next_y = anchor_y;
+      next_height = world_y > anchor_y + min_size ? world_y - anchor_y : min_size;
+    }
+  }
+
+  world.positions[resize_entity].x = next_x;
+  world.positions[resize_entity].y = next_y;
+  world.sizes[resize_entity].x = next_width;
+  world.sizes[resize_entity].y = next_height;
+  mark_render_list_dirty();
+}
+
 static u32 hit_test_entity(float world_x, float world_y) {
+  u32 resize_target = selected_resizable_entity();
+  if (hit_test_resize_handle(world_x, world_y, resize_target) !=
+      BLITZ_INVALID_INDEX) {
+    return resize_target;
+  }
   for (u32 i = world.draw_order_count; i > 0u; i -= 1u) {
     u32 entity = world.draw_order[i - 1u];
     if (!(world.masks[entity] & BLITZ_COMPONENT_SELECTABLE)) {
@@ -949,6 +1152,7 @@ static u32 create_slide_rect(float x, float y, float width, float height,
   ecs_set_size(entity, width, height);
   ecs_set_rect_view(entity, fill, stroke, stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  ecs_set_resizable(entity);
   return entity;
 }
 
@@ -974,6 +1178,7 @@ static u32 create_user_rect(float x, float y) {
   ecs_set_rect_view(entity, (Color){0.86f, 0.92f, 1.0f, 1.0f},
                     (Color){0.20f, 0.43f, 0.85f, 1.0f}, 2.0f);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  ecs_set_resizable(entity);
   return entity;
 }
 
@@ -984,6 +1189,7 @@ static u32 create_user_circle(float x, float y) {
   ecs_set_circle_view(entity, (Color){0.86f, 0.97f, 0.93f, 1.0f},
                       (Color){0.08f, 0.58f, 0.46f, 1.0f}, 2.0f);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  ecs_set_resizable(entity);
   return entity;
 }
 
@@ -994,6 +1200,7 @@ static u32 create_user_triangle(float x, float y) {
   ecs_set_triangle_view(entity, (Color){1.0f, 0.92f, 0.85f, 1.0f},
                         (Color){0.91f, 0.31f, 0.27f, 1.0f}, 2.0f);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  ecs_set_resizable(entity);
   return entity;
 }
 
@@ -1139,6 +1346,13 @@ void blitz_init(void) {
   drag_active = 0u;
   drag_offset.x = 0.0f;
   drag_offset.y = 0.0f;
+  resize_active = 0u;
+  resize_entity = BLITZ_INVALID_INDEX;
+  resize_handle = 0u;
+  resize_start_position.x = 0.0f;
+  resize_start_position.y = 0.0f;
+  resize_start_size.x = 0.0f;
+  resize_start_size.y = 0.0f;
   marquee_active = 0u;
   marquee_additive = 0u;
   marquee_candidate = BLITZ_INVALID_INDEX;
@@ -1233,6 +1447,19 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
   float world_y = 0.0f;
   screen_to_world(screen_x, screen_y, &world_x, &world_y);
 
+  u32 resize_target = selected_resizable_entity();
+  u32 handle = hit_test_resize_handle(world_x, world_y, resize_target);
+  if (!additive && handle != BLITZ_INVALID_INDEX) {
+    resize_active = 1u;
+    resize_entity = resize_target;
+    resize_handle = handle;
+    resize_start_position = world.positions[resize_target];
+    resize_start_size = world.sizes[resize_target];
+    dragging_selection = 0u;
+    marquee_active = 0u;
+    return 3u + handle;
+  }
+
   u32 entity = hit_test_entity(world_x, world_y);
   if (entity != BLITZ_INVALID_INDEX) {
     if (additive) {
@@ -1269,11 +1496,25 @@ u32 blitz_hit_test(float screen_x, float screen_y) {
   return hit_test_entity(world_x, world_y);
 }
 
+EXPORT("blitz_resize_mode_at")
+u32 blitz_resize_mode_at(float screen_x, float screen_y) {
+  float world_x = 0.0f;
+  float world_y = 0.0f;
+  screen_to_world(screen_x, screen_y, &world_x, &world_y);
+  u32 handle =
+      hit_test_resize_handle(world_x, world_y, selected_resizable_entity());
+  return handle == BLITZ_INVALID_INDEX ? 0u : 3u + handle;
+}
+
 EXPORT("blitz_pointer_move")
 void blitz_pointer_move(float screen_x, float screen_y) {
   float world_x = 0.0f;
   float world_y = 0.0f;
   screen_to_world(screen_x, screen_y, &world_x, &world_y);
+  if (resize_active) {
+    resize_entity_to(world_x, world_y);
+    return;
+  }
   if (marquee_active) {
     marquee_end.x = world_x;
     marquee_end.y = world_y;
@@ -1303,6 +1544,12 @@ void blitz_pointer_move(float screen_x, float screen_y) {
 
 EXPORT("blitz_pointer_up")
 void blitz_pointer_up(void) {
+  if (resize_active) {
+    resize_active = 0u;
+    resize_entity = BLITZ_INVALID_INDEX;
+    mark_dynamic_dirty();
+    return;
+  }
   if (drag_active) {
     for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
       if (world.selected[entity]) {
@@ -1399,6 +1646,8 @@ static void clear_scene_state(void) {
   drag_active = 0u;
   drag_offset.x = 0.0f;
   drag_offset.y = 0.0f;
+  resize_active = 0u;
+  resize_entity = BLITZ_INVALID_INDEX;
   uniforms.font_params[2] = 0.0f;
   uniforms.font_params[3] = 0.0f;
   marquee_active = 0u;
@@ -1452,6 +1701,7 @@ u32 blitz_create_rect(float x, float y, float width, float height,
                     (Color){stroke_r, stroke_g, stroke_b, stroke_a},
                     stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  ecs_set_resizable(entity);
   select_only(entity);
   mark_render_list_dirty();
   return entity;
@@ -1475,6 +1725,7 @@ u32 blitz_create_circle(float center_x, float center_y, float radius,
                       (Color){stroke_r, stroke_g, stroke_b, stroke_a},
                       stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  ecs_set_resizable(entity);
   select_only(entity);
   mark_render_list_dirty();
   return entity;
@@ -1498,6 +1749,7 @@ u32 blitz_create_triangle(float x, float y, float width, float height,
                         (Color){stroke_r, stroke_g, stroke_b, stroke_a},
                         stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  ecs_set_resizable(entity);
   select_only(entity);
   mark_render_list_dirty();
   return entity;
@@ -1864,10 +2116,13 @@ u32 blitz_scene_deserialize(u32 byte_count) {
     ecs_set_size(entity, width, height);
     if (kind == BLITZ_SHAPE_RECT) {
       ecs_set_rect_view(entity, fill, stroke, stroke_width);
+      ecs_set_resizable(entity);
     } else if (kind == BLITZ_SHAPE_TRIANGLE) {
       ecs_set_triangle_view(entity, fill, stroke, stroke_width);
+      ecs_set_resizable(entity);
     } else if (kind == BLITZ_SHAPE_CIRCLE) {
       ecs_set_circle_view(entity, fill, stroke, stroke_width);
+      ecs_set_resizable(entity);
     } else {
       char *text = &text_pool[text_pool_used];
       for (u32 i = 0u; i < text_length; i += 1u) {
@@ -1897,7 +2152,7 @@ u32 blitz_scene_deserialize(u32 byte_count) {
 EXPORT("blitz_stress_test")
 void blitz_stress_test(void) {
   const u32 columns = 200u;
-  const u32 rows = 200u;
+  const u32 rows = 100u;
   const float pitch_x = 1240.0f;
   const float pitch_y = 750.0f;
   float base_x = -0.5f * (float)(columns - 1u) * pitch_x;
@@ -1941,6 +2196,8 @@ void blitz_delete_selected(void) {
   selected_count = 0u;
   dragging_selection = 0u;
   drag_active = 0u;
+  resize_active = 0u;
+  resize_entity = BLITZ_INVALID_INDEX;
   mark_render_list_dirty();
 }
 

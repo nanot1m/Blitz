@@ -17,6 +17,42 @@ if (wasm.blitz_entity_count() === 0) {
 }
 
 wasm.blitz_clear_scene();
+wasm.blitz_resize(1000, 1000);
+wasm.blitz_set_camera(0, 0, 1);
+wasm.blitz_create_rect(-100, -50, 200, 100, 0.2, 0.4, 0.8, 1, 0.1, 0.2, 0.3, 1, 2);
+if (wasm.blitz_pointer_down(400, 450, 0) !== 3) {
+  throw new Error("The rectangle northwest resize handle was not detected.");
+}
+wasm.blitz_pointer_move(380, 430);
+wasm.blitz_pointer_up();
+wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
+const resizedItem = new DataView(
+  wasm.memory.buffer,
+  wasm.blitz_scene_query_ptr(),
+  wasm.blitz_scene_query_item_bytes(),
+);
+if (
+  Math.abs(resizedItem.getFloat32(32, true) + 120) > 0.001 ||
+  Math.abs(resizedItem.getFloat32(36, true) + 70) > 0.001 ||
+  Math.abs(resizedItem.getFloat32(40, true) - 220) > 0.001 ||
+  Math.abs(resizedItem.getFloat32(44, true) - 120) > 0.001
+) {
+  throw new Error("Rectangle resize did not update ECS position and size.");
+}
+if (wasm.blitz_resize_mode_at(600, 490) !== 8) {
+  throw new Error("The rectangle east edge did not expose an east-west resize cursor.");
+}
+if (wasm.blitz_pointer_down(600, 490, 0) !== 8) {
+  throw new Error("The rectangle east edge resize handle was not detected.");
+}
+wasm.blitz_pointer_move(630, 490);
+wasm.blitz_pointer_up();
+wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
+if (Math.abs(resizedItem.getFloat32(40, true) - 250) > 0.001) {
+  throw new Error("Rectangle edge resize did not update its width.");
+}
+
+wasm.blitz_clear_scene();
 const emptyRevision = wasm.blitz_scene_revision();
 wasm.blitz_set_camera(321, -123, 1.75);
 if (wasm.blitz_scene_revision() !== emptyRevision) {

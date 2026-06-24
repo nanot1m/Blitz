@@ -67,6 +67,22 @@ dialog {
   cursor: move;
 }
 
+#blitz-canvas.is-resizing-nwse {
+  cursor: nwse-resize;
+}
+
+#blitz-canvas.is-resizing-nesw {
+  cursor: nesw-resize;
+}
+
+#blitz-canvas.is-resizing-ns {
+  cursor: ns-resize;
+}
+
+#blitz-canvas.is-resizing-ew {
+  cursor: ew-resize;
+}
+
 #blitz-canvas.is-panning {
   cursor: grabbing;
 }

@@ -1,0 +1,543 @@
+type CanvasInteractionWasm = {
+  blitz_hit_test(screenX: number, screenY: number): number;
+  blitz_pan(dxPixels: number, dyPixels: number): void;
+  blitz_pointer_down(screenX: number, screenY: number, additive: number): number;
+  blitz_pointer_move(screenX: number, screenY: number): void;
+  blitz_pointer_up(): void;
+  blitz_resize_mode_at(screenX: number, screenY: number): number;
+  blitz_zoom_at(screenX: number, screenY: number, zoomDelta: number): void;
+};
+
+type CanvasInteractionOptions = {
+  onSelectionChanged(): void;
+};
+
+export type CanvasInteractionController = {
+  stopDragging(): void;
+};
+
+type KeyboardShortcutOptions = {
+  deleteSelection(): void;
+  openFile(): void;
+  saveFile(): void;
+  selectAll(): void;
+  showRecentFiles(): void;
+  stopDragging(): void;
+};
+
+type UiActionElements = {
+  addCircleButton: HTMLButtonElement;
+  addRectButton: HTMLButtonElement;
+  addTextButton: HTMLButtonElement;
+  addTriangleButton: HTMLButtonElement;
+  bringToFrontButton: HTMLButtonElement;
+  deleteButton: HTMLButtonElement;
+  emptyAddItemButton: HTMLButtonElement;
+  emptyDemoTemplateButton: HTMLButtonElement;
+  emptyOpenFileButton: HTMLButtonElement;
+  sendToBackButton: HTMLButtonElement;
+  shapeMenu: HTMLDetailsElement;
+  stressTestButton: HTMLButtonElement;
+  toggleStatsButton: HTMLButtonElement;
+};
+
+type UiActions = {
+  addCircle(): void;
+  addRect(): void;
+  addText(): void;
+  addTriangle(): void;
+  bringToFront(): void;
+  deleteSelection(): void;
+  loadDemoTemplate(): void;
+  openFile(): void;
+  sendToBack(): void;
+  stressTest(): void;
+  toggleStats(): void;
+};
+
+type TouchMode =
+  | "idle"
+  | "pending-object"
+  | "pending-empty"
+  | "entity"
+  | "resize"
+  | "pan"
+  | "marquee"
+  | "pinch";
+
+function allowsNativeSelection(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
+}
+
+export function setupCanvasInteractions(
+  canvas: HTMLCanvasElement,
+  wasm: CanvasInteractionWasm,
+  options: CanvasInteractionOptions,
+): CanvasInteractionController {
+  let draggingCamera = false;
+  let draggingEntity = false;
+  let resizingEntity = false;
+  let resizePointerMode = 0;
+  let selectingArea = false;
+  let mouseEntityDragPending = false;
+  let mouseDragStartX = 0;
+  let mouseDragStartY = 0;
+  let lastX = 0;
+  let lastY = 0;
+  const activeTouches = new Map<number, { x: number; y: number }>();
+  let lastPinchDistance = 0;
+  let touchMode: TouchMode = "idle";
+  let primaryTouchId: number | null = null;
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let longPressTimer: number | undefined;
+  const touchMoveThreshold = 8;
+  const mouseDragThreshold = 4;
+  const longPressDelay = 450;
+
+  const eventToCanvasPixels = (event: PointerEvent | WheelEvent) => {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    return {
+      x: (event.clientX - rect.left) * dpr,
+      y: (event.clientY - rect.top) * dpr,
+    };
+  };
+
+  const clientPointToCanvasPixels = (clientX: number, clientY: number) => {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    return {
+      x: (clientX - rect.left) * dpr,
+      y: (clientY - rect.top) * dpr,
+    };
+  };
+
+  const touchGesture = () => {
+    const points = Array.from(activeTouches.values());
+    const center = points.reduce(
+      (result, point) => ({
+        x: result.x + point.x / points.length,
+        y: result.y + point.y / points.length,
+      }),
+      { x: 0, y: 0 },
+    );
+    const distance =
+      points.length >= 2
+        ? Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y)
+        : 0;
+    return { center, distance };
+  };
+
+  const clearLongPressTimer = () => {
+    if (longPressTimer !== undefined) {
+      window.clearTimeout(longPressTimer);
+      longPressTimer = undefined;
+    }
+  };
+
+  const setResizeCursor = (pointerMode: number) => {
+    canvas.classList.toggle("is-resizing-nwse", pointerMode === 3 || pointerMode === 5);
+    canvas.classList.toggle("is-resizing-nesw", pointerMode === 4 || pointerMode === 6);
+    canvas.classList.toggle("is-resizing-ns", pointerMode === 7 || pointerMode === 9);
+    canvas.classList.toggle("is-resizing-ew", pointerMode === 8 || pointerMode === 10);
+  };
+
+  const clearInteractionClasses = () => {
+    canvas.classList.remove(
+      "is-dragging-entity",
+      "is-resizing-nwse",
+      "is-resizing-nesw",
+      "is-resizing-ns",
+      "is-resizing-ew",
+      "is-panning",
+      "is-selecting",
+    );
+  };
+
+  const beginTouchPointerInteraction = (mode: "entity" | "marquee") => {
+    const start = clientPointToCanvasPixels(touchStartX, touchStartY);
+    const pointerMode = wasm.blitz_pointer_down(start.x, start.y, 0);
+    touchMode = pointerMode >= 3 ? "resize" : mode;
+    draggingEntity = pointerMode === 1;
+    resizingEntity = pointerMode >= 3;
+    resizePointerMode = resizingEntity ? pointerMode : 0;
+    selectingArea = mode === "marquee";
+    canvas.classList.toggle("is-dragging-entity", draggingEntity);
+    setResizeCursor(pointerMode);
+    canvas.classList.toggle("is-selecting", selectingArea);
+    options.onSelectionChanged();
+  };
+
+  const beginPinch = () => {
+    clearLongPressTimer();
+    if (touchMode === "entity" || touchMode === "resize" || touchMode === "marquee") {
+      wasm.blitz_pointer_up();
+      options.onSelectionChanged();
+    }
+    draggingEntity = false;
+    resizingEntity = false;
+    resizePointerMode = 0;
+    selectingArea = false;
+    draggingCamera = true;
+    touchMode = "pinch";
+    clearInteractionClasses();
+    canvas.classList.add("is-panning");
+    const gesture = touchGesture();
+    lastX = gesture.center.x;
+    lastY = gesture.center.y;
+    lastPinchDistance = gesture.distance;
+  };
+
+  const stopDragging = () => {
+    clearLongPressTimer();
+    draggingCamera = false;
+    draggingEntity = false;
+    resizingEntity = false;
+    resizePointerMode = 0;
+    selectingArea = false;
+    mouseEntityDragPending = false;
+    clearInteractionClasses();
+    wasm.blitz_pointer_up();
+  };
+
+  canvas.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "touch") {
+      event.preventDefault();
+      activeTouches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      canvas.setPointerCapture(event.pointerId);
+      if (activeTouches.size >= 2) {
+        beginPinch();
+        return;
+      }
+
+      stopDragging();
+      primaryTouchId = event.pointerId;
+      touchStartX = event.clientX;
+      touchStartY = event.clientY;
+      lastX = event.clientX;
+      lastY = event.clientY;
+      const point = eventToCanvasPixels(event);
+      touchMode =
+        wasm.blitz_hit_test(point.x, point.y) === -1 ? "pending-empty" : "pending-object";
+      if (touchMode === "pending-empty") {
+        longPressTimer = window.setTimeout(() => {
+          longPressTimer = undefined;
+          if (touchMode === "pending-empty" && primaryTouchId !== null) {
+            const current = activeTouches.get(primaryTouchId);
+            if (current) {
+              beginTouchPointerInteraction("marquee");
+            }
+          }
+        }, longPressDelay);
+      }
+      return;
+    }
+
+    const isPrimaryButton = event.button === 0;
+    const isMiddleButton = event.button === 1;
+    const isRightButton = event.button === 2;
+    if (!isPrimaryButton && !isMiddleButton && !isRightButton) {
+      return;
+    }
+
+    event.preventDefault();
+    if (isMiddleButton || isRightButton) {
+      stopDragging();
+      draggingCamera = true;
+      canvas.classList.add("is-panning");
+    } else {
+      const point = eventToCanvasPixels(event);
+      const additive = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 0;
+      const pointerMode = wasm.blitz_pointer_down(point.x, point.y, additive);
+      draggingEntity = pointerMode === 1;
+      resizingEntity = pointerMode >= 3;
+      resizePointerMode = resizingEntity ? pointerMode : 0;
+      selectingArea = pointerMode === 2;
+      mouseEntityDragPending =
+        event.pointerType === "mouse" && (draggingEntity || resizingEntity);
+      mouseDragStartX = event.clientX;
+      mouseDragStartY = event.clientY;
+      canvas.classList.toggle("is-dragging-entity", draggingEntity && !mouseEntityDragPending);
+      if (!mouseEntityDragPending) {
+        setResizeCursor(pointerMode);
+      }
+      canvas.classList.toggle("is-selecting", selectingArea);
+      options.onSelectionChanged();
+    }
+
+    lastX = event.clientX;
+    lastY = event.clientY;
+    canvas.setPointerCapture(event.pointerId);
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (event.pointerType === "touch") {
+      if (!activeTouches.has(event.pointerId)) {
+        return;
+      }
+      event.preventDefault();
+      activeTouches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (activeTouches.size >= 2 && touchMode !== "pinch") {
+        beginPinch();
+        return;
+      }
+      const gesture = touchGesture();
+      const dpr = window.devicePixelRatio || 1;
+      if (touchMode === "pinch") {
+        wasm.blitz_pan((gesture.center.x - lastX) * dpr, (gesture.center.y - lastY) * dpr);
+        if (lastPinchDistance > 0 && gesture.distance > 0) {
+          const zoomCenter = clientPointToCanvasPixels(gesture.center.x, gesture.center.y);
+          const zoomDelta = Math.min(2, Math.max(0.5, gesture.distance / lastPinchDistance));
+          wasm.blitz_zoom_at(zoomCenter.x, zoomCenter.y, zoomDelta);
+        }
+        lastX = gesture.center.x;
+        lastY = gesture.center.y;
+        lastPinchDistance = gesture.distance;
+        return;
+      }
+
+      const moved = Math.hypot(event.clientX - touchStartX, event.clientY - touchStartY);
+      if (touchMode === "pending-object" && moved >= touchMoveThreshold) {
+        clearLongPressTimer();
+        beginTouchPointerInteraction("entity");
+      } else if (touchMode === "pending-empty" && moved >= touchMoveThreshold) {
+        clearLongPressTimer();
+        touchMode = "pan";
+        draggingCamera = true;
+        canvas.classList.add("is-panning");
+      }
+
+      if (touchMode === "entity" || touchMode === "resize" || touchMode === "marquee") {
+        const point = eventToCanvasPixels(event);
+        wasm.blitz_pointer_move(point.x, point.y);
+      } else if (touchMode === "pan") {
+        wasm.blitz_pan((event.clientX - lastX) * dpr, (event.clientY - lastY) * dpr);
+      }
+      lastX = event.clientX;
+      lastY = event.clientY;
+      return;
+    }
+
+    if (!draggingCamera && !draggingEntity && !resizingEntity && !selectingArea) {
+      const point = eventToCanvasPixels(event);
+      setResizeCursor(wasm.blitz_resize_mode_at(point.x, point.y));
+      return;
+    }
+
+    const dpr = window.devicePixelRatio || 1;
+    if (draggingEntity || resizingEntity || selectingArea) {
+      if ((draggingEntity || resizingEntity) && mouseEntityDragPending) {
+        const moved = Math.hypot(
+          event.clientX - mouseDragStartX,
+          event.clientY - mouseDragStartY,
+        );
+        if (moved < mouseDragThreshold) {
+          return;
+        }
+        mouseEntityDragPending = false;
+        if (draggingEntity) {
+          canvas.classList.add("is-dragging-entity");
+        }
+        if (resizingEntity) {
+          setResizeCursor(resizePointerMode);
+        }
+      }
+      const point = eventToCanvasPixels(event);
+      wasm.blitz_pointer_move(point.x, point.y);
+    } else {
+      wasm.blitz_pan((event.clientX - lastX) * dpr, (event.clientY - lastY) * dpr);
+    }
+    lastX = event.clientX;
+    lastY = event.clientY;
+  });
+
+  canvas.addEventListener("pointerup", (event) => {
+    if (event.pointerType === "touch") {
+      clearLongPressTimer();
+      const wasPrimary = event.pointerId === primaryTouchId;
+      activeTouches.delete(event.pointerId);
+      if (touchMode === "pinch" && activeTouches.size > 0) {
+        const gesture = touchGesture();
+        lastX = gesture.center.x;
+        lastY = gesture.center.y;
+        lastPinchDistance = gesture.distance;
+        touchMode = "pan";
+        primaryTouchId = activeTouches.keys().next().value ?? null;
+      } else if (activeTouches.size > 0) {
+        const gesture = touchGesture();
+        lastX = gesture.center.x;
+        lastY = gesture.center.y;
+      } else {
+        if (wasPrimary && (touchMode === "pending-object" || touchMode === "pending-empty")) {
+          const point = eventToCanvasPixels(event);
+          wasm.blitz_pointer_down(point.x, point.y, 0);
+          wasm.blitz_pointer_up();
+        } else if (
+          touchMode === "entity" ||
+          touchMode === "resize" ||
+          touchMode === "marquee"
+        ) {
+          wasm.blitz_pointer_up();
+        }
+        lastPinchDistance = 0;
+        touchMode = "idle";
+        primaryTouchId = null;
+        draggingCamera = false;
+        draggingEntity = false;
+        resizingEntity = false;
+        resizePointerMode = 0;
+        selectingArea = false;
+        clearInteractionClasses();
+        options.onSelectionChanged();
+      }
+      if (canvas.hasPointerCapture(event.pointerId)) {
+        canvas.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
+
+    stopDragging();
+    options.onSelectionChanged();
+    if (canvas.hasPointerCapture(event.pointerId)) {
+      canvas.releasePointerCapture(event.pointerId);
+    }
+  });
+
+  canvas.addEventListener("pointercancel", (event) => {
+    if (event.pointerType === "touch") {
+      clearLongPressTimer();
+      activeTouches.delete(event.pointerId);
+      if (touchMode === "entity" || touchMode === "resize" || touchMode === "marquee") {
+        wasm.blitz_pointer_up();
+      }
+      if (activeTouches.size > 0) {
+        const gesture = touchGesture();
+        lastX = gesture.center.x;
+        lastY = gesture.center.y;
+        lastPinchDistance = gesture.distance;
+        touchMode = "pan";
+        primaryTouchId = activeTouches.keys().next().value ?? null;
+      } else {
+        lastPinchDistance = 0;
+        touchMode = "idle";
+        primaryTouchId = null;
+        draggingCamera = false;
+        draggingEntity = false;
+        resizingEntity = false;
+        resizePointerMode = 0;
+        selectingArea = false;
+        clearInteractionClasses();
+      }
+      if (canvas.hasPointerCapture(event.pointerId)) {
+        canvas.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
+
+    stopDragging();
+    if (canvas.hasPointerCapture(event.pointerId)) {
+      canvas.releasePointerCapture(event.pointerId);
+    }
+  });
+
+  canvas.addEventListener("auxclick", (event) => {
+    if (event.button === 1 || event.button === 2) {
+      event.preventDefault();
+    }
+  });
+  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  canvas.addEventListener(
+    "wheel",
+    (event) => {
+      event.preventDefault();
+      const dpr = window.devicePixelRatio || 1;
+      if (event.ctrlKey || event.metaKey) {
+        const point = eventToCanvasPixels(event);
+        wasm.blitz_zoom_at(point.x, point.y, Math.exp(-event.deltaY * 0.007));
+      } else {
+        wasm.blitz_pan(-event.deltaX * dpr, -event.deltaY * dpr);
+      }
+    },
+    { passive: false },
+  );
+
+  document.addEventListener("selectstart", (event) => {
+    if (!allowsNativeSelection(event.target)) {
+      event.preventDefault();
+    }
+  });
+  document.addEventListener(
+    "touchmove",
+    (event) => {
+      if (event.target instanceof Element && event.target.closest("input, textarea, select")) {
+        return;
+      }
+      event.preventDefault();
+    },
+    { passive: false },
+  );
+
+  return { stopDragging };
+}
+
+export function setupKeyboardShortcuts(options: KeyboardShortcutOptions): void {
+  window.addEventListener("keydown", (event) => {
+    if (allowsNativeSelection(event.target) || document.querySelector("dialog[open]")) {
+      return;
+    }
+
+    const commandKey = event.ctrlKey || event.metaKey;
+    if (commandKey && !event.altKey) {
+      const key = event.key.toLowerCase();
+      if (key === "a") {
+        event.preventDefault();
+        options.stopDragging();
+        options.selectAll();
+        return;
+      }
+      if (key === "o") {
+        event.preventDefault();
+        options.openFile();
+        return;
+      }
+      if (key === "s") {
+        event.preventDefault();
+        options.saveFile();
+        return;
+      }
+      if (key === "r") {
+        event.preventDefault();
+        options.showRecentFiles();
+        return;
+      }
+    }
+    if (event.key === "Delete" || event.key === "Backspace") {
+      event.preventDefault();
+      options.deleteSelection();
+    }
+  });
+}
+
+export function setupUiActions(elements: UiActionElements, actions: UiActions): void {
+  elements.addRectButton.addEventListener("click", actions.addRect);
+  elements.addCircleButton.addEventListener("click", actions.addCircle);
+  elements.addTriangleButton.addEventListener("click", actions.addTriangle);
+  elements.addTextButton.addEventListener("click", actions.addText);
+  elements.stressTestButton.addEventListener("click", actions.stressTest);
+  elements.deleteButton.addEventListener("click", actions.deleteSelection);
+  elements.sendToBackButton.addEventListener("click", actions.sendToBack);
+  elements.bringToFrontButton.addEventListener("click", actions.bringToFront);
+  elements.toggleStatsButton.addEventListener("click", actions.toggleStats);
+  elements.emptyOpenFileButton.addEventListener("click", actions.openFile);
+  elements.emptyDemoTemplateButton.addEventListener("click", actions.loadDemoTemplate);
+  elements.emptyAddItemButton.addEventListener("click", () => {
+    elements.shapeMenu.open = true;
+    elements.addRectButton.focus();
+  });
+}

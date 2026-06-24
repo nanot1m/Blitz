@@ -23,6 +23,7 @@ const wasmExports = [
   "blitz_zoom_at",
   "blitz_pointer_down",
   "blitz_hit_test",
+  "blitz_resize_mode_at",
   "blitz_pointer_move",
   "blitz_pointer_up",
   "blitz_add_rect",

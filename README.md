@@ -38,6 +38,7 @@ npm run preview     # Serve the production bundle locally
 
 - Primary click: select an object
 - Primary drag on an object: move the current selection
+- Drag a corner or edge handle on a single selected rectangle, circle, or triangle: resize it
 - Primary drag on empty space: marquee-select
 - Middle- or right-button drag: pan
 - Wheel or two-axis trackpad scroll: pan
@@ -228,10 +229,11 @@ Agents should call `canvas_get_scene` before editing an existing composition and
 
 ### WASM ECS
 
-- Maximum entity slots: 2,000,000
+- Maximum entity slots: 1,000,000
 - Components: position, size, selectable, rectangle view, triangle view, circle view, and text view
 - Draw order: one entity-order stream shared by all shape types
 - Selection: hit testing, dragging, marquee selection, deletion, and z-order changes run in C
+- Resize capability: an ECS `RESIZABLE` component enables shared corner controls for geometric shapes; text omits the component
 - Scene inspection: a bounded packed query buffer exposes up to 65,536 ECS objects per browser query
 - File persistence: versioned `.blitz` binary serialization is owned by WASM
 - Text input: UTF-8 strings copied into a WASM-owned text pool
@@ -249,6 +251,7 @@ Agents should call `canvas_get_scene` before editing an existing composition and
 
 - `src/main.ts`: WASM/WebGPU initialization, rendering loop, input coordination, and application wiring
 - `src/ui.ts`: typed DOM lookup, icon initialization, and fallback presentation
+- `src/input/user-events.ts`: canvas pointer, touch, wheel, and keyboard interaction handling
 - `src/mcp/bridge.ts`: authenticated browser WebSocket protocol and request validation
 - `src/mcp/canvas-adapter.ts`: MCP-to-WASM operations, scene decoding, and empty-space search
 - `src/storage/scene-file.ts`: browser file picker/download integration for WASM binary scenes

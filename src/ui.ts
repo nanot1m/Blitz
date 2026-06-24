@@ -6,6 +6,7 @@ import {
   LayoutGrid,
   SendToBack,
   Settings,
+  Shapes,
   Square,
   Trash2,
   Triangle,
@@ -29,6 +30,7 @@ export function createBlitzUi() {
       LayoutGrid,
       SendToBack,
       Settings,
+      Shapes,
       Square,
       Trash2,
       Triangle,
@@ -37,6 +39,38 @@ export function createBlitzUi() {
   });
 
   const fallback = requireElement<HTMLDivElement>("#fallback");
+  const shapeMenu = requireElement<HTMLDetailsElement>("#shape-menu");
+  const shapeMenuContent = requireElement<HTMLDivElement>(".shape-menu-content");
+  const collapsedShapeMenu = window.matchMedia(
+    "(max-width: 620px) and (hover: none) and (pointer: coarse)",
+  );
+
+  const syncShapeMenuMode = () => {
+    shapeMenu.open = !collapsedShapeMenu.matches;
+  };
+  syncShapeMenuMode();
+  collapsedShapeMenu.addEventListener("change", syncShapeMenuMode);
+
+  shapeMenuContent.addEventListener("click", (event) => {
+    if (
+      collapsedShapeMenu.matches &&
+      event.target instanceof Element &&
+      event.target.closest("button")
+    ) {
+      shapeMenu.open = false;
+    }
+  });
+
+  document.addEventListener("pointerdown", (event) => {
+    if (
+      collapsedShapeMenu.matches &&
+      shapeMenu.open &&
+      event.target instanceof Node &&
+      !shapeMenu.contains(event.target)
+    ) {
+      shapeMenu.open = false;
+    }
+  });
 
   return {
     canvas: requireElement<HTMLCanvasElement>("#blitz-canvas"),

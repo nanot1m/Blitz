@@ -844,6 +844,30 @@ async function boot() {
     event.preventDefault();
   });
 
+  document.addEventListener("selectstart", (event) => {
+    const target = event.target;
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement ||
+      (target instanceof HTMLElement && target.isContentEditable)
+    ) {
+      return;
+    }
+    event.preventDefault();
+  });
+
+  document.addEventListener(
+    "touchmove",
+    (event) => {
+      if (event.target instanceof Element && event.target.closest("input, textarea, select")) {
+        return;
+      }
+      event.preventDefault();
+    },
+    { passive: false },
+  );
+
   addRectButton.addEventListener("click", () => {
     stopDragging();
     wasm.blitz_add_rect();

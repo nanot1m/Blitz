@@ -42,6 +42,7 @@ npm run preview     # Serve the production bundle locally
 - `Delete` or `Backspace`: delete the current selection
 
 The toolbar can add rectangles, circles, triangles, and text; change selection z-order; delete selected objects; show rendering statistics; and configure the MCP bridge.
+On touch-first screens up to 620 CSS pixels wide, the shape actions collapse into a dropdown and the toolbar remains at least 10 pixels from the viewport edges. Narrow desktop windows keep the full toolbar.
 
 ### Phones and tablets
 
@@ -53,6 +54,7 @@ The toolbar can add rectangles, circles, triangles, and text; change selection z
 - Two-finger pinch: pan and zoom
 
 Moving more than eight CSS pixels changes a touch from a tap into a drag. An empty-space long press activates after 450 milliseconds.
+Native page scrolling, pull-to-refresh, text selection, touch callouts, and overscroll are disabled across the canvas interface. Text selection remains enabled inside settings form fields.
 
 ## Local MCP bridge
 

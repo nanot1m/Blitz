@@ -1,0 +1,13 @@
+[mcp_servers.blitz_canvas]
+command = "npm"
+args = ["run", "mcp:server"]
+cwd = "."
+env_vars = ["BLITZ_BRIDGE_TOKEN", "BLITZ_BRIDGE_ORIGINS"]
+startup_timeout_sec = 10
+tool_timeout_sec = 30
+enabled = true
+
+[mcp_servers.blitz_canvas.env]
+BLITZ_BRIDGE_CERT_FILE = ".cert/localhost.pem"
+BLITZ_BRIDGE_KEY_FILE = ".cert/localhost-key.pem"
+BLITZ_BRIDGE_TOKEN_FILE = ".cert/bridge-token"

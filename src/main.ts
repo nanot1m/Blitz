@@ -5,11 +5,14 @@ import {
   createIcons,
   LayoutGrid,
   SendToBack,
+  Settings,
   Square,
   Trash2,
   Triangle,
   Type as TypeIcon,
 } from "lucide";
+import { createCanvasMcpAdapter } from "./mcp/canvas-adapter";
+import { setupMcpBridge } from "./mcp/bridge";
 import shaderSource from "./shaders/rect.wgsl?raw";
 import cullSource from "./shaders/cull.wgsl?raw";
 import "./style.css";
@@ -28,6 +31,73 @@ type BlitzExports = {
   blitz_add_circle(): void;
   blitz_add_triangle(): void;
   blitz_add_text(): void;
+  blitz_create_rect(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    fillR: number,
+    fillG: number,
+    fillB: number,
+    fillA: number,
+    strokeR: number,
+    strokeG: number,
+    strokeB: number,
+    strokeA: number,
+    strokeWidth: number,
+  ): number;
+  blitz_create_circle(
+    centerX: number,
+    centerY: number,
+    radius: number,
+    fillR: number,
+    fillG: number,
+    fillB: number,
+    fillA: number,
+    strokeR: number,
+    strokeG: number,
+    strokeB: number,
+    strokeA: number,
+    strokeWidth: number,
+  ): number;
+  blitz_create_triangle(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    fillR: number,
+    fillG: number,
+    fillB: number,
+    fillA: number,
+    strokeR: number,
+    strokeG: number,
+    strokeB: number,
+    strokeA: number,
+    strokeWidth: number,
+  ): number;
+  blitz_text_input_ptr(): number;
+  blitz_text_input_capacity(): number;
+  blitz_create_text(
+    x: number,
+    y: number,
+    fontSize: number,
+    colorR: number,
+    colorG: number,
+    colorB: number,
+    colorA: number,
+    textLength: number,
+  ): number;
+  blitz_query_scene(
+    minX: number,
+    minY: number,
+    maxX: number,
+    maxY: number,
+    limit: number,
+  ): number;
+  blitz_scene_query_ptr(): number;
+  blitz_scene_query_item_bytes(): number;
+  blitz_scene_query_count(): number;
+  blitz_scene_query_total(): number;
   blitz_stress_test(): void;
   blitz_delete_selected(): void;
   blitz_has_selection(): number;
@@ -80,6 +150,14 @@ const zoomIndicatorElement = document.querySelector<HTMLDivElement>("#zoom-indic
 const toggleStatsElement = document.querySelector<HTMLButtonElement>("#toggle-stats");
 const statsPanelElement = document.querySelector<HTMLDivElement>("#stats-panel");
 const statsBodyElement = document.querySelector<HTMLPreElement>("#stats-body");
+const openMcpSettingsElement = document.querySelector<HTMLButtonElement>("#open-mcp-settings");
+const mcpSettingsDialogElement = document.querySelector<HTMLDialogElement>("#mcp-settings-dialog");
+const mcpSettingsFormElement = document.querySelector<HTMLFormElement>("#mcp-settings-form");
+const closeMcpSettingsElement = document.querySelector<HTMLButtonElement>("#close-mcp-settings");
+const mcpBridgeUrlElement = document.querySelector<HTMLInputElement>("#mcp-bridge-url");
+const mcpBridgeTokenElement = document.querySelector<HTMLInputElement>("#mcp-bridge-token");
+const disconnectMcpBridgeElement = document.querySelector<HTMLButtonElement>("#disconnect-mcp-bridge");
+const mcpBridgeStatusElement = document.querySelector<HTMLElement>("#mcp-bridge-status");
 
 if (
   !canvasElement ||
@@ -95,7 +173,15 @@ if (
   !zoomIndicatorElement ||
   !toggleStatsElement ||
   !statsPanelElement ||
-  !statsBodyElement
+  !statsBodyElement ||
+  !openMcpSettingsElement ||
+  !mcpSettingsDialogElement ||
+  !mcpSettingsFormElement ||
+  !closeMcpSettingsElement ||
+  !mcpBridgeUrlElement ||
+  !mcpBridgeTokenElement ||
+  !disconnectMcpBridgeElement ||
+  !mcpBridgeStatusElement
 ) {
   throw new Error("Blitz interface was not found.");
 }
@@ -114,6 +200,14 @@ const zoomIndicator = zoomIndicatorElement;
 const toggleStatsButton = toggleStatsElement;
 const statsPanel = statsPanelElement;
 const statsBody = statsBodyElement;
+const openMcpSettingsButton = openMcpSettingsElement;
+const mcpSettingsDialog = mcpSettingsDialogElement;
+const mcpSettingsForm = mcpSettingsFormElement;
+const closeMcpSettingsButton = closeMcpSettingsElement;
+const mcpBridgeUrlInput = mcpBridgeUrlElement;
+const mcpBridgeTokenInput = mcpBridgeTokenElement;
+const disconnectMcpBridgeButton = disconnectMcpBridgeElement;
+const mcpBridgeStatus = mcpBridgeStatusElement;
 
 createIcons({
   icons: {
@@ -122,6 +216,7 @@ createIcons({
     Circle,
     LayoutGrid,
     SendToBack,
+    Settings,
     Square,
     Trash2,
     Triangle,
@@ -645,6 +740,24 @@ async function boot() {
     wasm.blitz_delete_selected();
     updateSelectionState();
   };
+
+  const mcpAdapter = createCanvasMcpAdapter(wasm, {
+    stopDragging,
+    updateSelectionState,
+  });
+  setupMcpBridge(
+    {
+      dialog: mcpSettingsDialog,
+      openButton: openMcpSettingsButton,
+      closeButton: closeMcpSettingsButton,
+      form: mcpSettingsForm,
+      urlInput: mcpBridgeUrlInput,
+      tokenInput: mcpBridgeTokenInput,
+      disconnectButton: disconnectMcpBridgeButton,
+      status: mcpBridgeStatus,
+    },
+    mcpAdapter,
+  );
 
   deleteButton.addEventListener("click", deleteSelection);
 

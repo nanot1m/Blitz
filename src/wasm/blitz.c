@@ -12,6 +12,9 @@ typedef unsigned int u32;
 #define BLITZ_MAX_DYN_RECTS 2000000u
 #define BLITZ_MAX_DYN_COMMANDS (BLITZ_MAX_TEXT_DRAWS + BLITZ_MAX_DYN_RECTS)
 #define BLITZ_MIN_TEXT_PX 3.0f
+#define BLITZ_TEXT_INPUT_BYTES 4096u
+#define BLITZ_TEXT_POOL_BYTES (4u * 1024u * 1024u)
+#define BLITZ_MAX_SCENE_QUERY_ITEMS 65536u
 
 #define BLITZ_INVALID_INDEX 0xffffffffu
 // High bit of a command's order word: set while the command's entity is being
@@ -111,6 +114,21 @@ typedef struct TextDraw {
   float color[4];
 } TextDraw;
 
+typedef struct SceneItem {
+  u32 entity;
+  u32 shape_kind;
+  u32 order;
+  u32 selected;
+  u32 text_ptr;
+  u32 text_length;
+  u32 _pad0;
+  u32 _pad1;
+  float bounds[4];
+  float fill_color[4];
+  float stroke_color[4];
+  float style[2];
+} SceneItem;
+
 typedef struct World {
   u32 entity_count;
   u32 draw_order_count;
@@ -134,6 +152,12 @@ static CircleDraw circle_draws[BLITZ_MAX_RECT_DRAWS];
 static TextDraw text_draws[BLITZ_MAX_TEXT_DRAWS];
 static ShapeCommand dyn_commands[BLITZ_MAX_DYN_COMMANDS];
 static RectDraw dyn_rects[BLITZ_MAX_DYN_RECTS];
+static char text_input[BLITZ_TEXT_INPUT_BYTES];
+static char text_pool[BLITZ_TEXT_POOL_BYTES];
+static u32 text_pool_used;
+static SceneItem scene_query_items[BLITZ_MAX_SCENE_QUERY_ITEMS];
+static u32 scene_query_count;
+static u32 scene_query_total;
 static World world;
 static u32 shape_command_count;
 static u32 rect_draw_count;
@@ -178,6 +202,20 @@ static float clampf(float value, float min_value, float max_value) {
 
 static float minf_local(float a, float b) {
   return a < b ? a : b;
+}
+
+static u32 string_length(const char *text) {
+  u32 length = 0u;
+  while (text[length] != '\0') {
+    length += 1u;
+  }
+  return length;
+}
+
+static int bounds_overlap(float x, float y, float width, float height,
+                          float min_x, float min_y, float max_x, float max_y) {
+  return x + width >= min_x && x <= max_x && y + height >= min_y &&
+         y <= max_y;
 }
 
 static void mark_render_list_dirty(void) {
@@ -905,6 +943,20 @@ static u32 create_user_text(float x, float y) {
   return entity;
 }
 
+static const char *copy_text_input(u32 text_length) {
+  if (text_length >= BLITZ_TEXT_INPUT_BYTES ||
+      text_pool_used + text_length + 1u > BLITZ_TEXT_POOL_BYTES) {
+    return 0;
+  }
+  char *destination = &text_pool[text_pool_used];
+  for (u32 i = 0u; i < text_length; i += 1u) {
+    destination[i] = text_input[i];
+  }
+  destination[text_length] = '\0';
+  text_pool_used += text_length + 1u;
+  return destination;
+}
+
 static void create_demo_world(void) {
   Color transparent = {0.0f, 0.0f, 0.0f, 0.0f};
 
@@ -1021,6 +1073,7 @@ void blitz_init(void) {
   marquee_candidate = BLITZ_INVALID_INDEX;
   selected_count = 0u;
   spawn_count = 0u;
+  text_pool_used = 0u;
   drag_last_world.x = 0.0f;
   drag_last_world.y = 0.0f;
   marquee_start.x = 0.0f;
@@ -1269,6 +1322,223 @@ void blitz_add_text(void) {
   mark_render_list_dirty();
 }
 
+EXPORT("blitz_create_rect")
+u32 blitz_create_rect(float x, float y, float width, float height,
+                      float fill_r, float fill_g, float fill_b, float fill_a,
+                      float stroke_r, float stroke_g, float stroke_b,
+                      float stroke_a, float stroke_width) {
+  if (width <= 0.0f || height <= 0.0f) {
+    return BLITZ_INVALID_INDEX;
+  }
+  u32 entity = ecs_create_entity();
+  if (entity == BLITZ_INVALID_INDEX) {
+    return entity;
+  }
+  ecs_set_position(entity, x, y);
+  ecs_set_size(entity, width, height);
+  ecs_set_rect_view(entity, (Color){fill_r, fill_g, fill_b, fill_a},
+                    (Color){stroke_r, stroke_g, stroke_b, stroke_a},
+                    stroke_width);
+  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  select_only(entity);
+  mark_render_list_dirty();
+  return entity;
+}
+
+EXPORT("blitz_create_circle")
+u32 blitz_create_circle(float center_x, float center_y, float radius,
+                        float fill_r, float fill_g, float fill_b, float fill_a,
+                        float stroke_r, float stroke_g, float stroke_b,
+                        float stroke_a, float stroke_width) {
+  if (radius <= 0.0f) {
+    return BLITZ_INVALID_INDEX;
+  }
+  u32 entity = ecs_create_entity();
+  if (entity == BLITZ_INVALID_INDEX) {
+    return entity;
+  }
+  ecs_set_position(entity, center_x - radius, center_y - radius);
+  ecs_set_size(entity, radius * 2.0f, radius * 2.0f);
+  ecs_set_circle_view(entity, (Color){fill_r, fill_g, fill_b, fill_a},
+                      (Color){stroke_r, stroke_g, stroke_b, stroke_a},
+                      stroke_width);
+  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  select_only(entity);
+  mark_render_list_dirty();
+  return entity;
+}
+
+EXPORT("blitz_create_triangle")
+u32 blitz_create_triangle(float x, float y, float width, float height,
+                          float fill_r, float fill_g, float fill_b,
+                          float fill_a, float stroke_r, float stroke_g,
+                          float stroke_b, float stroke_a, float stroke_width) {
+  if (width <= 0.0f || height <= 0.0f) {
+    return BLITZ_INVALID_INDEX;
+  }
+  u32 entity = ecs_create_entity();
+  if (entity == BLITZ_INVALID_INDEX) {
+    return entity;
+  }
+  ecs_set_position(entity, x, y);
+  ecs_set_size(entity, width, height);
+  ecs_set_triangle_view(entity, (Color){fill_r, fill_g, fill_b, fill_a},
+                        (Color){stroke_r, stroke_g, stroke_b, stroke_a},
+                        stroke_width);
+  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  select_only(entity);
+  mark_render_list_dirty();
+  return entity;
+}
+
+EXPORT("blitz_text_input_ptr")
+u32 blitz_text_input_ptr(void) {
+  return (u32)&text_input[0];
+}
+
+EXPORT("blitz_text_input_capacity")
+u32 blitz_text_input_capacity(void) {
+  return BLITZ_TEXT_INPUT_BYTES;
+}
+
+EXPORT("blitz_create_text")
+u32 blitz_create_text(float x, float y, float font_size, float color_r,
+                      float color_g, float color_b, float color_a,
+                      u32 text_length) {
+  if (font_size <= 0.0f || text_length == 0u) {
+    return BLITZ_INVALID_INDEX;
+  }
+  const char *text = copy_text_input(text_length);
+  if (!text) {
+    return BLITZ_INVALID_INDEX;
+  }
+  float padding = 4.0f;
+  float width = font_text_width(text, font_size);
+  float height = BLITZ_FONT_LINE_HEIGHT * font_size;
+  u32 entity = ecs_create_entity();
+  if (entity == BLITZ_INVALID_INDEX) {
+    return entity;
+  }
+  ecs_set_position(entity, x - padding, y - padding);
+  ecs_set_size(entity, width + padding * 2.0f, height + padding * 2.0f);
+  ecs_set_text_view(entity, text, (Color){color_r, color_g, color_b, color_a},
+                    font_size, padding,
+                    padding + BLITZ_FONT_ASCENDER * font_size);
+  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  select_only(entity);
+  mark_render_list_dirty();
+  return entity;
+}
+
+EXPORT("blitz_query_scene")
+u32 blitz_query_scene(float min_x, float min_y, float max_x, float max_y,
+                      u32 limit) {
+  scene_query_count = 0u;
+  scene_query_total = 0u;
+  if (limit > BLITZ_MAX_SCENE_QUERY_ITEMS) {
+    limit = BLITZ_MAX_SCENE_QUERY_ITEMS;
+  }
+
+  for (u32 order = 0u; order < world.draw_order_count; order += 1u) {
+    u32 entity = world.draw_order[order];
+    u32 mask = world.masks[entity];
+    u32 base_required = BLITZ_COMPONENT_POSITION | BLITZ_COMPONENT_SIZE;
+    if ((mask & base_required) != base_required) {
+      continue;
+    }
+    Vec2 position = world.positions[entity];
+    Vec2 size = world.sizes[entity];
+    if (!bounds_overlap(position.x, position.y, size.x, size.y, min_x, min_y,
+                        max_x, max_y)) {
+      continue;
+    }
+
+    u32 kind = BLITZ_INVALID_INDEX;
+    Color fill = {0.0f, 0.0f, 0.0f, 0.0f};
+    Color stroke = {0.0f, 0.0f, 0.0f, 0.0f};
+    float stroke_width = 0.0f;
+    float font_size = 0.0f;
+    const char *text = 0;
+    if (mask & BLITZ_COMPONENT_RECT_VIEW) {
+      RectView view = world.rect_views[entity];
+      kind = BLITZ_SHAPE_RECT;
+      fill = view.fill_color;
+      stroke = view.stroke_color;
+      stroke_width = view.stroke_width;
+    } else if (mask & BLITZ_COMPONENT_TRIANGLE_VIEW) {
+      TriangleView view = world.triangle_views[entity];
+      kind = BLITZ_SHAPE_TRIANGLE;
+      fill = view.fill_color;
+      stroke = view.stroke_color;
+      stroke_width = view.stroke_width;
+    } else if (mask & BLITZ_COMPONENT_CIRCLE_VIEW) {
+      CircleView view = world.circle_views[entity];
+      kind = BLITZ_SHAPE_CIRCLE;
+      fill = view.fill_color;
+      stroke = view.stroke_color;
+      stroke_width = view.stroke_width;
+    } else if (mask & BLITZ_COMPONENT_TEXT_VIEW) {
+      TextView view = world.text_views[entity];
+      kind = BLITZ_SHAPE_TEXT;
+      fill = view.color;
+      font_size = view.font_size;
+      text = view.text;
+    } else {
+      continue;
+    }
+
+    scene_query_total += 1u;
+    if (scene_query_count >= limit) {
+      continue;
+    }
+    SceneItem *item = &scene_query_items[scene_query_count];
+    item->entity = entity;
+    item->shape_kind = kind;
+    item->order = order;
+    item->selected = world.selected[entity];
+    item->text_ptr = text ? (u32)text : 0u;
+    item->text_length = text ? string_length(text) : 0u;
+    item->_pad0 = 0u;
+    item->_pad1 = 0u;
+    item->bounds[0] = position.x;
+    item->bounds[1] = position.y;
+    item->bounds[2] = size.x;
+    item->bounds[3] = size.y;
+    item->fill_color[0] = fill.r;
+    item->fill_color[1] = fill.g;
+    item->fill_color[2] = fill.b;
+    item->fill_color[3] = fill.a;
+    item->stroke_color[0] = stroke.r;
+    item->stroke_color[1] = stroke.g;
+    item->stroke_color[2] = stroke.b;
+    item->stroke_color[3] = stroke.a;
+    item->style[0] = stroke_width;
+    item->style[1] = font_size;
+    scene_query_count += 1u;
+  }
+  return scene_query_count;
+}
+
+EXPORT("blitz_scene_query_ptr")
+u32 blitz_scene_query_ptr(void) {
+  return (u32)&scene_query_items[0];
+}
+
+EXPORT("blitz_scene_query_item_bytes")
+u32 blitz_scene_query_item_bytes(void) {
+  return sizeof(SceneItem);
+}
+
+EXPORT("blitz_scene_query_count")
+u32 blitz_scene_query_count(void) {
+  return scene_query_count;
+}
+
+EXPORT("blitz_scene_query_total")
+u32 blitz_scene_query_total(void) {
+  return scene_query_total;
+}
+
 EXPORT("blitz_stress_test")
 void blitz_stress_test(void) {
   const u32 columns = 200u;
@@ -1504,7 +1774,7 @@ u32 blitz_wasm_live_bytes(void) {
                    text_draw_count * (u32)sizeof(TextDraw) +
                    dyn_command_count * (u32)sizeof(ShapeCommand) +
                    dyn_rect_count * (u32)sizeof(RectDraw);
-  return entity_bytes + draw_bytes;
+  return entity_bytes + draw_bytes + text_pool_used;
 }
 
 EXPORT("blitz_render_chunk_rects")

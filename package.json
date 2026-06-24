@@ -9,14 +9,24 @@
     "build": "npm run build:wasm && tsc && vite build",
     "build:font": "node scripts/compile-font.mjs",
     "build:wasm": "npm run build:font && node scripts/build-wasm.mjs",
-    "preview": "vite preview --host 127.0.0.1"
+    "mcp:server": "tsx mcp/server.ts",
+    "preview": "vite preview --host 127.0.0.1",
+    "test:mcp": "tsx scripts/test-mcp-canvas-adapter.ts && node scripts/test-mcp-bridge.mjs",
+    "typecheck": "tsc && tsc -p tsconfig.mcp.json"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.1",
     "@webgpu/types": "^0.1.51",
     "lucide": "^1.21.0",
     "opentype.js": "^2.0.0",
     "pngjs": "^7.0.0",
+    "tsx": "^4.22.4",
     "typescript": "^5.5.4",
-    "vite": "^5.4.19"
+    "vite": "^6.4.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ws": "^8.21.0",
+    "zod": "^4.4.3"
   }
 }

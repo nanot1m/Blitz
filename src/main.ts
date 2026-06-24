@@ -2,6 +2,7 @@ import { createCanvasMcpAdapter } from "./mcp/canvas-adapter";
 import { setupMcpBridge } from "./mcp/bridge";
 import shaderSource from "./shaders/rect.wgsl?raw";
 import cullSource from "./shaders/cull.wgsl?raw";
+import { setupSceneFileStorage } from "./storage/scene-file";
 import { createBlitzUi } from "./ui";
 import "./style.css";
 
@@ -20,6 +21,7 @@ type BlitzExports = {
   blitz_add_circle(): void;
   blitz_add_triangle(): void;
   blitz_add_text(): void;
+  blitz_load_demo_template(): void;
   blitz_create_rect(
     x: number,
     y: number,
@@ -87,6 +89,12 @@ type BlitzExports = {
   blitz_scene_query_item_bytes(): number;
   blitz_scene_query_count(): number;
   blitz_scene_query_total(): number;
+  blitz_scene_file_buffer_ptr(): number;
+  blitz_scene_file_buffer_capacity(): number;
+  blitz_scene_revision(): number;
+  blitz_capture_start_viewpoint(): void;
+  blitz_scene_serialize(): number;
+  blitz_scene_deserialize(byteCount: number): number;
   blitz_stress_test(): void;
   blitz_delete_selected(): void;
   blitz_has_selection(): number;
@@ -127,6 +135,22 @@ type BlitzExports = {
 
 const {
   canvas,
+  shapeMenu,
+  openSceneMenu,
+  saveSceneMenu,
+  saveSceneIndicator,
+  chooseSceneFileButton,
+  saveSceneButton,
+  saveSceneAsButton,
+  saveCurrentViewpointInput,
+  recentScenes,
+  recentScenesDivider,
+  emptyState,
+  emptyAddItemButton,
+  emptyOpenFileButton,
+  emptyRecentSection,
+  emptyRecentScenes,
+  emptyDemoTemplateButton,
   addRectButton,
   addCircleButton,
   addTriangleButton,
@@ -550,6 +574,16 @@ async function boot() {
     deleteButton.disabled = disabled;
   };
 
+  let emptyStateVisible = false;
+  const updateEmptyState = () => {
+    const visible = wasm.blitz_entity_count() === 0;
+    if (visible === emptyStateVisible) {
+      return;
+    }
+    emptyStateVisible = visible;
+    emptyState.hidden = !visible;
+  };
+
   const eventToCanvasPixels = (event: PointerEvent | WheelEvent) => {
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
@@ -911,6 +945,50 @@ async function boot() {
     stopDragging,
     updateSelectionState,
   });
+  const sceneFileStorage = setupSceneFileStorage(
+    wasm,
+    {
+      openMenu: openSceneMenu,
+      saveMenu: saveSceneMenu,
+      saveIndicator: saveSceneIndicator,
+      chooseFileButton: chooseSceneFileButton,
+      saveButton: saveSceneButton,
+      saveAsButton: saveSceneAsButton,
+      saveCurrentViewpointInput,
+      recentTargets: [
+        {
+          list: recentScenes,
+          visibilityElements: [recentScenesDivider],
+          menuItems: true,
+        },
+        {
+          list: emptyRecentScenes,
+          visibilityElements: [emptyRecentSection],
+        },
+      ],
+    },
+    {
+      onLoaded() {
+        stopDragging();
+        updateSelectionState();
+        updateEmptyState();
+      },
+      onError: showFallback,
+    },
+  );
+
+  emptyAddItemButton.addEventListener("click", () => {
+    shapeMenu.open = true;
+    addRectButton.focus();
+  });
+  emptyOpenFileButton.addEventListener("click", sceneFileStorage.openFile);
+  emptyDemoTemplateButton.addEventListener("click", () => {
+    stopDragging();
+    wasm.blitz_load_demo_template();
+    updateSelectionState();
+    updateEmptyState();
+  });
+
   setupMcpBridge(
     {
       dialog: mcpSettingsDialog,
@@ -977,6 +1055,8 @@ async function boot() {
 
   const render = () => {
     resize();
+    sceneFileStorage.syncDirtyState();
+    updateEmptyState();
 
     const now = performance.now();
     if (lastFrameStamp) {
@@ -1142,7 +1222,9 @@ async function boot() {
 
   window.addEventListener("resize", resize);
   resize();
+  sceneFileStorage.markClean();
   updateSelectionState();
+  updateEmptyState();
   requestAnimationFrame(render);
 }
 

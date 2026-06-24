@@ -8,6 +8,44 @@
   <body>
     <canvas id="blitz-canvas" aria-label="Blitz WebGPU canvas"></canvas>
     <div id="tool-island" role="toolbar" aria-label="Canvas tools">
+      <details id="file-menu" open>
+        <summary aria-label="Scene file" title="Scene file">
+          <i data-lucide="folder-open" aria-hidden="true"></i>
+        </summary>
+        <div class="file-menu-content" role="group" aria-label="Scene file actions">
+          <details id="open-scene-menu" class="scene-action-menu">
+            <summary id="open-scene" aria-label="Open scene" title="Open scene">
+              <i data-lucide="folder-open" aria-hidden="true"></i>
+            </summary>
+            <div class="scene-action-popup open-scene-popup" role="menu" aria-label="Open scene">
+              <button id="choose-scene-file" class="scene-menu-command" type="button" role="menuitem">
+                Open File
+              </button>
+              <div id="recent-scenes-divider" class="scene-menu-divider" hidden></div>
+              <div id="recent-scenes" class="recent-scenes" role="group" aria-label="Recent scenes" hidden></div>
+            </div>
+          </details>
+          <details id="save-scene-menu" class="scene-action-menu">
+            <summary id="save-scene" aria-label="Save scene" title="Save scene">
+              <i data-lucide="save" aria-hidden="true"></i>
+            </summary>
+            <div class="scene-action-popup save-scene-popup" role="menu" aria-label="Save scene">
+              <button id="save-scene-current" class="scene-menu-command" type="button" role="menuitem">
+                Save
+              </button>
+              <button id="save-scene-as" class="scene-menu-command" type="button" role="menuitem">
+                Save As
+              </button>
+              <div class="scene-menu-divider"></div>
+              <label class="scene-menu-option">
+                <input id="save-current-viewpoint" type="checkbox" />
+                <span>Save current viewpoint</span>
+              </label>
+            </div>
+          </details>
+        </div>
+      </details>
+      <span class="tool-divider" aria-hidden="true"></span>
       <details id="shape-menu" open>
         <summary aria-label="Add shape" title="Add shape">
           <i data-lucide="shapes" aria-hidden="true"></i>
@@ -49,6 +87,33 @@
         <i data-lucide="settings" aria-hidden="true"></i>
       </button>
     </div>
+    <section id="empty-state" class="empty-state" aria-labelledby="empty-state-title">
+      <div class="empty-state-card">
+        <h1 id="empty-state-title">Start a new canvas</h1>
+        <p>
+          <button id="empty-add-item" class="empty-inline-action" type="button">Add a new item</button>
+          from the shape menu or
+          <button id="empty-open-file" class="empty-inline-action" type="button">open a file</button>.
+        </p>
+        <section id="empty-recent-section" class="empty-state-section" aria-labelledby="empty-recent-title" hidden>
+          <h2 id="empty-recent-title">Recent files</h2>
+          <div id="empty-recent-scenes" class="empty-recent-scenes"></div>
+        </section>
+        <section class="empty-state-section" aria-labelledby="empty-template-title">
+          <h2 id="empty-template-title">Start from a template</h2>
+          <button id="empty-demo-template" class="template-card" type="button">
+            <span class="template-preview" aria-hidden="true">
+              <span class="template-sidebar"></span>
+              <span class="template-heading"></span>
+              <span class="template-line"></span>
+              <span class="template-block template-block-left"></span>
+              <span class="template-block template-block-right"></span>
+            </span>
+            <span>Demo slide</span>
+          </button>
+        </section>
+      </div>
+    </section>
     <div id="fallback" role="status"></div>
     <div id="zoom-indicator" role="status" aria-label="Zoom level"></div>
     <div id="stats-panel" role="status" aria-label="Stats for nerds" hidden><pre id="stats-body"></pre></div>

@@ -4,6 +4,8 @@ Blitz is a WebGPU canvas experiment backed by a C ECS compiled to WebAssembly.
 
 The WASM module owns entities, components, selection, camera state, z-order, scene queries, and render extraction. TypeScript reads packed render data from WASM memory and uploads it to WebGPU. WGSL compute and render shaders cull and draw rectangles, triangles, circles, text, and interaction overlays.
 
+Blitz starts with an empty canvas. The initial panel can open a local scene, reopen a recent scene, focus the shape tools, or create the built-in demo slide template. The panel disappears as soon as the scene contains an object and returns when the scene becomes empty.
+
 ## Requirements
 
 - Node.js 20 or newer
@@ -26,6 +28,7 @@ Other commands:
 npm run build       # Build WASM, type-check, and create the production bundle
 npm run typecheck   # Type-check the browser and MCP code
 npm run test:mcp    # Test the WASM adapter and secure MCP bridge
+npm run test:storage # Test binary scene serialization and restoration
 npm run preview     # Serve the production bundle locally
 ```
 
@@ -43,6 +46,26 @@ npm run preview     # Serve the production bundle locally
 
 The toolbar can add rectangles, circles, triangles, and text; change selection z-order; delete selected objects; show rendering statistics; and configure the MCP bridge.
 On touch-first screens up to 620 CSS pixels wide, the shape actions collapse into a dropdown and the toolbar remains at least 10 pixels from the viewport edges. Narrow desktop windows keep the full toolbar.
+
+## Local scene files
+
+Click the Open action to show **Open File**, a divider, and the recent-file list. Click the Save action to show **Save**, **Save As**, and a **Save current viewpoint** option.
+
+The binary format is serialized and deserialized entirely inside WASM. It preserves:
+
+- Shape type, position, size, styles, text, and draw order
+- Current selection
+- An optional starting viewpoint
+
+Chromium browsers use the File System Access API, allowing subsequent saves to overwrite the selected file. Browsers without that API use file upload and download fallbacks.
+
+When supported, the most recent ten file handles are stored in IndexedDB. Reopening an entry checks file permission again, and individual entries can be removed from the list. Browsers that cannot persist file handles simply keep the regular Open action.
+
+Panning and zooming are view-only operations: they do not mark the scene as modified and regular saves preserve the file's existing starting viewpoint. Enable **Save current viewpoint** to make the current camera center and zoom the viewpoint restored the next time the file opens.
+
+WASM exposes a monotonic scene revision covering persisted changes such as geometry, text, selection, and z-order. A gray dot appears on the Save icon while the current revision differs from the last successful save or load. Closing or reloading a page with unsaved changes triggers the browser's standard unsaved-changes confirmation. Browsers do not permit reliable asynchronous saving during page unload, so the application warns rather than attempting a silent final save.
+
+The current version uses a 16 MB WASM file buffer. Files include a magic number, format version, total byte count, camera header, and variable-length shape records. Invalid files are fully validated before the live scene is replaced.
 
 ### Phones and tablets
 
@@ -202,6 +225,7 @@ Agents should call `canvas_get_scene` before editing an existing composition and
 - Draw order: one entity-order stream shared by all shape types
 - Selection: hit testing, dragging, marquee selection, deletion, and z-order changes run in C
 - Scene inspection: a bounded packed query buffer exposes up to 65,536 ECS objects per browser query
+- File persistence: versioned `.blitz` binary serialization is owned by WASM
 - Text input: UTF-8 strings copied into a WASM-owned text pool
 
 ### Rendering
@@ -219,6 +243,7 @@ Agents should call `canvas_get_scene` before editing an existing composition and
 - `src/ui.ts`: typed DOM lookup, icon initialization, and fallback presentation
 - `src/mcp/bridge.ts`: authenticated browser WebSocket protocol and request validation
 - `src/mcp/canvas-adapter.ts`: MCP-to-WASM operations, scene decoding, and empty-space search
+- `src/storage/scene-file.ts`: browser file picker/download integration for WASM binary scenes
 - `mcp/server.ts`: stdio MCP server and secure local WSS endpoint
 
 ## WASM build

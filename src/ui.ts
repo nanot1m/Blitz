@@ -3,7 +3,9 @@ import {
   BringToFront,
   Circle,
   createIcons,
+  FolderOpen,
   LayoutGrid,
+  Save,
   SendToBack,
   Settings,
   Shapes,
@@ -27,7 +29,9 @@ export function createBlitzUi() {
       Activity,
       BringToFront,
       Circle,
+      FolderOpen,
       LayoutGrid,
+      Save,
       SendToBack,
       Settings,
       Shapes,
@@ -39,6 +43,8 @@ export function createBlitzUi() {
   });
 
   const fallback = requireElement<HTMLDivElement>("#fallback");
+  const fileMenu = requireElement<HTMLDetailsElement>("#file-menu");
+  const fileMenuContent = requireElement<HTMLDivElement>(".file-menu-content");
   const shapeMenu = requireElement<HTMLDetailsElement>("#shape-menu");
   const shapeMenuContent = requireElement<HTMLDivElement>(".shape-menu-content");
   const collapsedShapeMenu = window.matchMedia(
@@ -46,35 +52,54 @@ export function createBlitzUi() {
   );
 
   const syncShapeMenuMode = () => {
+    fileMenu.open = !collapsedShapeMenu.matches;
     shapeMenu.open = !collapsedShapeMenu.matches;
   };
   syncShapeMenuMode();
   collapsedShapeMenu.addEventListener("change", syncShapeMenuMode);
 
-  shapeMenuContent.addEventListener("click", (event) => {
+  const closeCollapsedMenu = (menu: HTMLDetailsElement, event: Event) => {
     if (
       collapsedShapeMenu.matches &&
       event.target instanceof Element &&
       event.target.closest("button")
     ) {
-      shapeMenu.open = false;
+      menu.open = false;
     }
-  });
+  };
+  fileMenuContent.addEventListener("click", (event) => closeCollapsedMenu(fileMenu, event));
+  shapeMenuContent.addEventListener("click", (event) => closeCollapsedMenu(shapeMenu, event));
 
   document.addEventListener("pointerdown", (event) => {
-    if (
-      collapsedShapeMenu.matches &&
-      shapeMenu.open &&
-      event.target instanceof Node &&
-      !shapeMenu.contains(event.target)
-    ) {
-      shapeMenu.open = false;
+    if (collapsedShapeMenu.matches && event.target instanceof Node) {
+      if (fileMenu.open && !fileMenu.contains(event.target)) {
+        fileMenu.open = false;
+      }
+      if (shapeMenu.open && !shapeMenu.contains(event.target)) {
+        shapeMenu.open = false;
+      }
     }
   });
 
   return {
     canvas: requireElement<HTMLCanvasElement>("#blitz-canvas"),
     fallback,
+    shapeMenu,
+    openSceneMenu: requireElement<HTMLDetailsElement>("#open-scene-menu"),
+    saveSceneMenu: requireElement<HTMLDetailsElement>("#save-scene-menu"),
+    saveSceneIndicator: requireElement<HTMLElement>("#save-scene"),
+    chooseSceneFileButton: requireElement<HTMLButtonElement>("#choose-scene-file"),
+    saveSceneButton: requireElement<HTMLButtonElement>("#save-scene-current"),
+    saveSceneAsButton: requireElement<HTMLButtonElement>("#save-scene-as"),
+    saveCurrentViewpointInput: requireElement<HTMLInputElement>("#save-current-viewpoint"),
+    recentScenes: requireElement<HTMLDivElement>("#recent-scenes"),
+    recentScenesDivider: requireElement<HTMLDivElement>("#recent-scenes-divider"),
+    emptyState: requireElement<HTMLElement>("#empty-state"),
+    emptyAddItemButton: requireElement<HTMLButtonElement>("#empty-add-item"),
+    emptyOpenFileButton: requireElement<HTMLButtonElement>("#empty-open-file"),
+    emptyRecentSection: requireElement<HTMLElement>("#empty-recent-section"),
+    emptyRecentScenes: requireElement<HTMLDivElement>("#empty-recent-scenes"),
+    emptyDemoTemplateButton: requireElement<HTMLButtonElement>("#empty-demo-template"),
     addRectButton: requireElement<HTMLButtonElement>("#add-rect"),
     addCircleButton: requireElement<HTMLButtonElement>("#add-circle"),
     addTriangleButton: requireElement<HTMLButtonElement>("#add-triangle"),

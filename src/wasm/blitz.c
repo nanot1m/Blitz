@@ -15,6 +15,11 @@ typedef unsigned int u32;
 #define BLITZ_TEXT_INPUT_BYTES 4096u
 #define BLITZ_TEXT_POOL_BYTES (4u * 1024u * 1024u)
 #define BLITZ_MAX_SCENE_QUERY_ITEMS 65536u
+#define BLITZ_SCENE_FILE_BUFFER_BYTES (16u * 1024u * 1024u)
+#define BLITZ_SCENE_FILE_MAGIC 0x5a544c42u
+#define BLITZ_SCENE_FILE_VERSION 1u
+#define BLITZ_SCENE_FILE_HEADER_BYTES 32u
+#define BLITZ_SCENE_FILE_RECORD_BYTES 80u
 
 #define BLITZ_INVALID_INDEX 0xffffffffu
 // High bit of a command's order word: set while the command's entity is being
@@ -158,6 +163,7 @@ static u32 text_pool_used;
 static SceneItem scene_query_items[BLITZ_MAX_SCENE_QUERY_ITEMS];
 static u32 scene_query_count;
 static u32 scene_query_total;
+static unsigned char scene_file_buffer[BLITZ_SCENE_FILE_BUFFER_BYTES];
 static World world;
 static u32 shape_command_count;
 static u32 rect_draw_count;
@@ -189,6 +195,10 @@ static u32 live_count;
 static Vec2 marquee_start;
 static Vec2 marquee_end;
 static u32 camera_fit_initialized;
+static u32 scene_revision;
+static float scene_start_camera_x;
+static float scene_start_camera_y;
+static float scene_start_camera_zoom;
 
 static float clampf(float value, float min_value, float max_value) {
   if (value < min_value) {
@@ -218,12 +228,53 @@ static int bounds_overlap(float x, float y, float width, float height,
          y <= max_y;
 }
 
+static u32 align4(u32 value) {
+  return (value + 3u) & ~3u;
+}
+
+static void write_u32(unsigned char *buffer, u32 offset, u32 value) {
+  buffer[offset] = (unsigned char)(value & 0xffu);
+  buffer[offset + 1u] = (unsigned char)((value >> 8u) & 0xffu);
+  buffer[offset + 2u] = (unsigned char)((value >> 16u) & 0xffu);
+  buffer[offset + 3u] = (unsigned char)((value >> 24u) & 0xffu);
+}
+
+static u32 read_u32(const unsigned char *buffer, u32 offset) {
+  return (u32)buffer[offset] | ((u32)buffer[offset + 1u] << 8u) |
+         ((u32)buffer[offset + 2u] << 16u) |
+         ((u32)buffer[offset + 3u] << 24u);
+}
+
+static void write_f32(unsigned char *buffer, u32 offset, float value) {
+  union {
+    float f;
+    u32 u;
+  } bits;
+  bits.f = value;
+  write_u32(buffer, offset, bits.u);
+}
+
+static float read_f32(const unsigned char *buffer, u32 offset) {
+  union {
+    float f;
+    u32 u;
+  } bits;
+  bits.u = read_u32(buffer, offset);
+  return bits.f;
+}
+
 static void mark_render_list_dirty(void) {
   static_dirty = 1u;
   dynamic_dirty = 1u;
+  scene_revision += 1u;
 }
 
 static void mark_dynamic_dirty(void) {
+  dynamic_dirty = 1u;
+  scene_revision += 1u;
+}
+
+static void mark_view_dirty(void) {
   dynamic_dirty = 1u;
 }
 
@@ -1102,6 +1153,10 @@ void blitz_init(void) {
   marquee_end.x = 0.0f;
   marquee_end.y = 0.0f;
   camera_fit_initialized = 0u;
+  scene_revision = 0u;
+  scene_start_camera_x = 0.0f;
+  scene_start_camera_y = 0.0f;
+  scene_start_camera_zoom = 1.0f;
 
   uniforms.viewport_camera[0] = 1.0f;
   uniforms.viewport_camera[1] = 1.0f;
@@ -1122,7 +1177,6 @@ void blitz_init(void) {
   uniforms.font_params[2] = 0.0f;
   uniforms.font_params[3] = 0.0f;
 
-  create_demo_world();
   extract_static_shapes();
   extract_dynamic();
 }
@@ -1136,12 +1190,10 @@ void blitz_resize(float width, float height) {
     uniforms.viewport_camera[0] = next_width;
     uniforms.viewport_camera[1] = next_height;
     if (!camera_fit_initialized) {
-      uniforms.style[0] =
-          clampf(minf_local(next_width / 1200.0f, next_height / 675.0f),
-                 0.005f, 12.0f);
+      uniforms.style[0] = 1.0f;
       camera_fit_initialized = 1u;
     }
-    mark_dynamic_dirty();
+    mark_view_dirty();
   }
 }
 
@@ -1150,14 +1202,14 @@ void blitz_set_camera(float x, float y, float zoom) {
   uniforms.viewport_camera[2] = x;
   uniforms.viewport_camera[3] = y;
   uniforms.style[0] = clampf(zoom, 0.01f, 12.0f);
-  mark_dynamic_dirty();
+  mark_view_dirty();
 }
 
 EXPORT("blitz_pan")
 void blitz_pan(float dx_pixels, float dy_pixels) {
   uniforms.viewport_camera[2] -= dx_pixels / uniforms.style[0];
   uniforms.viewport_camera[3] -= dy_pixels / uniforms.style[0];
-  mark_dynamic_dirty();
+  mark_view_dirty();
 }
 
 EXPORT("blitz_zoom_at")
@@ -1173,7 +1225,7 @@ void blitz_zoom_at(float screen_x, float screen_y, float zoom_delta) {
 
   uniforms.viewport_camera[2] += before_x - after_x;
   uniforms.viewport_camera[3] += before_y - after_y;
-  mark_dynamic_dirty();
+  mark_view_dirty();
 }
 
 EXPORT("blitz_pointer_down")
@@ -1336,6 +1388,51 @@ void blitz_add_text(void) {
   spawn_count += 1u;
   select_only(entity);
   mark_render_list_dirty();
+}
+
+static void clear_scene_state(void) {
+  world.entity_count = 0u;
+  world.draw_order_count = 0u;
+  free_count = 0u;
+  live_count = 0u;
+  selected_count = 0u;
+  dragging_selection = 0u;
+  drag_active = 0u;
+  drag_offset.x = 0.0f;
+  drag_offset.y = 0.0f;
+  uniforms.font_params[2] = 0.0f;
+  uniforms.font_params[3] = 0.0f;
+  marquee_active = 0u;
+  marquee_candidate = BLITZ_INVALID_INDEX;
+  text_pool_used = 0u;
+  spawn_count = 0u;
+  mark_render_list_dirty();
+}
+
+EXPORT("blitz_clear_scene")
+void blitz_clear_scene(void) {
+  clear_scene_state();
+}
+
+EXPORT("blitz_load_demo_template")
+void blitz_load_demo_template(void) {
+  clear_scene_state();
+  slide_origin_x = 0.0f;
+  slide_origin_y = 0.0f;
+  uniforms.viewport_camera[2] = 0.0f;
+  uniforms.viewport_camera[3] = 0.0f;
+  uniforms.style[0] = 1.0f;
+  scene_start_camera_x = 0.0f;
+  scene_start_camera_y = 0.0f;
+  scene_start_camera_zoom = 1.0f;
+  create_demo_world();
+  clear_selection();
+  mark_render_list_dirty();
+}
+
+EXPORT("blitz_clear_selection")
+void blitz_clear_selection(void) {
+  clear_selection();
 }
 
 EXPORT("blitz_create_rect")
@@ -1553,6 +1650,250 @@ u32 blitz_scene_query_count(void) {
 EXPORT("blitz_scene_query_total")
 u32 blitz_scene_query_total(void) {
   return scene_query_total;
+}
+
+EXPORT("blitz_scene_file_buffer_ptr")
+u32 blitz_scene_file_buffer_ptr(void) {
+  return (u32)&scene_file_buffer[0];
+}
+
+EXPORT("blitz_scene_file_buffer_capacity")
+u32 blitz_scene_file_buffer_capacity(void) {
+  return BLITZ_SCENE_FILE_BUFFER_BYTES;
+}
+
+EXPORT("blitz_scene_revision")
+u32 blitz_scene_revision(void) {
+  return scene_revision;
+}
+
+EXPORT("blitz_capture_start_viewpoint")
+void blitz_capture_start_viewpoint(void) {
+  scene_start_camera_x = uniforms.viewport_camera[2];
+  scene_start_camera_y = uniforms.viewport_camera[3];
+  scene_start_camera_zoom = uniforms.style[0];
+}
+
+EXPORT("blitz_scene_serialize")
+u32 blitz_scene_serialize(void) {
+  u32 offset = BLITZ_SCENE_FILE_HEADER_BYTES;
+  u32 object_count = 0u;
+
+  for (u32 order = 0u; order < world.draw_order_count; order += 1u) {
+    u32 entity = world.draw_order[order];
+    u32 mask = world.masks[entity];
+    u32 kind = BLITZ_INVALID_INDEX;
+    Color fill = {0.0f, 0.0f, 0.0f, 0.0f};
+    Color stroke = {0.0f, 0.0f, 0.0f, 0.0f};
+    float stroke_width = 0.0f;
+    float font_size = 0.0f;
+    float origin_x = 0.0f;
+    float baseline_offset = 0.0f;
+    const char *text = 0;
+    u32 text_length = 0u;
+
+    if (mask & BLITZ_COMPONENT_RECT_VIEW) {
+      RectView view = world.rect_views[entity];
+      kind = BLITZ_SHAPE_RECT;
+      fill = view.fill_color;
+      stroke = view.stroke_color;
+      stroke_width = view.stroke_width;
+    } else if (mask & BLITZ_COMPONENT_TRIANGLE_VIEW) {
+      TriangleView view = world.triangle_views[entity];
+      kind = BLITZ_SHAPE_TRIANGLE;
+      fill = view.fill_color;
+      stroke = view.stroke_color;
+      stroke_width = view.stroke_width;
+    } else if (mask & BLITZ_COMPONENT_CIRCLE_VIEW) {
+      CircleView view = world.circle_views[entity];
+      kind = BLITZ_SHAPE_CIRCLE;
+      fill = view.fill_color;
+      stroke = view.stroke_color;
+      stroke_width = view.stroke_width;
+    } else if (mask & BLITZ_COMPONENT_TEXT_VIEW) {
+      TextView view = world.text_views[entity];
+      kind = BLITZ_SHAPE_TEXT;
+      fill = view.color;
+      font_size = view.font_size;
+      origin_x = view.origin_x;
+      baseline_offset = view.baseline_offset;
+      text = view.text;
+      text_length = string_length(text);
+    } else {
+      continue;
+    }
+
+    u32 record_bytes = BLITZ_SCENE_FILE_RECORD_BYTES + align4(text_length);
+    if (offset + record_bytes > BLITZ_SCENE_FILE_BUFFER_BYTES) {
+      return 0u;
+    }
+
+    Vec2 position = world.positions[entity];
+    Vec2 size = world.sizes[entity];
+    write_u32(scene_file_buffer, offset, kind);
+    write_u32(scene_file_buffer, offset + 4u, record_bytes);
+    write_u32(scene_file_buffer, offset + 8u, world.selected[entity]);
+    write_u32(scene_file_buffer, offset + 12u, text_length);
+    write_f32(scene_file_buffer, offset + 16u, position.x);
+    write_f32(scene_file_buffer, offset + 20u, position.y);
+    write_f32(scene_file_buffer, offset + 24u, size.x);
+    write_f32(scene_file_buffer, offset + 28u, size.y);
+    write_f32(scene_file_buffer, offset + 32u, fill.r);
+    write_f32(scene_file_buffer, offset + 36u, fill.g);
+    write_f32(scene_file_buffer, offset + 40u, fill.b);
+    write_f32(scene_file_buffer, offset + 44u, fill.a);
+    write_f32(scene_file_buffer, offset + 48u, stroke.r);
+    write_f32(scene_file_buffer, offset + 52u, stroke.g);
+    write_f32(scene_file_buffer, offset + 56u, stroke.b);
+    write_f32(scene_file_buffer, offset + 60u, stroke.a);
+    write_f32(scene_file_buffer, offset + 64u, stroke_width);
+    write_f32(scene_file_buffer, offset + 68u, font_size);
+    write_f32(scene_file_buffer, offset + 72u, origin_x);
+    write_f32(scene_file_buffer, offset + 76u, baseline_offset);
+    for (u32 i = 0u; i < align4(text_length); i += 1u) {
+      scene_file_buffer[offset + BLITZ_SCENE_FILE_RECORD_BYTES + i] =
+          i < text_length ? (unsigned char)text[i] : 0u;
+    }
+    offset += record_bytes;
+    object_count += 1u;
+  }
+
+  write_u32(scene_file_buffer, 0u, BLITZ_SCENE_FILE_MAGIC);
+  write_u32(scene_file_buffer, 4u, BLITZ_SCENE_FILE_VERSION);
+  write_u32(scene_file_buffer, 8u, offset);
+  write_u32(scene_file_buffer, 12u, object_count);
+  write_f32(scene_file_buffer, 16u, scene_start_camera_x);
+  write_f32(scene_file_buffer, 20u, scene_start_camera_y);
+  write_f32(scene_file_buffer, 24u, scene_start_camera_zoom);
+  write_u32(scene_file_buffer, 28u, 0u);
+  return offset;
+}
+
+// Returns 0 on success. Non-zero values indicate invalid or unsupported data.
+EXPORT("blitz_scene_deserialize")
+u32 blitz_scene_deserialize(u32 byte_count) {
+  if (byte_count < BLITZ_SCENE_FILE_HEADER_BYTES ||
+      byte_count > BLITZ_SCENE_FILE_BUFFER_BYTES) {
+    return 1u;
+  }
+  if (read_u32(scene_file_buffer, 0u) != BLITZ_SCENE_FILE_MAGIC) {
+    return 2u;
+  }
+  if (read_u32(scene_file_buffer, 4u) != BLITZ_SCENE_FILE_VERSION) {
+    return 3u;
+  }
+  if (read_u32(scene_file_buffer, 8u) != byte_count) {
+    return 4u;
+  }
+  u32 object_count = read_u32(scene_file_buffer, 12u);
+  if (object_count > BLITZ_MAX_ENTITIES) {
+    return 5u;
+  }
+
+  float camera_x = read_f32(scene_file_buffer, 16u);
+  float camera_y = read_f32(scene_file_buffer, 20u);
+  float camera_zoom = read_f32(scene_file_buffer, 24u);
+  if (!(camera_zoom > 0.0f)) {
+    return 6u;
+  }
+
+  u32 offset = BLITZ_SCENE_FILE_HEADER_BYTES;
+  u32 required_text_bytes = 0u;
+  for (u32 index = 0u; index < object_count; index += 1u) {
+    if (offset + BLITZ_SCENE_FILE_RECORD_BYTES > byte_count) {
+      return 7u;
+    }
+    u32 kind = read_u32(scene_file_buffer, offset);
+    u32 record_bytes = read_u32(scene_file_buffer, offset + 4u);
+    u32 text_length = read_u32(scene_file_buffer, offset + 12u);
+    if (kind > BLITZ_SHAPE_TEXT ||
+        record_bytes < BLITZ_SCENE_FILE_RECORD_BYTES ||
+        offset + record_bytes > byte_count ||
+        text_length > record_bytes - BLITZ_SCENE_FILE_RECORD_BYTES) {
+      return 8u;
+    }
+    float width = read_f32(scene_file_buffer, offset + 24u);
+    float height = read_f32(scene_file_buffer, offset + 28u);
+    if (!(width > 0.0f) || !(height > 0.0f)) {
+      return 9u;
+    }
+    if (kind == BLITZ_SHAPE_TEXT) {
+      if (text_length == 0u ||
+          required_text_bytes + text_length + 1u > BLITZ_TEXT_POOL_BYTES) {
+        return 10u;
+      }
+      required_text_bytes += text_length + 1u;
+    } else if (text_length != 0u) {
+      return 11u;
+    }
+    offset += record_bytes;
+  }
+  if (offset != byte_count) {
+    return 12u;
+  }
+
+  clear_scene_state();
+  offset = BLITZ_SCENE_FILE_HEADER_BYTES;
+  for (u32 index = 0u; index < object_count; index += 1u) {
+    u32 kind = read_u32(scene_file_buffer, offset);
+    u32 record_bytes = read_u32(scene_file_buffer, offset + 4u);
+    u32 selected = read_u32(scene_file_buffer, offset + 8u);
+    u32 text_length = read_u32(scene_file_buffer, offset + 12u);
+    float x = read_f32(scene_file_buffer, offset + 16u);
+    float y = read_f32(scene_file_buffer, offset + 20u);
+    float width = read_f32(scene_file_buffer, offset + 24u);
+    float height = read_f32(scene_file_buffer, offset + 28u);
+    Color fill = {read_f32(scene_file_buffer, offset + 32u),
+                  read_f32(scene_file_buffer, offset + 36u),
+                  read_f32(scene_file_buffer, offset + 40u),
+                  read_f32(scene_file_buffer, offset + 44u)};
+    Color stroke = {read_f32(scene_file_buffer, offset + 48u),
+                    read_f32(scene_file_buffer, offset + 52u),
+                    read_f32(scene_file_buffer, offset + 56u),
+                    read_f32(scene_file_buffer, offset + 60u)};
+    float stroke_width = read_f32(scene_file_buffer, offset + 64u);
+    float font_size = read_f32(scene_file_buffer, offset + 68u);
+    float origin_x = read_f32(scene_file_buffer, offset + 72u);
+    float baseline_offset = read_f32(scene_file_buffer, offset + 76u);
+
+    u32 entity = ecs_create_entity();
+    if (entity == BLITZ_INVALID_INDEX) {
+      clear_scene_state();
+      return 13u;
+    }
+    ecs_set_position(entity, x, y);
+    ecs_set_size(entity, width, height);
+    if (kind == BLITZ_SHAPE_RECT) {
+      ecs_set_rect_view(entity, fill, stroke, stroke_width);
+    } else if (kind == BLITZ_SHAPE_TRIANGLE) {
+      ecs_set_triangle_view(entity, fill, stroke, stroke_width);
+    } else if (kind == BLITZ_SHAPE_CIRCLE) {
+      ecs_set_circle_view(entity, fill, stroke, stroke_width);
+    } else {
+      char *text = &text_pool[text_pool_used];
+      for (u32 i = 0u; i < text_length; i += 1u) {
+        text[i] = (char)scene_file_buffer[
+            offset + BLITZ_SCENE_FILE_RECORD_BYTES + i];
+      }
+      text[text_length] = '\0';
+      text_pool_used += text_length + 1u;
+      ecs_set_text_view(entity, text, fill, font_size, origin_x,
+                        baseline_offset);
+    }
+    world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+    world.selected[entity] = selected ? 1u : 0u;
+    selected_count += world.selected[entity];
+    offset += record_bytes;
+  }
+
+  uniforms.viewport_camera[2] = camera_x;
+  uniforms.viewport_camera[3] = camera_y;
+  uniforms.style[0] = clampf(camera_zoom, 0.01f, 12.0f);
+  scene_start_camera_x = camera_x;
+  scene_start_camera_y = camera_y;
+  scene_start_camera_zoom = uniforms.style[0];
+  mark_render_list_dirty();
+  return 0u;
 }
 
 EXPORT("blitz_stress_test")

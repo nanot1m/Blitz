@@ -9,6 +9,8 @@ export type BlitzMcpExports = {
   blitz_text_input_capacity(): number;
   blitz_create_text(...args: number[]): number;
   blitz_delete_selected(): void;
+  blitz_history_begin(): void;
+  blitz_history_commit(): void;
   blitz_has_selection(): number;
   blitz_uniform_ptr(): number;
   blitz_uniform_f32_count(): number;
@@ -244,13 +246,19 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
   return {
     addShapes(shapes: CanvasShape[]) {
       options.stopDragging();
-      const ids = shapes.map((shape) => {
-        const id = addShape(shape);
-        if ((id >>> 0) === INVALID_ENTITY) {
-          throw new Error("Blitz could not allocate the requested shape.");
-        }
-        return id;
-      });
+      wasm.blitz_history_begin();
+      let ids: number[];
+      try {
+        ids = shapes.map((shape) => {
+          const id = addShape(shape);
+          if ((id >>> 0) === INVALID_ENTITY) {
+            throw new Error("Blitz could not allocate the requested shape.");
+          }
+          return id;
+        });
+      } finally {
+        wasm.blitz_history_commit();
+      }
       options.updateSelectionState();
       return { added: ids.length, ids, ...getState() };
     },

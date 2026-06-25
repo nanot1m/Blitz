@@ -11,6 +11,63 @@ if (wasm.blitz_entity_count() !== 0) {
   throw new Error("A newly initialized scene should be empty.");
 }
 
+wasm.blitz_resize(1000, 1000);
+wasm.blitz_history_reset();
+wasm.blitz_create_rect(0, 0, 100, 80, 1, 0, 0, 1, 0, 0, 0, 1, 1);
+if (!wasm.blitz_history_undo() || wasm.blitz_entity_count() !== 0) {
+  throw new Error("Core history did not undo object creation.");
+}
+if (!wasm.blitz_history_redo() || wasm.blitz_entity_count() !== 1) {
+  throw new Error("Core history did not redo object creation.");
+}
+wasm.blitz_pointer_down(550, 540, 0);
+wasm.blitz_pointer_up();
+wasm.blitz_set_selected_fill(0.25, 0.5, 0.75);
+if (!wasm.blitz_history_undo()) {
+  throw new Error("Core history did not undo a style update.");
+}
+wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
+const undoneItem = new DataView(
+  wasm.memory.buffer,
+  wasm.blitz_scene_query_ptr(),
+  wasm.blitz_scene_query_item_bytes(),
+);
+if (Math.abs(undoneItem.getFloat32(48, true) - 1) > 0.001) {
+  throw new Error("Undo did not restore the previous fill color.");
+}
+if (!wasm.blitz_history_redo()) {
+  throw new Error("Core history did not redo a style update.");
+}
+wasm.blitz_pointer_down(550, 540, 0);
+wasm.blitz_pointer_up();
+wasm.blitz_delete_selected();
+if (!wasm.blitz_history_undo() || wasm.blitz_entity_count() !== 1) {
+  throw new Error("Core history did not restore a deleted object.");
+}
+const orderedId = wasm.blitz_create_circle(240, 200, 30, 0, 1, 0, 1, 0, 0, 0, 1, 1);
+wasm.blitz_send_to_back();
+if (!wasm.blitz_history_undo()) {
+  throw new Error("Core history did not undo a draw-order update.");
+}
+wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 10);
+{
+  const count = wasm.blitz_scene_query_count();
+  const itemBytes = wasm.blitz_scene_query_item_bytes();
+  const base = wasm.blitz_scene_query_ptr();
+  const view = new DataView(wasm.memory.buffer);
+  let restoredOrder = -1;
+  for (let index = 0; index < count; index += 1) {
+    const offset = base + index * itemBytes;
+    if (view.getUint32(offset, true) === orderedId) {
+      restoredOrder = view.getUint32(offset + 8, true);
+    }
+  }
+  if (restoredOrder !== 1) {
+    throw new Error(`Undo restored the wrong draw order: ${restoredOrder}.`);
+  }
+}
+
+wasm.blitz_clear_scene();
 wasm.blitz_load_demo_template();
 if (wasm.blitz_entity_count() === 0) {
   throw new Error("The demo template did not create any objects.");
@@ -73,6 +130,16 @@ wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
 if (Math.abs(resizedItem.getFloat32(40, true) - 250) > 0.001) {
   throw new Error("Rectangle edge resize did not update its width.");
 }
+if (!wasm.blitz_history_undo()) {
+  throw new Error("Core history did not undo edge resizing.");
+}
+wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
+if (Math.abs(resizedItem.getFloat32(40, true) - 220) > 0.001) {
+  throw new Error("Undo did not restore the previous rectangle width.");
+}
+if (!wasm.blitz_history_redo()) {
+  throw new Error("Core history did not redo edge resizing.");
+}
 
 wasm.blitz_clear_scene();
 const emptyRevision = wasm.blitz_scene_revision();
@@ -92,6 +159,12 @@ if (wasm.blitz_scene_revision() === emptyRevision) {
 }
 
 const originalEntities = wasm.blitz_entity_count();
+wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 10);
+const firstStableId = new DataView(
+  wasm.memory.buffer,
+  wasm.blitz_scene_query_ptr(),
+  wasm.blitz_scene_query_item_bytes(),
+).getUint32(0, true);
 const revisionBeforeSelectAll = wasm.blitz_scene_revision();
 wasm.blitz_select_all();
 if (wasm.blitz_selected_count() !== originalEntities) {
@@ -150,8 +223,6 @@ const fileBytes = new Uint8Array(
   wasm.blitz_scene_file_buffer_ptr(),
   byteCount,
 ).slice();
-// Older files may contain selection flags in this reserved record field.
-new DataView(fileBytes.buffer, fileBytes.byteOffset, fileBytes.byteLength).setUint32(32 + 8, 1, true);
 
 wasm.blitz_clear_scene();
 if (wasm.blitz_entity_count() !== 0) {
@@ -167,6 +238,15 @@ if (wasm.blitz_entity_count() !== originalEntities) {
 }
 if (wasm.blitz_selected_count() !== 0) {
   throw new Error("Selection state should not be restored from a scene file.");
+}
+wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 10);
+const restoredStableId = new DataView(
+  wasm.memory.buffer,
+  wasm.blitz_scene_query_ptr(),
+  wasm.blitz_scene_query_item_bytes(),
+).getUint32(0, true);
+if (restoredStableId !== firstStableId) {
+  throw new Error("Stable object IDs changed during the binary round trip.");
 }
 
 const uniforms = new Float32Array(

@@ -17,9 +17,11 @@ typedef unsigned int u32;
 #define BLITZ_MAX_SCENE_QUERY_ITEMS 65536u
 #define BLITZ_SCENE_FILE_BUFFER_BYTES (16u * 1024u * 1024u)
 #define BLITZ_SCENE_FILE_MAGIC 0x5a544c42u
-#define BLITZ_SCENE_FILE_VERSION 1u
+#define BLITZ_SCENE_FILE_VERSION 2u
 #define BLITZ_SCENE_FILE_HEADER_BYTES 32u
 #define BLITZ_SCENE_FILE_RECORD_BYTES 80u
+#define BLITZ_HISTORY_MAX_ENTRIES 128u
+#define BLITZ_HISTORY_MAX_OPS 65536u
 
 #define BLITZ_INVALID_INDEX 0xffffffffu
 // High bit of a command's order word: set while the command's entity is being
@@ -121,7 +123,7 @@ typedef struct TextDraw {
 } TextDraw;
 
 typedef struct SceneItem {
-  u32 entity;
+  u32 object_id;
   u32 shape_kind;
   u32 order;
   u32 selected;
@@ -135,12 +137,38 @@ typedef struct SceneItem {
   float style[2];
 } SceneItem;
 
+typedef struct EntitySnapshot {
+  u32 object_id;
+  u32 mask;
+  u32 order;
+  u32 _pad0;
+  Vec2 position;
+  Vec2 size;
+  RectView rect_view;
+  TriangleView triangle_view;
+  CircleView circle_view;
+  TextView text_view;
+} EntitySnapshot;
+
+typedef struct HistoryOp {
+  u32 kind;
+  u32 _pad0;
+  EntitySnapshot before;
+  EntitySnapshot after;
+} HistoryOp;
+
+typedef struct HistoryEntry {
+  u32 op_start;
+  u32 op_count;
+} HistoryEntry;
+
 typedef struct World {
   u32 entity_count;
   u32 draw_order_count;
   u32 draw_order[BLITZ_MAX_ENTITIES];
   u32 draw_order_scratch[BLITZ_MAX_ENTITIES];
   u32 selected[BLITZ_MAX_ENTITIES];
+  u32 object_ids[BLITZ_MAX_ENTITIES];
   u32 masks[BLITZ_MAX_ENTITIES];
   Vec2 positions[BLITZ_MAX_ENTITIES];
   Vec2 sizes[BLITZ_MAX_ENTITIES];
@@ -166,6 +194,9 @@ static u32 scene_query_count;
 static u32 scene_query_total;
 static unsigned char scene_file_buffer[BLITZ_SCENE_FILE_BUFFER_BYTES];
 static float selected_style[13];
+static HistoryOp history_ops[BLITZ_HISTORY_MAX_OPS];
+static HistoryEntry history_entries[BLITZ_HISTORY_MAX_ENTRIES];
+static u32 history_touched_generation[BLITZ_MAX_ENTITIES];
 static World world;
 static u32 shape_command_count;
 static u32 rect_draw_count;
@@ -206,6 +237,21 @@ static u32 scene_revision;
 static float scene_start_camera_x;
 static float scene_start_camera_y;
 static float scene_start_camera_zoom;
+static u32 next_object_id;
+static u32 history_op_count;
+static u32 history_entry_count;
+static u32 history_cursor;
+static u32 history_transaction_start;
+static u32 history_transaction_active;
+static u32 history_replaying;
+static u32 history_overflowed;
+static u32 history_generation;
+
+#define BLITZ_HISTORY_CREATE 1u
+#define BLITZ_HISTORY_DELETE 2u
+#define BLITZ_HISTORY_UPDATE 3u
+
+static void clear_selection(void);
 
 static float clampf(float value, float min_value, float max_value) {
   if (value < min_value) {
@@ -284,6 +330,181 @@ static void mark_view_dirty(void) {
   dynamic_dirty = 1u;
 }
 
+static u32 entity_order(u32 entity) {
+  for (u32 order = 0u; order < world.draw_order_count; order += 1u) {
+    if (world.draw_order[order] == entity) {
+      return order;
+    }
+  }
+  return BLITZ_INVALID_INDEX;
+}
+
+static EntitySnapshot snapshot_entity(u32 entity) {
+  EntitySnapshot snapshot;
+  snapshot.object_id = world.object_ids[entity];
+  snapshot.mask = world.masks[entity];
+  snapshot.order = entity_order(entity);
+  snapshot._pad0 = 0u;
+  snapshot.position = world.positions[entity];
+  snapshot.size = world.sizes[entity];
+  snapshot.rect_view = world.rect_views[entity];
+  snapshot.triangle_view = world.triangle_views[entity];
+  snapshot.circle_view = world.circle_views[entity];
+  snapshot.text_view = world.text_views[entity];
+  return snapshot;
+}
+
+static u32 find_entity_by_object_id(u32 object_id) {
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.masks[entity] != 0u && world.object_ids[entity] == object_id) {
+      return entity;
+    }
+  }
+  return BLITZ_INVALID_INDEX;
+}
+
+static void history_reset_internal(void) {
+  history_op_count = 0u;
+  history_entry_count = 0u;
+  history_cursor = 0u;
+  history_transaction_start = 0u;
+  history_transaction_active = 0u;
+  history_overflowed = 0u;
+}
+
+static void history_begin(void) {
+  if (history_replaying || history_transaction_active) {
+    return;
+  }
+  if (history_cursor < history_entry_count) {
+    history_entry_count = history_cursor;
+    history_op_count =
+        history_cursor == 0u
+            ? 0u
+            : history_entries[history_cursor - 1u].op_start +
+                  history_entries[history_cursor - 1u].op_count;
+  }
+  history_transaction_start = history_op_count;
+  history_transaction_active = 1u;
+  history_overflowed = 0u;
+  history_generation += 1u;
+  if (history_generation == 0u) {
+    for (u32 entity = 0u; entity < BLITZ_MAX_ENTITIES; entity += 1u) {
+      history_touched_generation[entity] = 0u;
+    }
+    history_generation = 1u;
+  }
+}
+
+static u32 history_begin_owned(void) {
+  if (history_transaction_active) {
+    return 0u;
+  }
+  history_begin();
+  return history_transaction_active;
+}
+
+static HistoryOp *history_push(u32 kind) {
+  if (history_replaying) {
+    return 0;
+  }
+  if (!history_transaction_active) {
+    history_begin();
+  }
+  if (history_op_count >= BLITZ_HISTORY_MAX_OPS) {
+    history_overflowed = 1u;
+    return 0;
+  }
+  HistoryOp *op = &history_ops[history_op_count];
+  history_op_count += 1u;
+  op->kind = kind;
+  op->_pad0 = 0u;
+  return op;
+}
+
+static void history_record_before(u32 entity) {
+  if (history_replaying || entity == BLITZ_INVALID_INDEX) {
+    return;
+  }
+  if (history_touched_generation[entity] == history_generation) {
+    return;
+  }
+  history_touched_generation[entity] = history_generation;
+  HistoryOp *op = history_push(BLITZ_HISTORY_UPDATE);
+  if (op) {
+    op->before = snapshot_entity(entity);
+    op->after = op->before;
+  }
+}
+
+static void history_record_created(u32 entity) {
+  HistoryOp *op = history_push(BLITZ_HISTORY_CREATE);
+  if (op) {
+    op->before.object_id = 0u;
+    op->after = snapshot_entity(entity);
+  }
+}
+
+static void history_record_deleted(u32 entity) {
+  HistoryOp *op = history_push(BLITZ_HISTORY_DELETE);
+  if (op) {
+    op->before = snapshot_entity(entity);
+    op->after.object_id = 0u;
+  }
+}
+
+static void history_record_selected_before(void) {
+  history_begin();
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.selected[entity]) {
+      history_record_before(entity);
+    }
+  }
+}
+
+static void history_commit(void) {
+  if (history_replaying || !history_transaction_active) {
+    return;
+  }
+  if (history_overflowed || history_entry_count >= BLITZ_HISTORY_MAX_ENTRIES) {
+    history_reset_internal();
+    return;
+  }
+  u32 write = history_transaction_start;
+  for (u32 index = history_transaction_start; index < history_op_count;
+       index += 1u) {
+    HistoryOp op = history_ops[index];
+    if (op.kind == BLITZ_HISTORY_UPDATE) {
+      u32 entity = find_entity_by_object_id(op.before.object_id);
+      if (entity == BLITZ_INVALID_INDEX) {
+        continue;
+      }
+      op.after = snapshot_entity(entity);
+    }
+    history_ops[write] = op;
+    write += 1u;
+  }
+  history_op_count = write;
+  u32 count = history_op_count - history_transaction_start;
+  history_transaction_active = 0u;
+  if (count == 0u) {
+    return;
+  }
+  history_entries[history_entry_count].op_start = history_transaction_start;
+  history_entries[history_entry_count].op_count = count;
+  history_entry_count += 1u;
+  history_cursor = history_entry_count;
+}
+
+static void history_cancel(void) {
+  if (!history_transaction_active) {
+    return;
+  }
+  history_op_count = history_transaction_start;
+  history_transaction_active = 0u;
+  history_overflowed = 0u;
+}
+
 static u32 ecs_create_entity(void) {
   u32 entity;
   if (free_count > 0u) {
@@ -299,6 +520,8 @@ static u32 ecs_create_entity(void) {
   world.draw_order_count += 1u;
   world.selected[entity] = 0u;
   world.masks[entity] = 0u;
+  world.object_ids[entity] = next_object_id;
+  next_object_id += 1u;
   live_count += 1u;
   return entity;
 }
@@ -372,6 +595,104 @@ static void ecs_set_text_view(u32 entity, const char *text, Color color,
   world.text_views[entity].origin_x = origin_x;
   world.text_views[entity].baseline_offset = baseline_offset;
   world.masks[entity] |= BLITZ_COMPONENT_TEXT_VIEW;
+}
+
+static void remove_entity(u32 entity) {
+  if (entity == BLITZ_INVALID_INDEX || world.masks[entity] == 0u) {
+    return;
+  }
+  world.masks[entity] = 0u;
+  world.selected[entity] = 0u;
+  free_slots[free_count] = entity;
+  free_count += 1u;
+  live_count -= 1u;
+  u32 kept = 0u;
+  for (u32 index = 0u; index < world.draw_order_count; index += 1u) {
+    if (world.draw_order[index] != entity) {
+      world.draw_order[kept] = world.draw_order[index];
+      kept += 1u;
+    }
+  }
+  world.draw_order_count = kept;
+}
+
+static u32 restore_snapshot(EntitySnapshot snapshot) {
+  u32 entity = find_entity_by_object_id(snapshot.object_id);
+  if (entity == BLITZ_INVALID_INDEX) {
+    entity = ecs_create_entity();
+    if (entity == BLITZ_INVALID_INDEX) {
+      return entity;
+    }
+    world.object_ids[entity] = snapshot.object_id;
+    if (next_object_id <= snapshot.object_id) {
+      next_object_id = snapshot.object_id + 1u;
+    }
+  }
+  world.masks[entity] = snapshot.mask;
+  world.positions[entity] = snapshot.position;
+  world.sizes[entity] = snapshot.size;
+  world.rect_views[entity] = snapshot.rect_view;
+  world.triangle_views[entity] = snapshot.triangle_view;
+  world.circle_views[entity] = snapshot.circle_view;
+  world.text_views[entity] = snapshot.text_view;
+  world.selected[entity] = 0u;
+  return entity;
+}
+
+static void move_entity_to_order(u32 entity, u32 target) {
+  u32 current = entity_order(entity);
+  if (current == BLITZ_INVALID_INDEX || world.draw_order_count == 0u) {
+    return;
+  }
+  if (target >= world.draw_order_count) {
+    target = world.draw_order_count - 1u;
+  }
+  if (current < target) {
+    for (u32 index = current; index < target; index += 1u) {
+      world.draw_order[index] = world.draw_order[index + 1u];
+    }
+  } else if (current > target) {
+    for (u32 index = current; index > target; index -= 1u) {
+      world.draw_order[index] = world.draw_order[index - 1u];
+    }
+  }
+  world.draw_order[target] = entity;
+}
+
+static void history_apply_entry(HistoryEntry entry, u32 forward) {
+  history_replaying = 1u;
+  clear_selection();
+  for (u32 offset = 0u; offset < entry.op_count; offset += 1u) {
+    u32 index = forward ? entry.op_start + offset
+                        : entry.op_start + entry.op_count - 1u - offset;
+    HistoryOp *op = &history_ops[index];
+    if ((forward && op->kind == BLITZ_HISTORY_CREATE) ||
+        (!forward && op->kind == BLITZ_HISTORY_DELETE)) {
+      restore_snapshot(forward ? op->after : op->before);
+    } else if ((forward && op->kind == BLITZ_HISTORY_DELETE) ||
+               (!forward && op->kind == BLITZ_HISTORY_CREATE)) {
+      u32 object_id =
+          forward ? op->before.object_id : op->after.object_id;
+      remove_entity(find_entity_by_object_id(object_id));
+    } else {
+      restore_snapshot(forward ? op->after : op->before);
+    }
+  }
+  for (u32 offset = 0u; offset < entry.op_count; offset += 1u) {
+    HistoryOp *op = &history_ops[entry.op_start + offset];
+    EntitySnapshot snapshot = forward ? op->after : op->before;
+    if (snapshot.object_id != 0u) {
+      u32 entity = find_entity_by_object_id(snapshot.object_id);
+      move_entity_to_order(entity, snapshot.order);
+    }
+  }
+  selected_count = 0u;
+  dragging_selection = 0u;
+  drag_active = 0u;
+  resize_active = 0u;
+  resize_entity = BLITZ_INVALID_INDEX;
+  mark_render_list_dirty();
+  history_replaying = 0u;
 }
 
 static void clear_selection(void) {
@@ -1152,6 +1473,9 @@ static u32 create_base_rect(float x, float y, float width, float height,
   ecs_set_rect_view(entity, fill, stroke, stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
   ecs_set_resizable(entity);
+  if (history_transaction_active) {
+    history_record_created(entity);
+  }
   return entity;
 }
 
@@ -1166,6 +1490,9 @@ static u32 create_base_circle(float x, float y, float width, float height,
   ecs_set_circle_view(entity, fill, stroke, stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
   ecs_set_resizable(entity);
+  if (history_transaction_active) {
+    history_record_created(entity);
+  }
   return entity;
 }
 
@@ -1181,6 +1508,9 @@ static u32 create_base_triangle(float x, float y, float width, float height,
   ecs_set_triangle_view(entity, fill, stroke, stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
   ecs_set_resizable(entity);
+  if (history_transaction_active) {
+    history_record_created(entity);
+  }
   return entity;
 }
 
@@ -1198,6 +1528,9 @@ static u32 create_base_text(const char *text, float x, float top,
   ecs_set_text_view(entity, text, color, font_size, padding,
                     padding + BLITZ_FONT_ASCENDER * font_size);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  if (history_transaction_active) {
+    history_record_created(entity);
+  }
   return entity;
 }
 
@@ -1396,6 +1729,9 @@ void blitz_init(void) {
   scene_start_camera_x = 0.0f;
   scene_start_camera_y = 0.0f;
   scene_start_camera_zoom = 1.0f;
+  next_object_id = 1u;
+  history_replaying = 0u;
+  history_reset_internal();
 
   uniforms.viewport_camera[0] = 1.0f;
   uniforms.viewport_camera[1] = 1.0f;
@@ -1476,6 +1812,8 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
   u32 resize_target = selected_resizable_entity();
   u32 handle = hit_test_resize_handle(world_x, world_y, resize_target);
   if (!additive && handle != BLITZ_INVALID_INDEX) {
+    history_begin();
+    history_record_before(resize_target);
     resize_active = 1u;
     resize_entity = resize_target;
     resize_handle = handle;
@@ -1494,6 +1832,14 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
       select_only(entity);
     }
     dragging_selection = world.selected[entity];
+    if (dragging_selection) {
+      history_begin();
+      for (u32 selected = 0u; selected < world.entity_count; selected += 1u) {
+        if (world.selected[selected]) {
+          history_record_before(selected);
+        }
+      }
+    }
     drag_last_world.x = world_x;
     drag_last_world.y = world_y;
     return 1u;
@@ -1574,6 +1920,7 @@ void blitz_pointer_up(void) {
     resize_active = 0u;
     resize_entity = BLITZ_INVALID_INDEX;
     mark_dynamic_dirty();
+    history_commit();
     return;
   }
   if (drag_active) {
@@ -1590,10 +1937,12 @@ void blitz_pointer_up(void) {
     drag_active = 0u;
     dragging_selection = 0u;
     mark_render_list_dirty();
+    history_commit();
     return;
   }
   dragging_selection = 0u;
   if (!marquee_active) {
+    history_cancel();
     return;
   }
 
@@ -1613,6 +1962,7 @@ void blitz_pointer_up(void) {
     marquee_active = 0u;
     marquee_candidate = BLITZ_INVALID_INDEX;
     mark_dynamic_dirty();
+    history_cancel();
     return;
   }
 
@@ -1620,46 +1970,55 @@ void blitz_pointer_up(void) {
   marquee_active = 0u;
   marquee_candidate = BLITZ_INVALID_INDEX;
   mark_dynamic_dirty();
+  history_cancel();
 }
 
 EXPORT("blitz_add_rect")
 void blitz_add_rect(void) {
+  u32 history_owned = history_begin_owned();
   float offset = (float)(spawn_count % 6u) * 16.0f;
   u32 entity = create_user_rect(uniforms.viewport_camera[2] + offset,
                                 uniforms.viewport_camera[3] + offset);
   spawn_count += 1u;
   select_only(entity);
   mark_render_list_dirty();
+  if (history_owned) history_commit();
 }
 
 EXPORT("blitz_add_circle")
 void blitz_add_circle(void) {
+  u32 history_owned = history_begin_owned();
   float offset = (float)(spawn_count % 6u) * 16.0f;
   u32 entity = create_user_circle(uniforms.viewport_camera[2] + offset,
                                   uniforms.viewport_camera[3] + offset);
   spawn_count += 1u;
   select_only(entity);
   mark_render_list_dirty();
+  if (history_owned) history_commit();
 }
 
 EXPORT("blitz_add_triangle")
 void blitz_add_triangle(void) {
+  u32 history_owned = history_begin_owned();
   float offset = (float)(spawn_count % 6u) * 16.0f;
   u32 entity = create_user_triangle(uniforms.viewport_camera[2] + offset,
                                     uniforms.viewport_camera[3] + offset);
   spawn_count += 1u;
   select_only(entity);
   mark_render_list_dirty();
+  if (history_owned) history_commit();
 }
 
 EXPORT("blitz_add_text")
 void blitz_add_text(void) {
+  u32 history_owned = history_begin_owned();
   float offset = (float)(spawn_count % 6u) * 16.0f;
   u32 entity = create_user_text(uniforms.viewport_camera[2] + offset,
                                 uniforms.viewport_camera[3] + offset);
   spawn_count += 1u;
   select_only(entity);
   mark_render_list_dirty();
+  if (history_owned) history_commit();
 }
 
 static void clear_scene_state(void) {
@@ -1686,11 +2045,14 @@ static void clear_scene_state(void) {
 EXPORT("blitz_clear_scene")
 void blitz_clear_scene(void) {
   clear_scene_state();
+  history_reset_internal();
 }
 
 EXPORT("blitz_load_demo_template")
 void blitz_load_demo_template(void) {
   clear_scene_state();
+  history_reset_internal();
+  history_begin();
   slide_origin_x = 0.0f;
   slide_origin_y = 0.0f;
   uniforms.viewport_camera[2] = 0.0f;
@@ -1702,6 +2064,7 @@ void blitz_load_demo_template(void) {
   create_demo_world();
   clear_selection();
   mark_render_list_dirty();
+  history_commit();
 }
 
 EXPORT("blitz_clear_selection")
@@ -1717,15 +2080,18 @@ u32 blitz_create_rect(float x, float y, float width, float height,
   if (width <= 0.0f || height <= 0.0f) {
     return BLITZ_INVALID_INDEX;
   }
+  u32 history_owned = history_begin_owned();
   u32 entity = create_base_rect(
       x, y, width, height, (Color){fill_r, fill_g, fill_b, fill_a},
       (Color){stroke_r, stroke_g, stroke_b, stroke_a}, stroke_width);
   if (entity == BLITZ_INVALID_INDEX) {
+    if (history_owned) history_cancel();
     return entity;
   }
   select_only(entity);
   mark_render_list_dirty();
-  return entity;
+  if (history_owned) history_commit();
+  return world.object_ids[entity];
 }
 
 EXPORT("blitz_create_circle")
@@ -1736,16 +2102,19 @@ u32 blitz_create_circle(float center_x, float center_y, float radius,
   if (radius <= 0.0f) {
     return BLITZ_INVALID_INDEX;
   }
+  u32 history_owned = history_begin_owned();
   u32 entity = create_base_circle(
       center_x - radius, center_y - radius, radius * 2.0f, radius * 2.0f,
       (Color){fill_r, fill_g, fill_b, fill_a},
       (Color){stroke_r, stroke_g, stroke_b, stroke_a}, stroke_width);
   if (entity == BLITZ_INVALID_INDEX) {
+    if (history_owned) history_cancel();
     return entity;
   }
   select_only(entity);
   mark_render_list_dirty();
-  return entity;
+  if (history_owned) history_commit();
+  return world.object_ids[entity];
 }
 
 EXPORT("blitz_create_triangle")
@@ -1756,15 +2125,18 @@ u32 blitz_create_triangle(float x, float y, float width, float height,
   if (width <= 0.0f || height <= 0.0f) {
     return BLITZ_INVALID_INDEX;
   }
+  u32 history_owned = history_begin_owned();
   u32 entity = create_base_triangle(
       x, y, width, height, (Color){fill_r, fill_g, fill_b, fill_a},
       (Color){stroke_r, stroke_g, stroke_b, stroke_a}, stroke_width);
   if (entity == BLITZ_INVALID_INDEX) {
+    if (history_owned) history_cancel();
     return entity;
   }
   select_only(entity);
   mark_render_list_dirty();
-  return entity;
+  if (history_owned) history_commit();
+  return world.object_ids[entity];
 }
 
 EXPORT("blitz_text_input_ptr")
@@ -1788,14 +2160,17 @@ u32 blitz_create_text(float x, float y, float font_size, float color_r,
   if (!text) {
     return BLITZ_INVALID_INDEX;
   }
+  u32 history_owned = history_begin_owned();
   u32 entity = create_base_text(
       text, x, y, font_size, (Color){color_r, color_g, color_b, color_a});
   if (entity == BLITZ_INVALID_INDEX) {
+    if (history_owned) history_cancel();
     return entity;
   }
   select_only(entity);
   mark_render_list_dirty();
-  return entity;
+  if (history_owned) history_commit();
+  return world.object_ids[entity];
 }
 
 EXPORT("blitz_query_scene")
@@ -1860,7 +2235,7 @@ u32 blitz_query_scene(float min_x, float min_y, float max_x, float max_y,
       continue;
     }
     SceneItem *item = &scene_query_items[scene_query_count];
-    item->entity = entity;
+    item->object_id = world.object_ids[entity];
     item->shape_kind = kind;
     item->order = order;
     item->selected = world.selected[entity];
@@ -1987,8 +2362,7 @@ u32 blitz_scene_serialize(void) {
     Vec2 size = world.sizes[entity];
     write_u32(scene_file_buffer, offset, kind);
     write_u32(scene_file_buffer, offset + 4u, record_bytes);
-    // Reserved for backward compatibility. Selection is session-only state.
-    write_u32(scene_file_buffer, offset + 8u, 0u);
+    write_u32(scene_file_buffer, offset + 8u, world.object_ids[entity]);
     write_u32(scene_file_buffer, offset + 12u, text_length);
     write_f32(scene_file_buffer, offset + 16u, position.x);
     write_f32(scene_file_buffer, offset + 20u, position.y);
@@ -2035,7 +2409,8 @@ u32 blitz_scene_deserialize(u32 byte_count) {
   if (read_u32(scene_file_buffer, 0u) != BLITZ_SCENE_FILE_MAGIC) {
     return 2u;
   }
-  if (read_u32(scene_file_buffer, 4u) != BLITZ_SCENE_FILE_VERSION) {
+  u32 file_version = read_u32(scene_file_buffer, 4u);
+  if (file_version != 1u && file_version != BLITZ_SCENE_FILE_VERSION) {
     return 3u;
   }
   if (read_u32(scene_file_buffer, 8u) != byte_count) {
@@ -2093,6 +2468,8 @@ u32 blitz_scene_deserialize(u32 byte_count) {
   for (u32 index = 0u; index < object_count; index += 1u) {
     u32 kind = read_u32(scene_file_buffer, offset);
     u32 record_bytes = read_u32(scene_file_buffer, offset + 4u);
+    u32 object_id =
+        file_version >= 2u ? read_u32(scene_file_buffer, offset + 8u) : 0u;
     u32 text_length = read_u32(scene_file_buffer, offset + 12u);
     float x = read_f32(scene_file_buffer, offset + 16u);
     float y = read_f32(scene_file_buffer, offset + 20u);
@@ -2115,6 +2492,12 @@ u32 blitz_scene_deserialize(u32 byte_count) {
     if (entity == BLITZ_INVALID_INDEX) {
       clear_scene_state();
       return 13u;
+    }
+    if (object_id != 0u) {
+      world.object_ids[entity] = object_id;
+      if (next_object_id <= object_id) {
+        next_object_id = object_id + 1u;
+      }
     }
     ecs_set_position(entity, x, y);
     ecs_set_size(entity, width, height);
@@ -2150,11 +2533,13 @@ u32 blitz_scene_deserialize(u32 byte_count) {
   scene_start_camera_y = camera_y;
   scene_start_camera_zoom = uniforms.style[0];
   mark_render_list_dirty();
+  history_reset_internal();
   return 0u;
 }
 
 EXPORT("blitz_stress_test")
 void blitz_stress_test(void) {
+  history_reset_internal();
   const u32 columns = 200u;
   const u32 rows = 100u;
   const float pitch_x = 1240.0f;
@@ -2171,6 +2556,7 @@ void blitz_stress_test(void) {
   slide_origin_x = 0.0f;
   slide_origin_y = 0.0f;
   mark_render_list_dirty();
+  history_reset_internal();
 }
 
 EXPORT("blitz_delete_selected")
@@ -2178,31 +2564,24 @@ void blitz_delete_selected(void) {
   if (selected_count == 0u) {
     return;
   }
+  history_begin();
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
     if (world.selected[entity]) {
-      world.masks[entity] = 0u;
-      world.selected[entity] = 0u;
-      free_slots[free_count] = entity;
-      free_count += 1u;
-      live_count -= 1u;
+      history_record_deleted(entity);
     }
   }
-  // Drop deleted entities from the draw order (cleared mask marks them dead).
-  u32 kept = 0u;
-  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
-    u32 entity = world.draw_order[i];
-    if (world.masks[entity] != 0u) {
-      world.draw_order[kept] = entity;
-      kept += 1u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.selected[entity]) {
+      remove_entity(entity);
     }
   }
-  world.draw_order_count = kept;
   selected_count = 0u;
   dragging_selection = 0u;
   drag_active = 0u;
   resize_active = 0u;
   resize_entity = BLITZ_INVALID_INDEX;
   mark_render_list_dirty();
+  history_commit();
 }
 
 EXPORT("blitz_has_selection")
@@ -2295,6 +2674,8 @@ u32 blitz_selected_style_f32_count(void) {
 
 EXPORT("blitz_set_selected_fill")
 void blitz_set_selected_fill(float r, float g, float b) {
+  u32 history_owned = !history_transaction_active;
+  history_record_selected_before();
   u32 changed = 0u;
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
     if (!world.selected[entity]) continue;
@@ -2315,11 +2696,18 @@ void blitz_set_selected_fill(float r, float g, float b) {
       changed = 1u;
     }
   }
-  if (changed) mark_render_list_dirty();
+  if (changed) {
+    mark_render_list_dirty();
+    if (history_owned) history_commit();
+  } else {
+    if (history_owned) history_cancel();
+  }
 }
 
 EXPORT("blitz_set_selected_fill_opacity")
 void blitz_set_selected_fill_opacity(float opacity) {
+  u32 history_owned = !history_transaction_active;
+  history_record_selected_before();
   opacity = clampf(opacity, 0.0f, 1.0f);
   u32 changed = 0u;
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
@@ -2335,11 +2723,18 @@ void blitz_set_selected_fill_opacity(float opacity) {
       changed = 1u;
     }
   }
-  if (changed) mark_render_list_dirty();
+  if (changed) {
+    mark_render_list_dirty();
+    if (history_owned) history_commit();
+  } else {
+    if (history_owned) history_cancel();
+  }
 }
 
 EXPORT("blitz_set_selected_stroke")
 void blitz_set_selected_stroke(float r, float g, float b) {
+  u32 history_owned = !history_transaction_active;
+  history_record_selected_before();
   u32 changed = 0u;
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
     if (!world.selected[entity]) continue;
@@ -2360,11 +2755,18 @@ void blitz_set_selected_stroke(float r, float g, float b) {
       changed = 1u;
     }
   }
-  if (changed) mark_render_list_dirty();
+  if (changed) {
+    mark_render_list_dirty();
+    if (history_owned) history_commit();
+  } else {
+    if (history_owned) history_cancel();
+  }
 }
 
 EXPORT("blitz_set_selected_stroke_opacity")
 void blitz_set_selected_stroke_opacity(float opacity) {
+  u32 history_owned = !history_transaction_active;
+  history_record_selected_before();
   opacity = clampf(opacity, 0.0f, 1.0f);
   u32 changed = 0u;
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
@@ -2380,11 +2782,18 @@ void blitz_set_selected_stroke_opacity(float opacity) {
       changed = 1u;
     }
   }
-  if (changed) mark_render_list_dirty();
+  if (changed) {
+    mark_render_list_dirty();
+    if (history_owned) history_commit();
+  } else {
+    if (history_owned) history_cancel();
+  }
 }
 
 EXPORT("blitz_set_selected_stroke_width")
 void blitz_set_selected_stroke_width(float width) {
+  u32 history_owned = !history_transaction_active;
+  history_record_selected_before();
   width = clampf(width, 0.0f, 64.0f);
   u32 changed = 0u;
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
@@ -2400,11 +2809,18 @@ void blitz_set_selected_stroke_width(float width) {
       changed = 1u;
     }
   }
-  if (changed) mark_render_list_dirty();
+  if (changed) {
+    mark_render_list_dirty();
+    if (history_owned) history_commit();
+  } else {
+    if (history_owned) history_cancel();
+  }
 }
 
 EXPORT("blitz_set_selected_text_color")
 void blitz_set_selected_text_color(float r, float g, float b) {
+  u32 history_owned = !history_transaction_active;
+  history_record_selected_before();
   u32 changed = 0u;
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
     if (!world.selected[entity] ||
@@ -2416,11 +2832,18 @@ void blitz_set_selected_text_color(float r, float g, float b) {
     world.text_views[entity].color.b = b;
     changed = 1u;
   }
-  if (changed) mark_render_list_dirty();
+  if (changed) {
+    mark_render_list_dirty();
+    if (history_owned) history_commit();
+  } else {
+    if (history_owned) history_cancel();
+  }
 }
 
 EXPORT("blitz_set_selected_text_opacity")
 void blitz_set_selected_text_opacity(float opacity) {
+  u32 history_owned = !history_transaction_active;
+  history_record_selected_before();
   opacity = clampf(opacity, 0.0f, 1.0f);
   u32 changed = 0u;
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
@@ -2431,7 +2854,12 @@ void blitz_set_selected_text_opacity(float opacity) {
     world.text_views[entity].color.a = opacity;
     changed = 1u;
   }
-  if (changed) mark_render_list_dirty();
+  if (changed) {
+    mark_render_list_dirty();
+    if (history_owned) history_commit();
+  } else {
+    if (history_owned) history_cancel();
+  }
 }
 
 EXPORT("blitz_select_all")
@@ -2451,7 +2879,9 @@ void blitz_bring_to_front(void) {
   if (selected_count == 0u) {
     return;
   }
+  history_record_selected_before();
   reorder_selection(0u);
+  history_commit();
 }
 
 EXPORT("blitz_send_to_back")
@@ -2459,7 +2889,46 @@ void blitz_send_to_back(void) {
   if (selected_count == 0u) {
     return;
   }
+  history_record_selected_before();
   reorder_selection(1u);
+  history_commit();
+}
+
+EXPORT("blitz_history_undo")
+u32 blitz_history_undo(void) {
+  history_cancel();
+  if (history_cursor == 0u) {
+    return 0u;
+  }
+  history_cursor -= 1u;
+  history_apply_entry(history_entries[history_cursor], 0u);
+  return 1u;
+}
+
+EXPORT("blitz_history_begin")
+void blitz_history_begin(void) {
+  history_begin();
+}
+
+EXPORT("blitz_history_commit")
+void blitz_history_commit(void) {
+  history_commit();
+}
+
+EXPORT("blitz_history_redo")
+u32 blitz_history_redo(void) {
+  history_cancel();
+  if (history_cursor >= history_entry_count) {
+    return 0u;
+  }
+  history_apply_entry(history_entries[history_cursor], 1u);
+  history_cursor += 1u;
+  return 1u;
+}
+
+EXPORT("blitz_history_reset")
+void blitz_history_reset(void) {
+  history_reset_internal();
 }
 
 EXPORT("blitz_uniform_ptr")

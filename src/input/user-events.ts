@@ -19,9 +19,11 @@ export type CanvasInteractionController = {
 type KeyboardShortcutOptions = {
   deleteSelection(): void;
   openFile(): void;
+  redo(): void;
   saveFile(): void;
   selectAll(): void;
   stopDragging(): void;
+  undo(): void;
 };
 
 type UiActionElements = {
@@ -65,6 +67,8 @@ type StyleControlElements = {
 };
 
 type StyleActions = {
+  beginTransaction(): void;
+  commitTransaction(): void;
   setFill(red: number, green: number, blue: number): void;
   setFillOpacity(opacity: number): void;
   setStroke(red: number, green: number, blue: number): void;
@@ -514,6 +518,22 @@ export function setupKeyboardShortcuts(options: KeyboardShortcutOptions): void {
     const commandKey = event.ctrlKey || event.metaKey;
     if (commandKey && !event.altKey) {
       const key = event.key.toLowerCase();
+      if (key === "z") {
+        event.preventDefault();
+        options.stopDragging();
+        if (event.shiftKey) {
+          options.redo();
+        } else {
+          options.undo();
+        }
+        return;
+      }
+      if (key === "y") {
+        event.preventDefault();
+        options.stopDragging();
+        options.redo();
+        return;
+      }
       if (key === "a") {
         event.preventDefault();
         options.stopDragging();
@@ -568,6 +588,21 @@ export function setupStyleControls(
   elements: StyleControlElements,
   actions: StyleActions,
 ): void {
+  const controls = [
+    elements.fillInput,
+    elements.fillOpacityInput,
+    elements.strokeInput,
+    elements.strokeOpacityInput,
+    elements.strokeWidthInput,
+    elements.textColorInput,
+    elements.textOpacityInput,
+  ];
+  for (const control of controls) {
+    control.addEventListener("pointerdown", actions.beginTransaction);
+    control.addEventListener("focus", actions.beginTransaction);
+    control.addEventListener("change", actions.commitTransaction);
+    control.addEventListener("blur", actions.commitTransaction);
+  }
   elements.fillInput.addEventListener("input", () => {
     actions.setFill(...colorChannels(elements.fillInput.value));
   });

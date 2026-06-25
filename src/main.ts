@@ -118,6 +118,11 @@ type BlitzExports = {
   blitz_select_all(): void;
   blitz_bring_to_front(): void;
   blitz_send_to_back(): void;
+  blitz_history_undo(): number;
+  blitz_history_redo(): number;
+  blitz_history_begin(): void;
+  blitz_history_commit(): void;
+  blitz_history_reset(): void;
   blitz_uniform_ptr(): number;
   blitz_uniform_f32_count(): number;
   blitz_shape_command_ptr(): number;
@@ -757,6 +762,8 @@ async function boot() {
       textOpacityInput: selectedTextOpacityInput,
     },
     {
+      beginTransaction: wasm.blitz_history_begin,
+      commitTransaction: wasm.blitz_history_commit,
       setFill(red, green, blue) {
         wasm.blitz_set_selected_fill(red, green, blue);
         updateStyleIsland();
@@ -791,12 +798,24 @@ async function boot() {
   setupKeyboardShortcuts({
     deleteSelection,
     openFile: sceneFileStorage.openFile,
+    redo() {
+      if (wasm.blitz_history_redo()) {
+        updateSelectionState();
+        updateEmptyState();
+      }
+    },
     saveFile: sceneFileStorage.saveFile,
     selectAll() {
       wasm.blitz_select_all();
       updateSelectionState();
     },
     stopDragging,
+    undo() {
+      if (wasm.blitz_history_undo()) {
+        updateSelectionState();
+        updateEmptyState();
+      }
+    },
   });
 
   const render = () => {

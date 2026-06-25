@@ -57,6 +57,10 @@ Keyboard shortcuts:
 - `Ctrl/Cmd+A`: select all objects
 - `Ctrl/Cmd+O`: open the file picker
 - `Ctrl/Cmd+S`: save the current file
+- `Ctrl/Cmd+Z`: undo
+- `Ctrl/Cmd+Y` or `Ctrl/Cmd+Shift+Z`: redo
+
+Undo/redo is owned by the WASM core. It stores up to 128 transactions and 65,536 typed operations (`CREATE`, `DELETE`, and `UPDATE`) against stable object IDs; updates include geometry, styles, and draw order. Overflow drops history rather than growing memory. These operations are the local foundation for a future serialized collaboration protocol; distributed conflict resolution is not implemented yet.
 
 ## Local scene files
 
@@ -239,6 +243,7 @@ Agents should call `canvas_get_scene` before editing an existing composition and
 - Resize capability: an ECS `RESIZABLE` component enables shared corner controls for geometric shapes; text omits the component
 - Scene inspection: a bounded packed query buffer exposes up to 65,536 ECS objects per browser query
 - File persistence: versioned `.blitz` binary serialization is owned by WASM
+- History: typed forward/inverse operations and stable object IDs are owned by WASM
 - Text input: UTF-8 strings copied into a WASM-owned text pool
 
 ### Rendering

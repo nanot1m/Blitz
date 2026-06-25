@@ -11,7 +11,7 @@ type SceneFileWasm = {
   memory: WebAssembly.Memory;
   blitz_scene_file_buffer_ptr(): number;
   blitz_scene_file_buffer_capacity(): number;
-  blitz_scene_revision(): number;
+  blitz_history_state_id(): number;
   blitz_capture_start_viewpoint(): void;
   blitz_scene_serialize(): number;
   blitz_scene_deserialize(byteCount: number): number;
@@ -140,7 +140,7 @@ export function setupSceneFileStorage(
 ): SceneFileController {
   const browserWindow = window as SceneFileWindow;
   let currentHandle: SceneFileHandle | undefined;
-  let cleanRevision = wasm.blitz_scene_revision();
+  let cleanHistoryState = wasm.blitz_history_state_id();
   let dirty = false;
   let loadHandle: (handle: SceneFileHandle) => Promise<void>;
 
@@ -150,13 +150,13 @@ export function setupSceneFileStorage(
   };
 
   const markClean = () => {
-    cleanRevision = wasm.blitz_scene_revision();
+    cleanHistoryState = wasm.blitz_history_state_id();
     dirty = false;
     elements.saveIndicator.dataset.dirty = "false";
   };
 
   const syncDirtyState = () => {
-    const nextDirty = wasm.blitz_scene_revision() !== cleanRevision;
+    const nextDirty = wasm.blitz_history_state_id() !== cleanHistoryState;
     if (nextDirty === dirty) {
       return;
     }

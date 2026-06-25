@@ -167,6 +167,7 @@ typedef struct HistoryOp {
 typedef struct HistoryEntry {
   u32 op_start;
   u32 op_count;
+  u32 state_id;
 } HistoryEntry;
 
 typedef struct World {
@@ -257,6 +258,9 @@ static u32 history_transaction_active;
 static u32 history_replaying;
 static u32 history_overflowed;
 static u32 history_generation;
+static u32 history_next_state_id;
+static u32 history_root_state_id;
+static u32 history_current_state_id;
 
 #define BLITZ_HISTORY_CREATE 1u
 #define BLITZ_HISTORY_DELETE 2u
@@ -416,6 +420,14 @@ static u32 find_entity_by_object_id(ObjectId object_id) {
   return BLITZ_INVALID_INDEX;
 }
 
+static u32 next_history_state_id(void) {
+  history_next_state_id += 1u;
+  if (history_next_state_id == 0u) {
+    history_next_state_id = 1u;
+  }
+  return history_next_state_id;
+}
+
 static void history_reset_internal(void) {
   history_op_count = 0u;
   history_entry_count = 0u;
@@ -423,6 +435,8 @@ static void history_reset_internal(void) {
   history_transaction_start = 0u;
   history_transaction_active = 0u;
   history_overflowed = 0u;
+  history_root_state_id = next_history_state_id();
+  history_current_state_id = history_root_state_id;
 }
 
 static void history_begin(void) {
@@ -545,8 +559,10 @@ static void history_commit(void) {
   }
   history_entries[history_entry_count].op_start = history_transaction_start;
   history_entries[history_entry_count].op_count = count;
+  history_entries[history_entry_count].state_id = next_history_state_id();
   history_entry_count += 1u;
   history_cursor = history_entry_count;
+  history_current_state_id = history_entries[history_cursor - 1u].state_id;
 }
 
 static void history_cancel(void) {
@@ -2982,6 +2998,9 @@ u32 blitz_history_undo(void) {
   }
   history_cursor -= 1u;
   history_apply_entry(history_entries[history_cursor], 0u);
+  history_current_state_id =
+      history_cursor == 0u ? history_root_state_id
+                           : history_entries[history_cursor - 1u].state_id;
   return 1u;
 }
 
@@ -3003,7 +3022,13 @@ u32 blitz_history_redo(void) {
   }
   history_apply_entry(history_entries[history_cursor], 1u);
   history_cursor += 1u;
+  history_current_state_id = history_entries[history_cursor - 1u].state_id;
   return 1u;
+}
+
+EXPORT("blitz_history_state_id")
+u32 blitz_history_state_id(void) {
+  return history_current_state_id;
 }
 
 EXPORT("blitz_history_reset")

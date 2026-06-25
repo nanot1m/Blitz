@@ -70,6 +70,7 @@ const wasmExports = [
   "blitz_send_to_back",
   "blitz_history_undo",
   "blitz_history_redo",
+  "blitz_history_state_id",
   "blitz_history_begin",
   "blitz_history_commit",
   "blitz_history_reset",

@@ -22,12 +22,23 @@ if (wasm.blitz_entity_count() !== 0) {
 
 wasm.blitz_resize(1000, 1000);
 wasm.blitz_history_reset();
+const emptyHistoryState = wasm.blitz_history_state_id();
 wasm.blitz_create_rect(0, 0, 100, 80, 1, 0, 0, 1, 0, 0, 0, 1, 1);
+const createdHistoryState = wasm.blitz_history_state_id();
+if (createdHistoryState === emptyHistoryState) {
+  throw new Error("Creating an object did not advance the history state.");
+}
 if (!wasm.blitz_history_undo() || wasm.blitz_entity_count() !== 0) {
   throw new Error("Core history did not undo object creation.");
 }
+if (wasm.blitz_history_state_id() !== emptyHistoryState) {
+  throw new Error("Undo did not restore the previous history state.");
+}
 if (!wasm.blitz_history_redo() || wasm.blitz_entity_count() !== 1) {
   throw new Error("Core history did not redo object creation.");
+}
+if (wasm.blitz_history_state_id() !== createdHistoryState) {
+  throw new Error("Redo did not restore the created history state.");
 }
 wasm.blitz_pointer_down(550, 540, 0);
 wasm.blitz_pointer_up();

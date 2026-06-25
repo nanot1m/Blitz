@@ -123,6 +123,7 @@ type BlitzExports = {
   blitz_send_to_back(): void;
   blitz_history_undo(): number;
   blitz_history_redo(): number;
+  blitz_history_state_id(): number;
   blitz_history_begin(): void;
   blitz_history_commit(): void;
   blitz_history_reset(): void;

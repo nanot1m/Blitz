@@ -13,16 +13,14 @@ typedef unsigned int u32;
 #define BLITZ_MAX_DYN_COMMANDS (BLITZ_MAX_TEXT_DRAWS + BLITZ_MAX_DYN_RECTS)
 #define BLITZ_MIN_TEXT_PX 3.0f
 #define BLITZ_TEXT_INPUT_BYTES 4096u
-#define BLITZ_TEXT_POOL_BYTES (4u * 1024u * 1024u)
+#define BLITZ_TEXT_POOL_BYTES (16u * 1024u * 1024u)
 #define BLITZ_MAX_SCENE_QUERY_ITEMS 65536u
-#define BLITZ_SCENE_FILE_BUFFER_BYTES (16u * 1024u * 1024u)
+#define BLITZ_SCENE_FILE_BUFFER_BYTES (128u * 1024u * 1024u)
 #define BLITZ_SCENE_FILE_MAGIC 0x5a544c42u
 #define BLITZ_SCENE_FILE_VERSION 3u
 #define BLITZ_SCENE_FILE_HEADER_BYTES 32u
 #define BLITZ_SCENE_FILE_LEGACY_RECORD_BYTES 80u
 #define BLITZ_SCENE_FILE_RECORD_BYTES 92u
-#define BLITZ_HISTORY_MAX_ENTRIES 128u
-#define BLITZ_HISTORY_MAX_OPS 65536u
 
 #define BLITZ_INVALID_INDEX 0xffffffffu
 // High bit of a command's order word: set while the command's entity is being
@@ -144,32 +142,6 @@ typedef struct SceneItem {
   float style[2];
 } SceneItem;
 
-typedef struct EntitySnapshot {
-  ObjectId object_id;
-  u32 mask;
-  u32 order;
-  u32 _pad0;
-  Vec2 position;
-  Vec2 size;
-  RectView rect_view;
-  TriangleView triangle_view;
-  CircleView circle_view;
-  TextView text_view;
-} EntitySnapshot;
-
-typedef struct HistoryOp {
-  u32 kind;
-  u32 _pad0;
-  EntitySnapshot before;
-  EntitySnapshot after;
-} HistoryOp;
-
-typedef struct HistoryEntry {
-  u32 op_start;
-  u32 op_count;
-  u32 state_id;
-} HistoryEntry;
-
 typedef struct World {
   u32 entity_count;
   u32 draw_order_count;
@@ -202,9 +174,6 @@ static u32 scene_query_count;
 static u32 scene_query_total;
 static unsigned char scene_file_buffer[BLITZ_SCENE_FILE_BUFFER_BYTES];
 static float selected_style[13];
-static HistoryOp history_ops[BLITZ_HISTORY_MAX_OPS];
-static HistoryEntry history_entries[BLITZ_HISTORY_MAX_ENTRIES];
-static u32 history_touched_generation[BLITZ_MAX_ENTITIES];
 static World world;
 static u32 shape_command_count;
 static u32 rect_draw_count;
@@ -250,21 +219,7 @@ static u32 object_id_actor_lo;
 static u32 next_object_id_sequence_hi;
 static u32 next_object_id_sequence_lo;
 static ObjectId last_created_object_id;
-static u32 history_op_count;
-static u32 history_entry_count;
-static u32 history_cursor;
-static u32 history_transaction_start;
 static u32 history_transaction_active;
-static u32 history_replaying;
-static u32 history_overflowed;
-static u32 history_generation;
-static u32 history_next_state_id;
-static u32 history_root_state_id;
-static u32 history_current_state_id;
-
-#define BLITZ_HISTORY_CREATE 1u
-#define BLITZ_HISTORY_DELETE 2u
-#define BLITZ_HISTORY_UPDATE 3u
 
 static void clear_selection(void);
 
@@ -386,192 +341,39 @@ static void mark_view_dirty(void) {
   dynamic_dirty = 1u;
 }
 
-static u32 entity_order(u32 entity) {
-  for (u32 order = 0u; order < world.draw_order_count; order += 1u) {
-    if (world.draw_order[order] == entity) {
-      return order;
-    }
-  }
-  return BLITZ_INVALID_INDEX;
-}
-
-static EntitySnapshot snapshot_entity(u32 entity) {
-  EntitySnapshot snapshot;
-  snapshot.object_id = world.object_ids[entity];
-  snapshot.mask = world.masks[entity];
-  snapshot.order = entity_order(entity);
-  snapshot._pad0 = 0u;
-  snapshot.position = world.positions[entity];
-  snapshot.size = world.sizes[entity];
-  snapshot.rect_view = world.rect_views[entity];
-  snapshot.triangle_view = world.triangle_views[entity];
-  snapshot.circle_view = world.circle_views[entity];
-  snapshot.text_view = world.text_views[entity];
-  return snapshot;
-}
-
-static u32 find_entity_by_object_id(ObjectId object_id) {
-  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
-    if (world.masks[entity] != 0u &&
-        object_id_equal(world.object_ids[entity], object_id)) {
-      return entity;
-    }
-  }
-  return BLITZ_INVALID_INDEX;
-}
-
-static u32 next_history_state_id(void) {
-  history_next_state_id += 1u;
-  if (history_next_state_id == 0u) {
-    history_next_state_id = 1u;
-  }
-  return history_next_state_id;
-}
-
 static void history_reset_internal(void) {
-  history_op_count = 0u;
-  history_entry_count = 0u;
-  history_cursor = 0u;
-  history_transaction_start = 0u;
   history_transaction_active = 0u;
-  history_overflowed = 0u;
-  history_root_state_id = next_history_state_id();
-  history_current_state_id = history_root_state_id;
 }
 
 static void history_begin(void) {
-  if (history_replaying || history_transaction_active) {
-    return;
-  }
-  if (history_cursor < history_entry_count) {
-    history_entry_count = history_cursor;
-    history_op_count =
-        history_cursor == 0u
-            ? 0u
-            : history_entries[history_cursor - 1u].op_start +
-                  history_entries[history_cursor - 1u].op_count;
-  }
-  history_transaction_start = history_op_count;
-  history_transaction_active = 1u;
-  history_overflowed = 0u;
-  history_generation += 1u;
-  if (history_generation == 0u) {
-    for (u32 entity = 0u; entity < BLITZ_MAX_ENTITIES; entity += 1u) {
-      history_touched_generation[entity] = 0u;
-    }
-    history_generation = 1u;
-  }
+  history_transaction_active = 0u;
 }
 
 static u32 history_begin_owned(void) {
-  if (history_transaction_active) {
-    return 0u;
-  }
-  history_begin();
-  return history_transaction_active;
-}
-
-static HistoryOp *history_push(u32 kind) {
-  if (history_replaying) {
-    return 0;
-  }
-  if (!history_transaction_active) {
-    history_begin();
-  }
-  if (history_op_count >= BLITZ_HISTORY_MAX_OPS) {
-    history_overflowed = 1u;
-    return 0;
-  }
-  HistoryOp *op = &history_ops[history_op_count];
-  history_op_count += 1u;
-  op->kind = kind;
-  op->_pad0 = 0u;
-  return op;
+  return 0u;
 }
 
 static void history_record_before(u32 entity) {
-  if (history_replaying || entity == BLITZ_INVALID_INDEX) {
-    return;
-  }
-  if (history_touched_generation[entity] == history_generation) {
-    return;
-  }
-  history_touched_generation[entity] = history_generation;
-  HistoryOp *op = history_push(BLITZ_HISTORY_UPDATE);
-  if (op) {
-    op->before = snapshot_entity(entity);
-    op->after = op->before;
-  }
+  (void)entity;
 }
 
 static void history_record_created(u32 entity) {
-  HistoryOp *op = history_push(BLITZ_HISTORY_CREATE);
-  if (op) {
-    op->before.object_id = object_id_zero();
-    op->after = snapshot_entity(entity);
-  }
+  (void)entity;
 }
 
 static void history_record_deleted(u32 entity) {
-  HistoryOp *op = history_push(BLITZ_HISTORY_DELETE);
-  if (op) {
-    op->before = snapshot_entity(entity);
-    op->after.object_id = object_id_zero();
-  }
+  (void)entity;
 }
 
 static void history_record_selected_before(void) {
-  history_begin();
-  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
-    if (world.selected[entity]) {
-      history_record_before(entity);
-    }
-  }
 }
 
 static void history_commit(void) {
-  if (history_replaying || !history_transaction_active) {
-    return;
-  }
-  if (history_overflowed || history_entry_count >= BLITZ_HISTORY_MAX_ENTRIES) {
-    history_reset_internal();
-    return;
-  }
-  u32 write = history_transaction_start;
-  for (u32 index = history_transaction_start; index < history_op_count;
-       index += 1u) {
-    HistoryOp op = history_ops[index];
-    if (op.kind == BLITZ_HISTORY_UPDATE) {
-      u32 entity = find_entity_by_object_id(op.before.object_id);
-      if (entity == BLITZ_INVALID_INDEX) {
-        continue;
-      }
-      op.after = snapshot_entity(entity);
-    }
-    history_ops[write] = op;
-    write += 1u;
-  }
-  history_op_count = write;
-  u32 count = history_op_count - history_transaction_start;
   history_transaction_active = 0u;
-  if (count == 0u) {
-    return;
-  }
-  history_entries[history_entry_count].op_start = history_transaction_start;
-  history_entries[history_entry_count].op_count = count;
-  history_entries[history_entry_count].state_id = next_history_state_id();
-  history_entry_count += 1u;
-  history_cursor = history_entry_count;
-  history_current_state_id = history_entries[history_cursor - 1u].state_id;
 }
 
 static void history_cancel(void) {
-  if (!history_transaction_active) {
-    return;
-  }
-  history_op_count = history_transaction_start;
   history_transaction_active = 0u;
-  history_overflowed = 0u;
 }
 
 static u32 ecs_create_entity(void) {
@@ -663,102 +465,6 @@ static void ecs_set_text_view(u32 entity, const char *text, Color color,
   world.text_views[entity].origin_x = origin_x;
   world.text_views[entity].baseline_offset = baseline_offset;
   world.masks[entity] |= BLITZ_COMPONENT_TEXT_VIEW;
-}
-
-static void remove_entity(u32 entity) {
-  if (entity == BLITZ_INVALID_INDEX || world.masks[entity] == 0u) {
-    return;
-  }
-  world.masks[entity] = 0u;
-  world.selected[entity] = 0u;
-  free_slots[free_count] = entity;
-  free_count += 1u;
-  live_count -= 1u;
-  u32 kept = 0u;
-  for (u32 index = 0u; index < world.draw_order_count; index += 1u) {
-    if (world.draw_order[index] != entity) {
-      world.draw_order[kept] = world.draw_order[index];
-      kept += 1u;
-    }
-  }
-  world.draw_order_count = kept;
-}
-
-static u32 restore_snapshot(EntitySnapshot snapshot) {
-  u32 entity = find_entity_by_object_id(snapshot.object_id);
-  if (entity == BLITZ_INVALID_INDEX) {
-    entity = ecs_create_entity();
-    if (entity == BLITZ_INVALID_INDEX) {
-      return entity;
-    }
-    world.object_ids[entity] = snapshot.object_id;
-    advance_sequence_past(snapshot.object_id);
-  }
-  world.masks[entity] = snapshot.mask;
-  world.positions[entity] = snapshot.position;
-  world.sizes[entity] = snapshot.size;
-  world.rect_views[entity] = snapshot.rect_view;
-  world.triangle_views[entity] = snapshot.triangle_view;
-  world.circle_views[entity] = snapshot.circle_view;
-  world.text_views[entity] = snapshot.text_view;
-  world.selected[entity] = 0u;
-  return entity;
-}
-
-static void move_entity_to_order(u32 entity, u32 target) {
-  u32 current = entity_order(entity);
-  if (current == BLITZ_INVALID_INDEX || world.draw_order_count == 0u) {
-    return;
-  }
-  if (target >= world.draw_order_count) {
-    target = world.draw_order_count - 1u;
-  }
-  if (current < target) {
-    for (u32 index = current; index < target; index += 1u) {
-      world.draw_order[index] = world.draw_order[index + 1u];
-    }
-  } else if (current > target) {
-    for (u32 index = current; index > target; index -= 1u) {
-      world.draw_order[index] = world.draw_order[index - 1u];
-    }
-  }
-  world.draw_order[target] = entity;
-}
-
-static void history_apply_entry(HistoryEntry entry, u32 forward) {
-  history_replaying = 1u;
-  clear_selection();
-  for (u32 offset = 0u; offset < entry.op_count; offset += 1u) {
-    u32 index = forward ? entry.op_start + offset
-                        : entry.op_start + entry.op_count - 1u - offset;
-    HistoryOp *op = &history_ops[index];
-    if ((forward && op->kind == BLITZ_HISTORY_CREATE) ||
-        (!forward && op->kind == BLITZ_HISTORY_DELETE)) {
-      restore_snapshot(forward ? op->after : op->before);
-    } else if ((forward && op->kind == BLITZ_HISTORY_DELETE) ||
-               (!forward && op->kind == BLITZ_HISTORY_CREATE)) {
-      ObjectId object_id =
-          forward ? op->before.object_id : op->after.object_id;
-      remove_entity(find_entity_by_object_id(object_id));
-    } else {
-      restore_snapshot(forward ? op->after : op->before);
-    }
-  }
-  for (u32 offset = 0u; offset < entry.op_count; offset += 1u) {
-    HistoryOp *op = &history_ops[entry.op_start + offset];
-    EntitySnapshot snapshot = forward ? op->after : op->before;
-    if (!object_id_is_zero(snapshot.object_id)) {
-      u32 entity = find_entity_by_object_id(snapshot.object_id);
-      move_entity_to_order(entity, snapshot.order);
-    }
-  }
-  selected_count = 0u;
-  dragging_selection = 0u;
-  drag_active = 0u;
-  resize_active = 0u;
-  resize_entity = BLITZ_INVALID_INDEX;
-  mark_render_list_dirty();
-  history_replaying = 0u;
 }
 
 static void clear_selection(void) {
@@ -1798,7 +1504,6 @@ void blitz_init(void) {
   next_object_id_sequence_hi = 0u;
   next_object_id_sequence_lo = 1u;
   last_created_object_id = object_id_zero();
-  history_replaying = 0u;
   history_reset_internal();
 
   uniforms.viewport_camera[0] = 1.0f;
@@ -2660,24 +2365,27 @@ void blitz_delete_selected(void) {
   if (selected_count == 0u) {
     return;
   }
-  history_begin();
-  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+  u32 kept = 0u;
+  for (u32 index = 0u; index < world.draw_order_count; index += 1u) {
+    u32 entity = world.draw_order[index];
     if (world.selected[entity]) {
-      history_record_deleted(entity);
+      world.masks[entity] = 0u;
+      world.selected[entity] = 0u;
+      free_slots[free_count] = entity;
+      free_count += 1u;
+      live_count -= 1u;
+    } else {
+      world.draw_order[kept] = entity;
+      kept += 1u;
     }
   }
-  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
-    if (world.selected[entity]) {
-      remove_entity(entity);
-    }
-  }
+  world.draw_order_count = kept;
   selected_count = 0u;
   dragging_selection = 0u;
   drag_active = 0u;
   resize_active = 0u;
   resize_entity = BLITZ_INVALID_INDEX;
   mark_render_list_dirty();
-  history_commit();
 }
 
 EXPORT("blitz_has_selection")
@@ -2988,52 +2696,6 @@ void blitz_send_to_back(void) {
   history_record_selected_before();
   reorder_selection(1u);
   history_commit();
-}
-
-EXPORT("blitz_history_undo")
-u32 blitz_history_undo(void) {
-  history_cancel();
-  if (history_cursor == 0u) {
-    return 0u;
-  }
-  history_cursor -= 1u;
-  history_apply_entry(history_entries[history_cursor], 0u);
-  history_current_state_id =
-      history_cursor == 0u ? history_root_state_id
-                           : history_entries[history_cursor - 1u].state_id;
-  return 1u;
-}
-
-EXPORT("blitz_history_begin")
-void blitz_history_begin(void) {
-  history_begin();
-}
-
-EXPORT("blitz_history_commit")
-void blitz_history_commit(void) {
-  history_commit();
-}
-
-EXPORT("blitz_history_redo")
-u32 blitz_history_redo(void) {
-  history_cancel();
-  if (history_cursor >= history_entry_count) {
-    return 0u;
-  }
-  history_apply_entry(history_entries[history_cursor], 1u);
-  history_cursor += 1u;
-  history_current_state_id = history_entries[history_cursor - 1u].state_id;
-  return 1u;
-}
-
-EXPORT("blitz_history_state_id")
-u32 blitz_history_state_id(void) {
-  return history_current_state_id;
-}
-
-EXPORT("blitz_history_reset")
-void blitz_history_reset(void) {
-  history_reset_internal();
 }
 
 EXPORT("blitz_uniform_ptr")

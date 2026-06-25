@@ -13,7 +13,6 @@ type SceneFileWasm = {
   blitz_scene_file_buffer_capacity(): number;
   blitz_clear_scene(): void;
   blitz_set_camera(x: number, y: number, zoom: number): void;
-  blitz_history_state_id(): number;
   blitz_capture_start_viewpoint(): void;
   blitz_scene_serialize(): number;
   blitz_scene_deserialize(byteCount: number): number;
@@ -45,6 +44,7 @@ type SceneFileElements = {
 };
 
 type SceneFileOptions = {
+  historyStateId(): number;
   onLoaded(): void;
   onError(message: string): void;
 };
@@ -143,7 +143,7 @@ export function setupSceneFileStorage(
 ): SceneFileController {
   const browserWindow = window as SceneFileWindow;
   let currentHandle: SceneFileHandle | undefined;
-  let cleanHistoryState = wasm.blitz_history_state_id();
+  let cleanHistoryState = options.historyStateId();
   let dirty = false;
   let loadHandle: (handle: SceneFileHandle) => Promise<void>;
 
@@ -153,13 +153,13 @@ export function setupSceneFileStorage(
   };
 
   const markClean = () => {
-    cleanHistoryState = wasm.blitz_history_state_id();
+    cleanHistoryState = options.historyStateId();
     dirty = false;
     elements.saveIndicator.dataset.dirty = "false";
   };
 
   const syncDirtyState = () => {
-    const nextDirty = wasm.blitz_history_state_id() !== cleanHistoryState;
+    const nextDirty = options.historyStateId() !== cleanHistoryState;
     if (nextDirty === dirty) {
       return;
     }
@@ -258,8 +258,8 @@ export function setupSceneFileStorage(
     const file = await handle.getFile();
     deserializeScene(wasm, new Uint8Array(await file.arrayBuffer()));
     currentHandle = handle;
-    markClean();
     options.onLoaded();
+    markClean();
     try {
       await refreshRecent(await rememberSceneFile(handle));
     } catch {
@@ -353,8 +353,8 @@ export function setupSceneFileStorage(
         return;
       }
       deserializeScene(wasm, new Uint8Array(await file.arrayBuffer()));
-      markClean();
       options.onLoaded();
+      markClean();
     });
   };
 
@@ -366,9 +366,9 @@ export function setupSceneFileStorage(
     wasm.blitz_set_camera(0, 0, 1);
     wasm.blitz_capture_start_viewpoint();
     currentHandle = undefined;
-    markClean();
     closeMenus();
     options.onLoaded();
+    markClean();
   };
 
   const saveFile = () => {

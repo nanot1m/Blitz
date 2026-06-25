@@ -21,72 +21,6 @@ if (wasm.blitz_entity_count() !== 0) {
 }
 
 wasm.blitz_resize(1000, 1000);
-wasm.blitz_history_reset();
-const emptyHistoryState = wasm.blitz_history_state_id();
-wasm.blitz_create_rect(0, 0, 100, 80, 1, 0, 0, 1, 0, 0, 0, 1, 1);
-const createdHistoryState = wasm.blitz_history_state_id();
-if (createdHistoryState === emptyHistoryState) {
-  throw new Error("Creating an object did not advance the history state.");
-}
-if (!wasm.blitz_history_undo() || wasm.blitz_entity_count() !== 0) {
-  throw new Error("Core history did not undo object creation.");
-}
-if (wasm.blitz_history_state_id() !== emptyHistoryState) {
-  throw new Error("Undo did not restore the previous history state.");
-}
-if (!wasm.blitz_history_redo() || wasm.blitz_entity_count() !== 1) {
-  throw new Error("Core history did not redo object creation.");
-}
-if (wasm.blitz_history_state_id() !== createdHistoryState) {
-  throw new Error("Redo did not restore the created history state.");
-}
-wasm.blitz_pointer_down(550, 540, 0);
-wasm.blitz_pointer_up();
-wasm.blitz_set_selected_fill(0.25, 0.5, 0.75);
-if (!wasm.blitz_history_undo()) {
-  throw new Error("Core history did not undo a style update.");
-}
-wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
-const undoneItem = new DataView(
-  wasm.memory.buffer,
-  wasm.blitz_scene_query_ptr(),
-  wasm.blitz_scene_query_item_bytes(),
-);
-if (Math.abs(undoneItem.getFloat32(56, true) - 1) > 0.001) {
-  throw new Error("Undo did not restore the previous fill color.");
-}
-if (!wasm.blitz_history_redo()) {
-  throw new Error("Core history did not redo a style update.");
-}
-wasm.blitz_pointer_down(550, 540, 0);
-wasm.blitz_pointer_up();
-wasm.blitz_delete_selected();
-if (!wasm.blitz_history_undo() || wasm.blitz_entity_count() !== 1) {
-  throw new Error("Core history did not restore a deleted object.");
-}
-wasm.blitz_create_circle(240, 200, 30, 0, 1, 0, 1, 0, 0, 0, 1, 1);
-const orderedId = readObjectId(wasm.blitz_last_created_object_id_ptr());
-wasm.blitz_send_to_back();
-if (!wasm.blitz_history_undo()) {
-  throw new Error("Core history did not undo a draw-order update.");
-}
-wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 10);
-{
-  const count = wasm.blitz_scene_query_count();
-  const itemBytes = wasm.blitz_scene_query_item_bytes();
-  const base = wasm.blitz_scene_query_ptr();
-  const view = new DataView(wasm.memory.buffer);
-  let restoredOrder = -1;
-  for (let index = 0; index < count; index += 1) {
-    const offset = base + index * itemBytes;
-    if (objectIdEquals(readObjectId(offset), orderedId)) {
-      restoredOrder = view.getUint32(offset + 20, true);
-    }
-  }
-  if (restoredOrder !== 1) {
-    throw new Error(`Undo restored the wrong draw order: ${restoredOrder}.`);
-  }
-}
 
 wasm.blitz_clear_scene();
 wasm.blitz_load_demo_template();
@@ -151,17 +85,6 @@ wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
 if (Math.abs(resizedItem.getFloat32(48, true) - 250) > 0.001) {
   throw new Error("Rectangle edge resize did not update its width.");
 }
-if (!wasm.blitz_history_undo()) {
-  throw new Error("Core history did not undo edge resizing.");
-}
-wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
-if (Math.abs(resizedItem.getFloat32(48, true) - 220) > 0.001) {
-  throw new Error("Undo did not restore the previous rectangle width.");
-}
-if (!wasm.blitz_history_redo()) {
-  throw new Error("Core history did not redo edge resizing.");
-}
-
 wasm.blitz_clear_scene();
 const emptyRevision = wasm.blitz_scene_revision();
 wasm.blitz_set_camera(321, -123, 1.75);

@@ -12,7 +12,7 @@
     "mcp:server": "tsx mcp/server.ts",
     "preview": "vite preview --host 127.0.0.1",
     "test:mcp": "tsx scripts/test-mcp-canvas-adapter.ts && node scripts/test-mcp-bridge.mjs",
-    "test:storage": "tsx scripts/test-scene-binary.ts",
+    "test:storage": "tsx scripts/test-scene-binary.ts && tsx scripts/test-scene-history.ts",
     "typecheck": "tsc && tsc -p tsconfig.mcp.json"
   },
   "devDependencies": {

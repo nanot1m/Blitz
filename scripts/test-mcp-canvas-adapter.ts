@@ -11,6 +11,8 @@ wasm.blitz_init();
 wasm.blitz_resize(1200, 675);
 
 const adapter = createCanvasMcpAdapter(wasm, {
+  beginHistory() {},
+  commitHistory() {},
   stopDragging() {},
   updateSelectionState() {},
 });

@@ -60,7 +60,7 @@ Keyboard shortcuts:
 - `Ctrl/Cmd+Z`: undo
 - `Ctrl/Cmd+Y` or `Ctrl/Cmd+Shift+Z`: redo
 
-Undo/redo is owned by the WASM core. It stores up to 128 transactions and 65,536 typed operations (`CREATE`, `DELETE`, and `UPDATE`) against stable 128-bit object IDs; updates include geometry, styles, and draw order. Each ID combines a browser-persistent random 64-bit actor ID with a monotonic 64-bit sequence. Overflow drops history rather than growing memory. These operations are the local foundation for a future serialized collaboration protocol; distributed conflict resolution is not implemented yet.
+Undo/redo is owned by a TypeScript history controller. WASM serializes the current binary scene state into a 128 MB arena, while JavaScript owns transactions, branching, saved-state IDs, and a bounded stack of up to 64 states or 256 MB. Applying history preserves the current viewport and restores structural scene data through the validated WASM deserializer.
 
 ## Local scene files
 
@@ -84,7 +84,7 @@ Selection is session-only UI state. Selecting, deselecting, or marquee-selecting
 
 WASM exposes a monotonic scene revision covering persisted changes such as geometry, text, and z-order. A gray dot appears on the Save icon while the current revision differs from the last successful save or load. Closing or reloading a page with unsaved changes triggers the browser's standard unsaved-changes confirmation. Browsers do not permit reliable asynchronous saving during page unload, so the application warns rather than attempting a silent final save.
 
-The current version uses a 16 MB WASM file buffer. Files include a magic number, format version, total byte count, camera header, and variable-length shape records. Invalid files are fully validated before the live scene is replaced.
+The current version uses a 128 MB WASM file buffer, enough for one million fixed-size shape records plus normal text payloads. Files include a magic number, format version, total byte count, camera header, and variable-length shape records. Invalid files are fully validated before the live scene is replaced.
 
 ### Phones and tablets
 
@@ -247,7 +247,7 @@ Agents should call `canvas_get_scene` before editing an existing composition and
 - Scene inspection: a bounded packed query buffer exposes up to 65,536 ECS objects per browser query
 - File persistence: versioned `.blitz` binary serialization is owned by WASM
 - Identity: 128-bit actor/sequence object IDs are generated and owned by WASM
-- History: typed forward/inverse operations reference those stable object IDs
+- History: a bounded TypeScript snapshot stack uses WASM binary serialization and validation
 - Text input: UTF-8 strings copied into a WASM-owned text pool
 
 ### Rendering

@@ -10,8 +10,6 @@ export type BlitzMcpExports = {
   blitz_create_text(...args: number[]): number;
   blitz_last_created_object_id_ptr(): number;
   blitz_delete_selected(): void;
-  blitz_history_begin(): void;
-  blitz_history_commit(): void;
   blitz_has_selection(): number;
   blitz_uniform_ptr(): number;
   blitz_uniform_f32_count(): number;
@@ -31,6 +29,8 @@ export type BlitzMcpExports = {
 };
 
 type CanvasAdapterOptions = {
+  beginHistory(): void;
+  commitHistory(): void;
   stopDragging(): void;
   updateSelectionState(): void;
 };
@@ -270,14 +270,14 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
   return {
     addShapes(shapes: CanvasShape[]) {
       options.stopDragging();
-      wasm.blitz_history_begin();
+      options.beginHistory();
       let ids: string[];
       try {
         ids = shapes.map((shape) => {
           return addShape(shape);
         });
       } finally {
-        wasm.blitz_history_commit();
+        options.commitHistory();
       }
       options.updateSelectionState();
       return { added: ids.length, ids, ...getState() };

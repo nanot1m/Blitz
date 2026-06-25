@@ -10,6 +10,7 @@ import shaderSource from "./shaders/rect.wgsl?raw";
 import cullSource from "./shaders/cull.wgsl?raw";
 import { setupSceneFileStorage } from "./storage/scene-file";
 import { getOrCreateActorId } from "./storage/actor-id";
+import { createSceneHistory } from "./history/scene-history";
 import { createBlitzUi } from "./ui";
 import "./style.css";
 
@@ -122,12 +123,6 @@ type BlitzExports = {
   blitz_select_all(): void;
   blitz_bring_to_front(): void;
   blitz_send_to_back(): void;
-  blitz_history_undo(): number;
-  blitz_history_redo(): number;
-  blitz_history_state_id(): number;
-  blitz_history_begin(): void;
-  blitz_history_commit(): void;
-  blitz_history_reset(): void;
   blitz_uniform_ptr(): number;
   blitz_uniform_f32_count(): number;
   blitz_shape_command_ptr(): number;
@@ -649,20 +644,34 @@ async function boot() {
     emptyState.hidden = !visible;
   };
 
-  const { stopDragging } = setupCanvasInteractions(canvas, wasm, {
-    onSelectionChanged: updateSelectionState,
+  let stopDragging = () => {};
+  const sceneHistory = createSceneHistory(wasm, {
+    onApplied() {
+      stopDragging();
+      updateSelectionState();
+      updateEmptyState();
+    },
+    onError: showFallback,
   });
+  stopDragging = setupCanvasInteractions(canvas, wasm, {
+    beginEdit: sceneHistory.begin,
+    cancelEdit: sceneHistory.cancel,
+    commitEdit: sceneHistory.commit,
+    onSelectionChanged: updateSelectionState,
+  }).stopDragging;
 
   const deleteSelection = () => {
     if (wasm.blitz_has_selection() === 0) {
       return;
     }
     stopDragging();
-    wasm.blitz_delete_selected();
+    sceneHistory.transact(wasm.blitz_delete_selected);
     updateSelectionState();
   };
 
   const mcpAdapter = createCanvasMcpAdapter(wasm, {
+    beginHistory: sceneHistory.begin,
+    commitHistory: sceneHistory.commit,
     stopDragging,
     updateSelectionState,
   });
@@ -690,7 +699,9 @@ async function boot() {
       ],
     },
     {
+      historyStateId: sceneHistory.stateId,
       onLoaded() {
+        sceneHistory.reset();
         stopDragging();
         updateSelectionState();
         updateEmptyState();
@@ -715,7 +726,7 @@ async function boot() {
 
   const runSceneAction = (action: () => void) => {
     stopDragging();
-    action();
+    sceneHistory.transact(action);
     updateSelectionState();
   };
 
@@ -740,14 +751,18 @@ async function boot() {
       addRect: () => runSceneAction(wasm.blitz_add_rect),
       addText: () => runSceneAction(wasm.blitz_add_text),
       addTriangle: () => runSceneAction(wasm.blitz_add_triangle),
-      bringToFront: wasm.blitz_bring_to_front,
+      bringToFront: () => {
+        sceneHistory.transact(wasm.blitz_bring_to_front);
+      },
       deleteSelection,
       loadDemoTemplate() {
         runSceneAction(wasm.blitz_load_demo_template);
         updateEmptyState();
       },
       openFile: sceneFileStorage.openFile,
-      sendToBack: wasm.blitz_send_to_back,
+      sendToBack: () => {
+        sceneHistory.transact(wasm.blitz_send_to_back);
+      },
       stressTest: () => runSceneAction(wasm.blitz_stress_test),
       toggleStats() {
         statsVisible = !statsVisible;
@@ -771,8 +786,10 @@ async function boot() {
       textOpacityInput: selectedTextOpacityInput,
     },
     {
-      beginTransaction: wasm.blitz_history_begin,
-      commitTransaction: wasm.blitz_history_commit,
+      beginTransaction: () => {
+        sceneHistory.begin();
+      },
+      commitTransaction: sceneHistory.commit,
       setFill(red, green, blue) {
         wasm.blitz_set_selected_fill(red, green, blue);
         updateStyleIsland();
@@ -808,7 +825,7 @@ async function boot() {
     deleteSelection,
     openFile: sceneFileStorage.openFile,
     redo() {
-      if (wasm.blitz_history_redo()) {
+      if (sceneHistory.redo()) {
         updateSelectionState();
         updateEmptyState();
       }
@@ -820,7 +837,7 @@ async function boot() {
     },
     stopDragging,
     undo() {
-      if (wasm.blitz_history_undo()) {
+      if (sceneHistory.undo()) {
         updateSelectionState();
         updateEmptyState();
       }
@@ -996,6 +1013,7 @@ async function boot() {
 
   window.addEventListener("resize", resize);
   resize();
+  sceneHistory.reset();
   sceneFileStorage.markClean();
   updateSelectionState();
   updateEmptyState();

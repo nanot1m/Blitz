@@ -9,6 +9,9 @@ type CanvasInteractionWasm = {
 };
 
 type CanvasInteractionOptions = {
+  beginEdit(): void;
+  cancelEdit(): void;
+  commitEdit(): void;
   onSelectionChanged(): void;
 };
 
@@ -108,6 +111,7 @@ export function setupCanvasInteractions(
   let resizePointerMode = 0;
   let selectingArea = false;
   let mouseEntityDragPending = false;
+  let editTransactionActive = false;
   let mouseDragStartX = 0;
   let mouseDragStartY = 0;
   let lastX = 0;
@@ -185,12 +189,18 @@ export function setupCanvasInteractions(
 
   const beginTouchPointerInteraction = (mode: "entity" | "marquee") => {
     const start = clientPointToCanvasPixels(touchStartX, touchStartY);
+    options.beginEdit();
+    editTransactionActive = true;
     const pointerMode = wasm.blitz_pointer_down(start.x, start.y, 0);
     touchMode = pointerMode >= 3 ? "resize" : mode;
     draggingEntity = pointerMode === 1;
     resizingEntity = pointerMode >= 3;
     resizePointerMode = resizingEntity ? pointerMode : 0;
     selectingArea = mode === "marquee";
+    if (selectingArea) {
+      options.cancelEdit();
+      editTransactionActive = false;
+    }
     canvas.classList.toggle("is-dragging-entity", draggingEntity);
     setResizeCursor(pointerMode);
     canvas.classList.toggle("is-selecting", selectingArea);
@@ -201,6 +211,10 @@ export function setupCanvasInteractions(
     clearLongPressTimer();
     if (touchMode === "entity" || touchMode === "resize" || touchMode === "marquee") {
       wasm.blitz_pointer_up();
+      if (editTransactionActive) {
+        options.commitEdit();
+        editTransactionActive = false;
+      }
       options.onSelectionChanged();
     }
     draggingEntity = false;
@@ -227,6 +241,10 @@ export function setupCanvasInteractions(
     mouseEntityDragPending = false;
     clearInteractionClasses();
     wasm.blitz_pointer_up();
+    if (editTransactionActive) {
+      options.commitEdit();
+      editTransactionActive = false;
+    }
   };
 
   canvas.addEventListener("pointerdown", (event) => {
@@ -277,11 +295,17 @@ export function setupCanvasInteractions(
     } else {
       const point = eventToCanvasPixels(event);
       const additive = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 0;
+      options.beginEdit();
+      editTransactionActive = true;
       const pointerMode = wasm.blitz_pointer_down(point.x, point.y, additive);
       draggingEntity = pointerMode === 1;
       resizingEntity = pointerMode >= 3;
       resizePointerMode = resizingEntity ? pointerMode : 0;
       selectingArea = pointerMode === 2;
+      if (selectingArea) {
+        options.cancelEdit();
+        editTransactionActive = false;
+      }
       mouseEntityDragPending =
         event.pointerType === "mouse" && (draggingEntity || resizingEntity);
       mouseDragStartX = event.clientX;
@@ -399,14 +423,22 @@ export function setupCanvasInteractions(
       } else {
         if (wasPrimary && (touchMode === "pending-object" || touchMode === "pending-empty")) {
           const point = eventToCanvasPixels(event);
+          options.beginEdit();
+          editTransactionActive = true;
           wasm.blitz_pointer_down(point.x, point.y, 0);
           wasm.blitz_pointer_up();
+          options.commitEdit();
+          editTransactionActive = false;
         } else if (
           touchMode === "entity" ||
           touchMode === "resize" ||
           touchMode === "marquee"
         ) {
           wasm.blitz_pointer_up();
+          if (editTransactionActive) {
+            options.commitEdit();
+            editTransactionActive = false;
+          }
         }
         lastPinchDistance = 0;
         touchMode = "idle";

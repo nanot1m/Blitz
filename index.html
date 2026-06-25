@@ -8,7 +8,7 @@
   <body>
     <canvas id="blitz-canvas" aria-label="Blitz WebGPU canvas"></canvas>
     <div id="tool-island" role="toolbar" aria-label="Canvas tools">
-      <details id="file-menu" open>
+      <details id="file-menu">
         <summary aria-label="Scene file" title="Scene file">
           <i data-lucide="folder-open" aria-hidden="true"></i>
         </summary>
@@ -49,7 +49,7 @@
         </div>
       </details>
       <span class="tool-divider" aria-hidden="true"></span>
-      <details id="shape-menu" open>
+      <details id="shape-menu">
         <summary aria-label="Add shape" title="Add shape">
           <i data-lucide="shapes" aria-hidden="true"></i>
         </summary>
@@ -85,6 +85,9 @@
       <span class="tool-divider" aria-hidden="true"></span>
       <button id="toggle-stats" type="button" aria-label="Stats for nerds" title="Stats for nerds" aria-pressed="false">
         <i data-lucide="activity" aria-hidden="true"></i>
+      </button>
+      <button id="toggle-debugger" type="button" aria-label="Selected entity debugger" title="Selected entity debugger" aria-pressed="false">
+        <i data-lucide="bug" aria-hidden="true"></i>
       </button>
       <button id="open-mcp-settings" type="button" aria-label="MCP bridge settings" title="MCP bridge: Disconnected">
         <i data-lucide="settings" aria-hidden="true"></i>
@@ -148,6 +151,13 @@
         />
       </label>
     </div>
+    <aside id="debugger-island" aria-label="Selected entity components" hidden>
+      <div class="debugger-heading">
+        <span>Selected entity</span>
+        <span id="debugger-entity-id"></span>
+      </div>
+      <div id="debugger-components"></div>
+    </aside>
     <section id="empty-state" class="empty-state" aria-labelledby="empty-state-title">
       <div class="empty-state-card">
         <h1 id="empty-state-title">Start a new canvas</h1>

@@ -20,11 +20,16 @@ export type CanvasShape =
     })
   | {
       type: "text";
-      x: number;
-      y: number;
+      x?: number;
+      y?: number;
       text: string;
       fontSize: number;
       color: string;
+      maxWidth?: number;
+      lineHeight?: number;
+      maxLines?: number;
+      align?: "left" | "center" | "right";
+      box?: TextLayoutBox;
     };
 
 type CanvasState = {
@@ -59,14 +64,69 @@ export type EmptySpaceQuery = {
   ignoreLargeBackgrounds: boolean;
 };
 
+export type TextMeasurementRequest = {
+  text: string;
+  fontSize: number;
+  maxWidth?: number;
+  lineHeight?: number;
+  maxLines?: number;
+  align?: "left" | "center" | "right";
+  box?: TextLayoutBox;
+};
+
+export type TextLayoutBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  padding: number;
+  verticalAlign: "top" | "middle" | "bottom";
+};
+
+type CommonObjectUpdate = {
+  id: string;
+  x?: number;
+  y?: number;
+};
+
+export type CanvasObjectUpdate =
+  | (CommonObjectUpdate & {
+      type: "rect" | "triangle";
+      width?: number;
+      height?: number;
+      backgroundColor?: string;
+      strokeColor?: string;
+      strokeWidth?: number;
+    })
+  | (CommonObjectUpdate & {
+      type: "circle";
+      radius?: number;
+      backgroundColor?: string;
+      strokeColor?: string;
+      strokeWidth?: number;
+    })
+  | (CommonObjectUpdate & {
+      type: "text";
+      text?: string;
+      fontSize?: number;
+      color?: string;
+      maxWidth?: number | null;
+      lineHeight?: number;
+      maxLines?: number;
+      align?: "left" | "center" | "right";
+    });
+
 type BridgeRequest = {
   id: string;
   method:
     | "canvas.add_shapes"
+    | "canvas.update_objects"
     | "canvas.delete_selected"
     | "canvas.get_state"
     | "canvas.get_scene"
-    | "canvas.find_empty_space";
+    | "canvas.find_empty_space"
+    | "canvas.get_text_capabilities"
+    | "canvas.measure_text";
   params?: unknown;
 };
 
@@ -79,10 +139,13 @@ type BridgeResponse = {
 
 type BridgeHandlers = {
   addShapes(shapes: CanvasShape[]): CanvasState & { added: number; ids: string[] };
+  updateObjects(updates: CanvasObjectUpdate[]): CanvasState & { updated: number; ids: string[] };
   deleteSelected(): CanvasState & { deleted: number };
   getState(): CanvasState;
   getScene(query: SceneQuery): unknown;
   findEmptySpace(query: EmptySpaceQuery): unknown;
+  getTextCapabilities(): unknown;
+  measureText(requests: TextMeasurementRequest[]): unknown;
 };
 
 type BridgeElements = {
@@ -169,13 +232,20 @@ function requirePositiveNumber(value: unknown, label: string, maximum: number): 
 function parseShape(value: unknown, index: number): CanvasShape {
   const shape = requireObject(value, `shapes[${index}]`);
   const prefix = `shapes[${index}]`;
-  const x = requireNumber(shape.x, `${prefix}.x`, -10_000_000, 10_000_000);
-  const y = requireNumber(shape.y, `${prefix}.y`, -10_000_000, 10_000_000);
 
   if (shape.type === "text") {
     if (typeof shape.text !== "string" || shape.text.length < 1 || shape.text.length > 1000) {
       throw new Error(`${prefix}.text must contain 1 to 1000 characters.`);
     }
+    const box = parseTextLayoutBox(shape.box, `${prefix}.box`);
+    const x =
+      box === undefined
+        ? requireNumber(shape.x, `${prefix}.x`, -10_000_000, 10_000_000)
+        : undefined;
+    const y =
+      box === undefined
+        ? requireNumber(shape.y, `${prefix}.y`, -10_000_000, 10_000_000)
+        : undefined;
     return {
       type: "text",
       x,
@@ -183,8 +253,26 @@ function parseShape(value: unknown, index: number): CanvasShape {
       text: shape.text,
       fontSize: requireNumber(shape.fontSize, `${prefix}.fontSize`, 4, 512),
       color: requireColor(shape.color, `${prefix}.color`),
+      maxWidth:
+        shape.maxWidth === undefined
+          ? undefined
+          : requirePositiveNumber(shape.maxWidth, `${prefix}.maxWidth`, 1_000_000),
+      lineHeight:
+        shape.lineHeight === undefined
+          ? 1.36181641
+          : requireNumber(shape.lineHeight, `${prefix}.lineHeight`, 0.5, 4),
+      maxLines:
+        shape.maxLines === undefined
+          ? 0
+          : requireNumber(shape.maxLines, `${prefix}.maxLines`, 0, 256),
+      align:
+        shape.align === "center" || shape.align === "right" ? shape.align : "left",
+      box,
     };
   }
+
+  const x = requireNumber(shape.x, `${prefix}.x`, -10_000_000, 10_000_000);
+  const y = requireNumber(shape.y, `${prefix}.y`, -10_000_000, 10_000_000);
 
   if (shape.type !== "rect" && shape.type !== "circle" && shape.type !== "triangle") {
     throw new Error(`${prefix}.type is unsupported.`);
@@ -213,6 +301,31 @@ function parseShape(value: unknown, index: number): CanvasShape {
   };
 }
 
+function parseTextLayoutBox(value: unknown, label: string): TextLayoutBox | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const box = requireObject(value, label);
+  const padding =
+    box.padding === undefined ? 0 : requireNumber(box.padding, `${label}.padding`, 0, 100_000);
+  const width = requirePositiveNumber(box.width, `${label}.width`, 1_000_000);
+  const height = requirePositiveNumber(box.height, `${label}.height`, 1_000_000);
+  if (padding * 2 + 8 >= width || padding * 2 + 8 >= height) {
+    throw new Error(`${label}.padding leaves no room for text.`);
+  }
+  return {
+    x: requireNumber(box.x, `${label}.x`, -10_000_000, 10_000_000),
+    y: requireNumber(box.y, `${label}.y`, -10_000_000, 10_000_000),
+    width,
+    height,
+    padding,
+    verticalAlign:
+      box.verticalAlign === "middle" || box.verticalAlign === "bottom"
+        ? box.verticalAlign
+        : "top",
+  };
+}
+
 function parseShapeParams(params: unknown): CanvasShape[] {
   if (!params || typeof params !== "object" || !("shapes" in params)) {
     throw new Error("Missing shapes.");
@@ -222,6 +335,118 @@ function parseShapeParams(params: unknown): CanvasShape[] {
     throw new Error("Shapes must be an array containing 1 to 100 entries.");
   }
   return shapes.map(parseShape);
+}
+
+const OBJECT_ID_PATTERN = /^[0-9a-fA-F]{16}:[0-9a-fA-F]{16}$/;
+
+function parseObjectUpdates(params: unknown): CanvasObjectUpdate[] {
+  const value = requireObject(params, "params");
+  if (!Array.isArray(value.updates) || value.updates.length < 1 || value.updates.length > 100) {
+    throw new Error("updates must be an array containing 1 to 100 entries.");
+  }
+  return value.updates.map((candidate, index) => {
+    const update = requireObject(candidate, `updates[${index}]`);
+    const prefix = `updates[${index}]`;
+    if (typeof update.id !== "string" || !OBJECT_ID_PATTERN.test(update.id)) {
+      throw new Error(`${prefix}.id must be a 128-bit Blitz object ID.`);
+    }
+    if (
+      update.type !== "rect" &&
+      update.type !== "triangle" &&
+      update.type !== "circle" &&
+      update.type !== "text"
+    ) {
+      throw new Error(`${prefix}.type is unsupported.`);
+    }
+    const common = {
+      id: update.id.toLowerCase(),
+      type: update.type,
+      x:
+        update.x === undefined
+          ? undefined
+          : requireNumber(update.x, `${prefix}.x`, -10_000_000, 10_000_000),
+      y:
+        update.y === undefined
+          ? undefined
+          : requireNumber(update.y, `${prefix}.y`, -10_000_000, 10_000_000),
+    };
+    if (update.type === "text") {
+      if (
+        update.text !== undefined &&
+        (typeof update.text !== "string" || update.text.length < 1 || update.text.length > 1000)
+      ) {
+        throw new Error(`${prefix}.text must contain 1 to 1000 characters.`);
+      }
+      return {
+        ...common,
+        type: "text" as const,
+        text: update.text as string | undefined,
+        fontSize:
+          update.fontSize === undefined
+            ? undefined
+            : requireNumber(update.fontSize, `${prefix}.fontSize`, 4, 512),
+        color:
+          update.color === undefined ? undefined : requireColor(update.color, `${prefix}.color`),
+        maxWidth:
+          update.maxWidth === undefined || update.maxWidth === null
+            ? update.maxWidth
+            : requirePositiveNumber(update.maxWidth, `${prefix}.maxWidth`, 1_000_000),
+        lineHeight:
+          update.lineHeight === undefined
+            ? undefined
+            : requireNumber(update.lineHeight, `${prefix}.lineHeight`, 0.5, 4),
+        maxLines:
+          update.maxLines === undefined
+            ? undefined
+            : requireNumber(update.maxLines, `${prefix}.maxLines`, 0, 256),
+        align:
+          update.align === undefined
+            ? undefined
+            : update.align === "left" || update.align === "center" || update.align === "right"
+              ? update.align
+              : (() => {
+                  throw new Error(`${prefix}.align must be left, center, or right.`);
+                })(),
+      };
+    }
+    const styled = {
+      ...common,
+      backgroundColor:
+        update.backgroundColor === undefined
+          ? undefined
+          : requireColor(update.backgroundColor, `${prefix}.backgroundColor`),
+      strokeColor:
+        update.strokeColor === undefined
+          ? undefined
+          : requireColor(update.strokeColor, `${prefix}.strokeColor`),
+      strokeWidth:
+        update.strokeWidth === undefined
+          ? undefined
+          : requireNumber(update.strokeWidth, `${prefix}.strokeWidth`, 0, 100),
+    };
+    if (update.type === "circle") {
+      return {
+        ...styled,
+        type: "circle" as const,
+        radius:
+          update.radius === undefined
+            ? undefined
+            : requirePositiveNumber(update.radius, `${prefix}.radius`, 1_000_000),
+      };
+    }
+    return {
+      ...styled,
+      type: update.type,
+      width:
+        update.width === undefined
+          ? undefined
+          : requirePositiveNumber(update.width, `${prefix}.width`, 1_000_000),
+      height:
+        update.height === undefined
+          ? undefined
+          : requirePositiveNumber(update.height, `${prefix}.height`, 1_000_000),
+    };
+  });
 }
 
 function parseSceneQuery(params: unknown): SceneQuery {
@@ -267,6 +492,38 @@ function parseEmptySpaceQuery(params: unknown): EmptySpaceQuery {
         ? true
         : value.ignoreLargeBackgrounds,
   };
+}
+
+function parseTextMeasurementParams(params: unknown): TextMeasurementRequest[] {
+  const value = requireObject(params, "params");
+  if (!Array.isArray(value.items) || value.items.length < 1 || value.items.length > 100) {
+    throw new Error("items must be an array containing 1 to 100 entries.");
+  }
+  return value.items.map((candidate, index) => {
+    const item = requireObject(candidate, `items[${index}]`);
+    if (typeof item.text !== "string" || item.text.length > 1000) {
+      throw new Error(`items[${index}].text must contain at most 1000 characters.`);
+    }
+    return {
+      text: item.text,
+      fontSize: requireNumber(item.fontSize, `items[${index}].fontSize`, 4, 512),
+      maxWidth:
+        item.maxWidth === undefined
+          ? undefined
+          : requirePositiveNumber(item.maxWidth, `items[${index}].maxWidth`, 1_000_000),
+      lineHeight:
+        item.lineHeight === undefined
+          ? 1.36181641
+          : requireNumber(item.lineHeight, `items[${index}].lineHeight`, 0.5, 4),
+      maxLines:
+        item.maxLines === undefined
+          ? 0
+          : requireNumber(item.maxLines, `items[${index}].maxLines`, 0, 256),
+      align:
+        item.align === "center" || item.align === "right" ? item.align : "left",
+      box: parseTextLayoutBox(item.box, `items[${index}].box`),
+    };
+  });
 }
 
 export function setupMcpBridge(elements: BridgeElements, handlers: BridgeHandlers): void {
@@ -325,6 +582,9 @@ export function setupMcpBridge(elements: BridgeElements, handlers: BridgeHandler
         case "canvas.add_shapes":
           result = handlers.addShapes(parseShapeParams(request.params));
           break;
+        case "canvas.update_objects":
+          result = handlers.updateObjects(parseObjectUpdates(request.params));
+          break;
         case "canvas.delete_selected":
           result = handlers.deleteSelected();
           break;
@@ -336,6 +596,12 @@ export function setupMcpBridge(elements: BridgeElements, handlers: BridgeHandler
           break;
         case "canvas.find_empty_space":
           result = handlers.findEmptySpace(parseEmptySpaceQuery(request.params));
+          break;
+        case "canvas.measure_text":
+          result = handlers.measureText(parseTextMeasurementParams(request.params));
+          break;
+        case "canvas.get_text_capabilities":
+          result = handlers.getTextCapabilities();
           break;
         default:
           throw new Error("Unsupported bridge method.");

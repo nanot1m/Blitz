@@ -10,10 +10,13 @@ type BridgeRequest = {
   id: string;
   method:
     | "canvas.add_shapes"
+    | "canvas.update_objects"
     | "canvas.delete_selected"
     | "canvas.get_state"
     | "canvas.get_scene"
-    | "canvas.find_empty_space";
+    | "canvas.find_empty_space"
+    | "canvas.get_text_capabilities"
+    | "canvas.measure_text";
   params?: unknown;
 };
 
@@ -71,6 +74,7 @@ const pending = new Map<
 >();
 let activeCanvas: WebSocket | undefined;
 let requestSequence = 0;
+let mcpClientConnected = false;
 
 function rejectPending(reason: string): void {
   for (const entry of pending.values()) {
@@ -111,7 +115,22 @@ async function callCanvas(
 }
 
 const [certificate, key] = await Promise.all([readFile(certificateFile), readFile(keyFile)]);
-const httpsServer = createServer({ cert: certificate, key }, (_request, response) => {
+const httpsServer = createServer({ cert: certificate, key }, (request, response) => {
+  if (request.method === "GET" && request.url === "/__blitz/status") {
+    response.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(
+      JSON.stringify({
+        server: "running",
+        mcpClientConnected,
+        canvasConnected: activeCanvas?.readyState === WebSocket.OPEN,
+      }),
+    );
+    return;
+  }
   response.writeHead(404, {
     "Content-Type": "text/plain; charset=utf-8",
     "X-Content-Type-Options": "nosniff",
@@ -205,9 +224,13 @@ const server = new McpServer(
   { name: "blitz-canvas", version: "0.1.0" },
   {
     instructions:
-      "Inspect with canvas_get_scene before drawing into an existing composition. Use canvas_find_empty_space when placement should avoid overlap. Coordinates are world-space pixels. Rect and triangle x/y are top-left; circle x/y are its center; text x/y are the top-left of its line box.",
+      "Inspect with canvas_get_scene before drawing into or revising an existing composition. Use canvas_update_objects with stable IDs to correct existing content instead of layering replacements. For text inside cards, columns, or other shapes, provide a text box and use the placement returned by canvas_measure_text; do not manually estimate origins from font metrics. Call canvas_get_text_capabilities when choosing characters, and do not use text when measurement reports supported=false, overflow=true, or fitsBox=false. Use canvas_find_empty_space when placement should avoid overlap. Coordinates are world-space pixels. Rect and triangle x/y are top-left; circle x/y is its center; unconstrained text x/y is the content top-left.",
   },
 );
+server.server.oninitialized = () => {
+  mcpClientConnected = true;
+  console.error("MCP client initialized.");
+};
 
 const coordinate = z.number().finite().min(-10_000_000).max(10_000_000);
 const dimension = z.number().finite().positive().max(1_000_000);
@@ -216,6 +239,14 @@ const color = z
   .string()
   .regex(/^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/, "Use #RRGGBB or #RRGGBBAA.");
 const strokeWidth = z.number().finite().min(0).max(100).default(0);
+const textLayoutBox = z.object({
+  x: coordinate,
+  y: coordinate,
+  width: dimension,
+  height: dimension,
+  padding: z.number().finite().min(0).max(100_000).default(0),
+  verticalAlign: z.enum(["top", "middle", "bottom"]).default("top"),
+});
 
 const rectShape = z.object({
   type: z.literal("rect"),
@@ -251,11 +282,20 @@ const triangleShape = z.object({
 
 const textShape = z.object({
   type: z.literal("text"),
-  x: coordinate.describe("World-space left edge of the text line box."),
-  y: coordinate.describe("World-space top edge of the text line box."),
+  x: coordinate.default(0).describe("Content left edge. Ignored when box is supplied."),
+  y: coordinate.default(0).describe("Content top edge. Ignored when box is supplied."),
   text: z.string().min(1).max(1000),
   fontSize: z.number().finite().min(4).max(512).default(30),
   color: color.default("#141A21"),
+  maxWidth: dimension.optional().describe("Wrap text to this width in world-space pixels."),
+  lineHeight: z.number().finite().min(0.5).max(4).default(1.36181641),
+  maxLines: z.number().int().min(0).max(256).default(0).describe("0 means unlimited."),
+  align: z.enum(["left", "center", "right"]).default("left"),
+  box: textLayoutBox
+    .optional()
+    .describe(
+      "Containing rectangle for deterministic wrapping and vertical placement. Blitz derives the text origin and usable width.",
+    ),
 });
 
 const canvasShape = z.discriminatedUnion("type", [
@@ -265,12 +305,59 @@ const canvasShape = z.discriminatedUnion("type", [
   textShape,
 ]);
 
+const objectId = z
+  .string()
+  .regex(/^[0-9a-fA-F]{16}:[0-9a-fA-F]{16}$/, "Use a Blitz 128-bit object ID.");
+const commonUpdate = {
+  id: objectId,
+  x: coordinate.optional(),
+  y: coordinate.optional(),
+};
+const geometricUpdateStyle = {
+  backgroundColor: color.optional(),
+  strokeColor: color.optional(),
+  strokeWidth: z.number().finite().min(0).max(100).optional(),
+};
+const canvasObjectUpdate = z.discriminatedUnion("type", [
+  z.object({
+    ...commonUpdate,
+    ...geometricUpdateStyle,
+    type: z.literal("rect"),
+    width: dimension.optional(),
+    height: dimension.optional(),
+  }),
+  z.object({
+    ...commonUpdate,
+    ...geometricUpdateStyle,
+    type: z.literal("triangle"),
+    width: dimension.optional(),
+    height: dimension.optional(),
+  }),
+  z.object({
+    ...commonUpdate,
+    ...geometricUpdateStyle,
+    type: z.literal("circle"),
+    radius: dimension.optional(),
+  }),
+  z.object({
+    ...commonUpdate,
+    type: z.literal("text"),
+    text: z.string().min(1).max(1000).optional(),
+    fontSize: z.number().finite().min(4).max(512).optional(),
+    color: color.optional(),
+    maxWidth: dimension.nullable().optional(),
+    lineHeight: z.number().finite().min(0.5).max(4).optional(),
+    maxLines: z.number().int().min(0).max(256).optional(),
+    align: z.enum(["left", "center", "right"]).optional(),
+  }),
+]);
+
 server.registerTool(
   "canvas_add_shapes",
   {
     title: "Add shapes to Blitz",
     description:
-      "Add styled rectangles, circles, triangles, and text at explicit world-space positions.",
+      "Add styled rectangles, circles, triangles, and multiline text. Prefer text boxes for deterministic wrapping and vertical alignment inside cards or shapes.",
     inputSchema: z.object({
       shapes: z.array(canvasShape).min(1).max(100),
     }),
@@ -278,6 +365,29 @@ server.registerTool(
   async ({ shapes }) => {
     try {
       const result = await callCanvas("canvas.add_shapes", { shapes });
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "canvas_update_objects",
+  {
+    title: "Update Blitz objects",
+    description:
+      "Partially update existing objects by stable ID. Omitted fields are preserved. Text is revalidated and relaid out; use maxWidth null to remove wrapping.",
+    inputSchema: z.object({
+      updates: z.array(canvasObjectUpdate).min(1).max(100),
+    }),
+  },
+  async ({ updates }) => {
+    try {
+      const result = await callCanvas("canvas.update_objects", { updates });
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (error) {
       return {
@@ -330,6 +440,62 @@ server.registerTool(
   async (query) => {
     try {
       const result = await callCanvas("canvas.get_scene", query);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "canvas_get_text_capabilities",
+  {
+    title: "Get Blitz text capabilities",
+    description:
+      "Return the exact Unicode code-point ranges supported by the compiled Blitz font and explain replacement behavior for unsupported glyphs.",
+  },
+  async () => {
+    try {
+      const result = await callCanvas("canvas.get_text_capabilities");
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "canvas_measure_text",
+  {
+    title: "Measure Blitz text",
+    description:
+      "Validate, wrap, and measure text using the exact compiled Blitz font. Returns content/object bounds, cap height, x-height, ascender, descender, line advance, and exact first/last baseline offsets for alignment.",
+    inputSchema: z.object({
+      items: z
+        .array(
+          z.object({
+            text: z.string().max(1000),
+            fontSize: z.number().finite().min(4).max(512),
+            maxWidth: dimension.optional(),
+            lineHeight: z.number().finite().min(0.5).max(4).default(1.36181641),
+            maxLines: z.number().int().min(0).max(256).default(0),
+            align: z.enum(["left", "center", "right"]).default("left"),
+            box: textLayoutBox.optional(),
+          }),
+        )
+        .min(1)
+        .max(100),
+    }),
+  },
+  async ({ items }) => {
+    try {
+      const result = await callCanvas("canvas.measure_text", { items });
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (error) {
       return {

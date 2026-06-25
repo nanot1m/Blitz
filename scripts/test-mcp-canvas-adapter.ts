@@ -30,13 +30,93 @@ const added = adapter.addShapes([
   },
   {
     type: "text",
-    x: 2050,
-    y: 2250,
     text: "Scene query text",
     fontSize: 42,
     color: "#FFFFFF",
+    lineHeight: 1.4,
+    maxLines: 3,
+    align: "center",
+    box: {
+      x: 2000,
+      y: 2200,
+      width: 220,
+      height: 230,
+      padding: 16,
+      verticalAlign: "middle",
+    },
   },
 ]);
+
+const measurements = adapter.measureText([
+  {
+    text: "Scene query text",
+    fontSize: 42,
+    lineHeight: 1.4,
+    maxLines: 3,
+    align: "center",
+    box: {
+      x: 2000,
+      y: 2200,
+      width: 220,
+      height: 230,
+      padding: 16,
+      verticalAlign: "middle",
+    },
+  },
+  { text: "", fontSize: 30 },
+  { text: "Unsupported 😀", fontSize: 24 },
+]);
+if (
+  measurements.items.length !== 3 ||
+  measurements.items[0].width <= 0 ||
+  measurements.items[0].height <= 42 ||
+  measurements.items[0].ascender <= 0 ||
+  measurements.items[0].descender >= 0 ||
+  measurements.items[0].capHeight <= measurements.items[0].xHeight ||
+  measurements.items[0].firstBaselineFromObjectTop <= 4 ||
+  measurements.items[0].lastBaselineFromObjectTop <=
+    measurements.items[0].firstBaselineFromObjectTop ||
+  measurements.items[0].placement?.objectX !== 2016 ||
+  measurements.items[0].placement?.objectY <= 2216 ||
+  !measurements.items[0].fitsBox ||
+  measurements.items[0].lineCount < 2 ||
+  measurements.items[0].overflow ||
+  measurements.items[0].supported !== true ||
+  measurements.items[1].width !== 0 ||
+  measurements.items[2].supported !== false ||
+  measurements.items[2].unsupportedGlyphs[0]?.hex !== "U+1F600"
+) {
+  throw new Error(`Unexpected text measurements: ${JSON.stringify(measurements)}`);
+}
+const textCapabilities = adapter.getTextCapabilities();
+if (
+  textCapabilities.glyphCount < 900 ||
+  textCapabilities.replacementCodepoint !== 0xfffd ||
+  textCapabilities.metrics.capHeightRatio <= textCapabilities.metrics.xHeightRatio ||
+  textCapabilities.metrics.objectPadding !== 4 ||
+  !textCapabilities.ranges.some((range) => range.start <= 65 && range.end >= 90)
+) {
+  throw new Error(`Unexpected text capabilities: ${JSON.stringify(textCapabilities)}`);
+}
+try {
+  adapter.addShapes([
+    {
+      type: "text",
+      x: 0,
+      y: 0,
+      text: "This text must wrap beyond one line",
+      fontSize: 30,
+      color: "#FFFFFF",
+      maxWidth: 80,
+      maxLines: 1,
+    },
+  ]);
+  throw new Error("Expected overflowing constrained text to be rejected.");
+} catch (error) {
+  if (!(error instanceof Error) || !error.message.includes("maxLines")) {
+    throw error;
+  }
+}
 if (added.added !== 2 || added.ids.length !== 2) {
   throw new Error(`Unexpected add result: ${JSON.stringify(added)}`);
 }
@@ -47,6 +127,30 @@ if (
   throw new Error(`Object IDs were not returned as unique 128-bit strings: ${added.ids.join(", ")}`);
 }
 
+const updated = adapter.updateObjects([
+  {
+    id: added.ids[0],
+    type: "rect",
+    x: 1980,
+    width: 280,
+    backgroundColor: "#8844CC",
+  },
+  {
+    id: added.ids[1],
+    type: "text",
+    text: "Updated text wraps across lines",
+    x: 2040,
+    maxWidth: 150,
+    lineHeight: 1.5,
+    maxLines: 8,
+    align: "right",
+    color: "#CCFFEE",
+  },
+]);
+if (updated.updated !== 2 || updated.ids.join(",") !== added.ids.join(",")) {
+  throw new Error(`Unexpected update result: ${JSON.stringify(updated)}`);
+}
+
 const scene = adapter.getScene({
   bounds: { x: 1900, y: 2000, width: 500, height: 400 },
   limit: 10,
@@ -55,10 +159,23 @@ if (
   scene.returned !== 2 ||
   scene.total !== 2 ||
   scene.truncated ||
-  scene.objects[0]?.backgroundColor !== "#3366CC80" ||
-  scene.objects[1]?.text !== "Scene query text"
+  scene.objects[0]?.backgroundColor !== "#8844CC" ||
+  scene.objects[0]?.width !== 280 ||
+  scene.objects[1]?.text !== "Updated text wraps across lines" ||
+  scene.objects[1]?.maxWidth !== 150 ||
+  scene.objects[1]?.align !== "right"
 ) {
   throw new Error(`Unexpected scene query: ${JSON.stringify(scene)}`);
+}
+const createdText = scene.objects[1];
+if (
+  !createdText ||
+  Math.abs(createdText.width - 158) > 0.001 ||
+  createdText.height <= 8
+) {
+  throw new Error(
+    `Updated text bounds are invalid: ${JSON.stringify(createdText)}`,
+  );
 }
 
 const empty = adapter.findEmptySpace({

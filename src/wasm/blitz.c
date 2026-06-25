@@ -17,10 +17,12 @@ typedef unsigned int u32;
 #define BLITZ_MAX_SCENE_QUERY_ITEMS 65536u
 #define BLITZ_SCENE_FILE_BUFFER_BYTES (128u * 1024u * 1024u)
 #define BLITZ_SCENE_FILE_MAGIC 0x5a544c42u
-#define BLITZ_SCENE_FILE_VERSION 3u
+#define BLITZ_SCENE_FILE_VERSION 4u
 #define BLITZ_SCENE_FILE_HEADER_BYTES 32u
 #define BLITZ_SCENE_FILE_LEGACY_RECORD_BYTES 80u
 #define BLITZ_SCENE_FILE_RECORD_BYTES 92u
+#define BLITZ_SCENE_FILE_V4_RECORD_BYTES 108u
+#define BLITZ_MAX_TEXT_LAYOUT_LINES 256u
 
 #define BLITZ_INVALID_INDEX 0xffffffffu
 // High bit of a command's order word: set while the command's entity is being
@@ -40,6 +42,21 @@ typedef unsigned int u32;
 #define BLITZ_SHAPE_TRIANGLE 1u
 #define BLITZ_SHAPE_CIRCLE 2u
 #define BLITZ_SHAPE_TEXT 3u
+
+#define BLITZ_UPDATE_X 1u
+#define BLITZ_UPDATE_Y 2u
+#define BLITZ_UPDATE_WIDTH 4u
+#define BLITZ_UPDATE_HEIGHT 8u
+#define BLITZ_UPDATE_FILL 16u
+#define BLITZ_UPDATE_STROKE 32u
+#define BLITZ_UPDATE_STROKE_WIDTH 64u
+#define BLITZ_UPDATE_TEXT 128u
+#define BLITZ_UPDATE_FONT_SIZE 256u
+#define BLITZ_UPDATE_TEXT_COLOR 512u
+#define BLITZ_UPDATE_MAX_WIDTH 1024u
+#define BLITZ_UPDATE_LINE_HEIGHT 2048u
+#define BLITZ_UPDATE_MAX_LINES 4096u
+#define BLITZ_UPDATE_ALIGN 8192u
 
 typedef struct Vec2 {
   float x;
@@ -84,7 +101,17 @@ typedef struct TextView {
   float font_size;
   float origin_x;
   float baseline_offset;
+  float max_width;
+  float line_height;
+  u32 max_lines;
+  u32 align;
 } TextView;
+
+typedef struct TextLayoutLine {
+  u32 start;
+  u32 length;
+  float width;
+} TextLayoutLine;
 
 typedef struct BlitzUniforms {
   float viewport_camera[4];
@@ -139,7 +166,7 @@ typedef struct SceneItem {
   float bounds[4];
   float fill_color[4];
   float stroke_color[4];
-  float style[2];
+  float style[6];
 } SceneItem;
 
 typedef struct World {
@@ -168,12 +195,19 @@ static ShapeCommand dyn_commands[BLITZ_MAX_DYN_COMMANDS];
 static RectDraw dyn_rects[BLITZ_MAX_DYN_RECTS];
 static char text_input[BLITZ_TEXT_INPUT_BYTES];
 static char text_pool[BLITZ_TEXT_POOL_BYTES];
+static TextLayoutLine text_layout_lines[BLITZ_MAX_TEXT_LAYOUT_LINES];
+static u32 text_layout_line_count;
+static float text_layout_width;
+static float text_layout_height;
+static u32 text_layout_overflow;
 static u32 text_pool_used;
 static SceneItem scene_query_items[BLITZ_MAX_SCENE_QUERY_ITEMS];
 static u32 scene_query_count;
 static u32 scene_query_total;
 static unsigned char scene_file_buffer[BLITZ_SCENE_FILE_BUFFER_BYTES];
 static float selected_style[13];
+static SceneItem selected_debug_item;
+static u32 selected_debug_mask;
 static World world;
 static u32 shape_command_count;
 static u32 rect_draw_count;
@@ -307,6 +341,16 @@ static void advance_sequence_past(ObjectId id) {
       next_object_id_sequence_hi += 1u;
     }
   }
+}
+
+static u32 entity_for_object_id(ObjectId id) {
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.masks[entity] != 0u &&
+        object_id_equal(world.object_ids[entity], id)) {
+      return entity;
+    }
+  }
+  return BLITZ_INVALID_INDEX;
 }
 
 static void write_f32(unsigned char *buffer, u32 offset, float value) {
@@ -455,7 +499,8 @@ static void ecs_set_circle_view(u32 entity, Color fill_color,
 
 static void ecs_set_text_view(u32 entity, const char *text, Color color,
                               float font_size, float origin_x,
-                              float baseline_offset) {
+                              float baseline_offset, float max_width,
+                              float line_height, u32 max_lines, u32 align) {
   if (entity == BLITZ_INVALID_INDEX) {
     return;
   }
@@ -464,6 +509,10 @@ static void ecs_set_text_view(u32 entity, const char *text, Color color,
   world.text_views[entity].font_size = font_size;
   world.text_views[entity].origin_x = origin_x;
   world.text_views[entity].baseline_offset = baseline_offset;
+  world.text_views[entity].max_width = max_width;
+  world.text_views[entity].line_height = line_height;
+  world.text_views[entity].max_lines = max_lines;
+  world.text_views[entity].align = align;
   world.masks[entity] |= BLITZ_COMPONENT_TEXT_VIEW;
 }
 
@@ -845,42 +894,229 @@ static float font_text_width(const char *text, float font_size) {
   return width;
 }
 
+static const char *skip_wrap_spaces(const char *cursor) {
+  while (*cursor == ' ' || *cursor == '\t') {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+static const char *font_text_line(const char *start, float font_size,
+                                  float max_width, const char **next,
+                                  float *line_width) {
+  const char *cursor = start;
+  const char *last_break = 0;
+  const char *last_break_next = 0;
+  float width = 0.0f;
+  float width_before_break = 0.0f;
+  while (*cursor != '\0') {
+    const char *glyph_start = cursor;
+    u32 codepoint = utf8_next(&cursor);
+    if (codepoint == (u32)'\n') {
+      *next = cursor;
+      *line_width = width;
+      return glyph_start;
+    }
+    const FontGlyphMetric *glyph = font_glyph_metric(codepoint);
+    float advance = glyph->advance * font_size;
+    if (max_width > 0.0f && width + advance > max_width &&
+        glyph_start != start) {
+      if (last_break) {
+        *next = skip_wrap_spaces(last_break_next);
+        *line_width = width_before_break;
+        return last_break;
+      }
+      *next = glyph_start;
+      *line_width = width;
+      return glyph_start;
+    }
+    if (codepoint == (u32)' ' || codepoint == (u32)'\t') {
+      last_break = glyph_start;
+      last_break_next = cursor;
+      width_before_break = width;
+    }
+    width += advance;
+  }
+  *next = cursor;
+  *line_width = width;
+  return cursor;
+}
+
+static void layout_text(const char *text, float font_size, float max_width,
+                        float line_height, u32 max_lines) {
+  text_layout_line_count = 0u;
+  text_layout_width = 0.0f;
+  text_layout_height = 0.0f;
+  text_layout_overflow = 0u;
+  if (line_height <= 0.0f) {
+    line_height = BLITZ_FONT_LINE_HEIGHT;
+  }
+  if (max_lines == 0u || max_lines > BLITZ_MAX_TEXT_LAYOUT_LINES) {
+    max_lines = BLITZ_MAX_TEXT_LAYOUT_LINES;
+  }
+  const char *cursor = text;
+  u32 pending = 1u;
+  while (pending) {
+    if (text_layout_line_count >= max_lines) {
+      text_layout_overflow = *cursor != '\0';
+      break;
+    }
+    const char *next;
+    float width;
+    const char *end = font_text_line(cursor, font_size, max_width, &next, &width);
+    TextLayoutLine *line = &text_layout_lines[text_layout_line_count];
+    line->start = (u32)(cursor - text);
+    line->length = (u32)(end - cursor);
+    line->width = width;
+    text_layout_line_count += 1u;
+    if (width > text_layout_width) {
+      text_layout_width = width;
+    }
+    if (next == cursor && *cursor != '\0') {
+      utf8_next(&next);
+    }
+    const char *previous = cursor;
+    cursor = next;
+    pending = *cursor != '\0' ||
+              (cursor != previous && cursor > text && cursor[-1] == '\n');
+  }
+  text_layout_overflow |= *cursor != '\0';
+  text_layout_height =
+      (float)text_layout_line_count * line_height * font_size;
+}
+
+EXPORT("blitz_measure_text_width")
+float blitz_measure_text_width(u32 text_length, float font_size) {
+  if (font_size <= 0.0f || text_length >= BLITZ_TEXT_INPUT_BYTES) {
+    return -1.0f;
+  }
+  text_input[text_length] = '\0';
+  return font_text_width(text_input, font_size);
+}
+
+EXPORT("blitz_layout_text")
+u32 blitz_layout_text(u32 text_length, float font_size, float max_width,
+                      float line_height, u32 max_lines) {
+  if (font_size <= 0.0f || text_length >= BLITZ_TEXT_INPUT_BYTES) {
+    return 0u;
+  }
+  text_input[text_length] = '\0';
+  layout_text(text_input, font_size, max_width, line_height, max_lines);
+  return text_layout_line_count;
+}
+
+EXPORT("blitz_text_layout_ptr")
+u32 blitz_text_layout_ptr(void) {
+  return (u32)&text_layout_lines[0];
+}
+
+EXPORT("blitz_text_layout_line_bytes")
+u32 blitz_text_layout_line_bytes(void) {
+  return sizeof(TextLayoutLine);
+}
+
+EXPORT("blitz_text_layout_width")
+float blitz_text_layout_width(void) {
+  return text_layout_width;
+}
+
+EXPORT("blitz_text_layout_height")
+float blitz_text_layout_height(void) {
+  return text_layout_height;
+}
+
+EXPORT("blitz_text_layout_overflow")
+u32 blitz_text_layout_overflow(void) {
+  return text_layout_overflow;
+}
+
+EXPORT("blitz_font_ascender")
+float blitz_font_ascender(void) {
+  return BLITZ_FONT_ASCENDER;
+}
+
+EXPORT("blitz_font_descender")
+float blitz_font_descender(void) {
+  return BLITZ_FONT_DESCENDER;
+}
+
+EXPORT("blitz_font_line_height")
+float blitz_font_line_height(void) {
+  return BLITZ_FONT_LINE_HEIGHT;
+}
+
+EXPORT("blitz_font_cap_height")
+float blitz_font_cap_height(void) {
+  return BLITZ_FONT_CAP_HEIGHT;
+}
+
+EXPORT("blitz_font_x_height")
+float blitz_font_x_height(void) {
+  return BLITZ_FONT_X_HEIGHT;
+}
+
+EXPORT("blitz_font_glyph_count")
+u32 blitz_font_glyph_count(void) {
+  return BLITZ_FONT_GLYPH_COUNT;
+}
+
+EXPORT("blitz_font_glyph_codepoint")
+u32 blitz_font_glyph_codepoint(u32 index) {
+  if (index >= BLITZ_FONT_GLYPH_COUNT) {
+    return BLITZ_FONT_REPLACEMENT_CODEPOINT;
+  }
+  return blitz_font_glyphs[index].codepoint;
+}
+
 static void push_text_draws(u32 entity, u32 order) {
   TextView view = world.text_views[entity];
   Vec2 position = world.positions[entity];
-  const char *text = view.text;
-  float pen_x = position.x + view.origin_x;
-  float baseline_y = position.y + view.baseline_offset;
-  while (*text != '\0') {
-    u32 codepoint = utf8_next(&text);
-    const FontGlyphMetric *glyph = font_glyph_metric(codepoint);
-
-    if (codepoint != (u32)' ' &&
-        dyn_command_count < BLITZ_MAX_DYN_COMMANDS &&
-        text_draw_count < BLITZ_MAX_TEXT_DRAWS) {
-      TextDraw *draw = &text_draws[text_draw_count];
-      draw->rect[0] = pen_x + glyph->plane_left * view.font_size;
-      draw->rect[1] = baseline_y + glyph->plane_top * view.font_size;
-      draw->rect[2] = glyph->plane_width * view.font_size;
-      draw->rect[3] = glyph->plane_height * view.font_size;
-      draw->uv_rect[0] = glyph->uv_left;
-      draw->uv_rect[1] = glyph->uv_top;
-      draw->uv_rect[2] = glyph->uv_right;
-      draw->uv_rect[3] = glyph->uv_bottom;
-      draw->color[0] = view.color.r;
-      draw->color[1] = view.color.g;
-      draw->color[2] = view.color.b;
-      draw->color[3] = view.color.a;
-
-      dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_TEXT;
-      dyn_commands[dyn_command_count].shape_index = text_draw_count;
-      dyn_commands[dyn_command_count].entity = entity;
-      dyn_commands[dyn_command_count]._pad0 = order;
-      text_draw_count += 1u;
-      dyn_command_count += 1u;
+  layout_text(view.text, view.font_size, view.max_width, view.line_height,
+              view.max_lines);
+  float layout_width =
+      view.max_width > 0.0f ? view.max_width : text_layout_width;
+  for (u32 line_index = 0u; line_index < text_layout_line_count; line_index += 1u) {
+    TextLayoutLine line = text_layout_lines[line_index];
+    const char *text = view.text + line.start;
+    const char *end = text + line.length;
+    float alignment_offset = 0.0f;
+    if (view.align == 1u) {
+      alignment_offset = (layout_width - line.width) * 0.5f;
+    } else if (view.align == 2u) {
+      alignment_offset = layout_width - line.width;
     }
-
-    pen_x += glyph->advance * view.font_size;
+    float pen_x = position.x + view.origin_x + alignment_offset;
+    float baseline_y =
+        position.y + view.baseline_offset +
+        (float)line_index * view.line_height * view.font_size;
+    while (text < end) {
+      u32 codepoint = utf8_next(&text);
+      const FontGlyphMetric *glyph = font_glyph_metric(codepoint);
+      if (codepoint != (u32)' ' &&
+          dyn_command_count < BLITZ_MAX_DYN_COMMANDS &&
+          text_draw_count < BLITZ_MAX_TEXT_DRAWS) {
+        TextDraw *draw = &text_draws[text_draw_count];
+        draw->rect[0] = pen_x + glyph->plane_left * view.font_size;
+        draw->rect[1] = baseline_y + glyph->plane_top * view.font_size;
+        draw->rect[2] = glyph->plane_width * view.font_size;
+        draw->rect[3] = glyph->plane_height * view.font_size;
+        draw->uv_rect[0] = glyph->uv_left;
+        draw->uv_rect[1] = glyph->uv_top;
+        draw->uv_rect[2] = glyph->uv_right;
+        draw->uv_rect[3] = glyph->uv_bottom;
+        draw->color[0] = view.color.r;
+        draw->color[1] = view.color.g;
+        draw->color[2] = view.color.b;
+        draw->color[3] = view.color.a;
+        dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_TEXT;
+        dyn_commands[dyn_command_count].shape_index = text_draw_count;
+        dyn_commands[dyn_command_count].entity = entity;
+        dyn_commands[dyn_command_count]._pad0 = order;
+        text_draw_count += 1u;
+        dyn_command_count += 1u;
+      }
+      pen_x += glyph->advance * view.font_size;
+    }
   }
 }
 
@@ -1287,10 +1523,21 @@ static u32 create_base_triangle(float x, float y, float width, float height,
 }
 
 static u32 create_base_text(const char *text, float x, float top,
-                            float font_size, Color color) {
+                            float font_size, Color color, float max_width,
+                            float line_height, u32 max_lines, u32 align) {
   float padding = 4.0f;
-  float width = font_text_width(text, font_size);
-  float height = BLITZ_FONT_LINE_HEIGHT * font_size;
+  if (!(max_width > 0.0f)) {
+    max_width = 0.0f;
+  }
+  if (!(line_height > 0.0f)) {
+    line_height = BLITZ_FONT_LINE_HEIGHT;
+  }
+  if (align > 2u) {
+    align = 0u;
+  }
+  layout_text(text, font_size, max_width, line_height, max_lines);
+  float width = max_width > 0.0f ? max_width : text_layout_width;
+  float height = text_layout_height;
   u32 entity = ecs_create_entity();
   if (entity == BLITZ_INVALID_INDEX) {
     return entity;
@@ -1298,7 +1545,8 @@ static u32 create_base_text(const char *text, float x, float top,
   ecs_set_position(entity, x - padding, top - padding);
   ecs_set_size(entity, width + padding * 2.0f, height + padding * 2.0f);
   ecs_set_text_view(entity, text, color, font_size, padding,
-                    padding + BLITZ_FONT_ASCENDER * font_size);
+                    padding + BLITZ_FONT_ASCENDER * font_size, max_width,
+                    line_height, max_lines, align);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
   if (history_transaction_active) {
     history_record_created(entity);
@@ -1321,7 +1569,8 @@ static u32 create_slide_text(const char *text, float x, float baseline_y,
                              float font_size, Color color) {
   float top = baseline_y - BLITZ_FONT_ASCENDER * font_size;
   return create_base_text(text, slide_origin_x + x, slide_origin_y + top,
-                          font_size, color);
+                          font_size, color, 0.0f, BLITZ_FONT_LINE_HEIGHT, 0u,
+                          0u);
 }
 
 static u32 create_user_rect(float x, float y) {
@@ -1349,7 +1598,8 @@ static u32 create_user_text(float x, float y) {
   float height = BLITZ_FONT_LINE_HEIGHT * font_size;
   return create_base_text(text, x - width * 0.5f, y - height * 0.5f,
                           font_size,
-                          (Color){0.08f, 0.10f, 0.13f, 1.0f});
+                          (Color){0.08f, 0.10f, 0.13f, 1.0f}, 0.0f,
+                          BLITZ_FONT_LINE_HEIGHT, 0u, 0u);
 }
 
 static const char *copy_text_input(u32 text_length) {
@@ -1936,7 +2186,8 @@ u32 blitz_text_input_capacity(void) {
 EXPORT("blitz_create_text")
 u32 blitz_create_text(float x, float y, float font_size, float color_r,
                       float color_g, float color_b, float color_a,
-                      u32 text_length) {
+                      u32 text_length, float max_width, float line_height,
+                      u32 max_lines, u32 align) {
   if (font_size <= 0.0f || text_length == 0u) {
     return BLITZ_INVALID_INDEX;
   }
@@ -1946,7 +2197,8 @@ u32 blitz_create_text(float x, float y, float font_size, float color_r,
   }
   u32 history_owned = history_begin_owned();
   u32 entity = create_base_text(
-      text, x, y, font_size, (Color){color_r, color_g, color_b, color_a});
+      text, x, y, font_size, (Color){color_r, color_g, color_b, color_a},
+      max_width, line_height, max_lines, align);
   if (entity == BLITZ_INVALID_INDEX) {
     if (history_owned) history_cancel();
     return entity;
@@ -1955,6 +2207,137 @@ u32 blitz_create_text(float x, float y, float font_size, float color_r,
   mark_render_list_dirty();
   if (history_owned) history_commit();
   return entity;
+}
+
+// Returns 0 on success, 1 when the object is missing, 2 for a type mismatch,
+// 3 for invalid values, and 4 when updated text cannot be allocated.
+EXPORT("blitz_update_object")
+u32 blitz_update_object(
+    u32 actor_hi, u32 actor_lo, u32 sequence_hi, u32 sequence_lo,
+    u32 expected_kind, u32 flags, float x, float y, float width, float height,
+    float fill_r, float fill_g, float fill_b, float fill_a, float stroke_r,
+    float stroke_g, float stroke_b, float stroke_a, float stroke_width,
+    float font_size, float text_r, float text_g, float text_b, float text_a,
+    u32 text_length, float max_width, float line_height, u32 max_lines,
+    u32 align) {
+  ObjectId id = {actor_hi, actor_lo, sequence_hi, sequence_lo};
+  u32 entity = entity_for_object_id(id);
+  if (entity == BLITZ_INVALID_INDEX) {
+    return 1u;
+  }
+  u32 mask = world.masks[entity];
+  u32 kind = mask & BLITZ_COMPONENT_RECT_VIEW
+                 ? BLITZ_SHAPE_RECT
+                 : (mask & BLITZ_COMPONENT_TRIANGLE_VIEW
+                        ? BLITZ_SHAPE_TRIANGLE
+                        : (mask & BLITZ_COMPONENT_CIRCLE_VIEW
+                               ? BLITZ_SHAPE_CIRCLE
+                               : BLITZ_SHAPE_TEXT));
+  if (kind != expected_kind) {
+    return 2u;
+  }
+  if (((flags & BLITZ_UPDATE_WIDTH) && width <= 0.0f) ||
+      ((flags & BLITZ_UPDATE_HEIGHT) && height <= 0.0f)) {
+    return 3u;
+  }
+  if ((flags & BLITZ_UPDATE_STROKE_WIDTH) && stroke_width < 0.0f) {
+    return 3u;
+  }
+  if (((flags & BLITZ_UPDATE_FONT_SIZE) && font_size <= 0.0f) ||
+      ((flags & BLITZ_UPDATE_MAX_WIDTH) && max_width < 0.0f) ||
+      ((flags & BLITZ_UPDATE_LINE_HEIGHT) && line_height <= 0.0f) ||
+      ((flags & BLITZ_UPDATE_ALIGN) && align > 2u)) {
+    return 3u;
+  }
+
+  history_record_before(entity);
+  if (kind == BLITZ_SHAPE_CIRCLE) {
+    Vec2 size = world.sizes[entity];
+    float center_x = world.positions[entity].x + size.x * 0.5f;
+    float center_y = world.positions[entity].y + size.y * 0.5f;
+    if (flags & BLITZ_UPDATE_X) center_x = x;
+    if (flags & BLITZ_UPDATE_Y) center_y = y;
+    if (flags & BLITZ_UPDATE_WIDTH) {
+      size.x = width;
+      size.y = width;
+    }
+    world.sizes[entity] = size;
+    world.positions[entity].x = center_x - size.x * 0.5f;
+    world.positions[entity].y = center_y - size.y * 0.5f;
+  } else if (kind == BLITZ_SHAPE_TEXT) {
+    TextView *view = &world.text_views[entity];
+    float padding = view->origin_x;
+    float next_font_size =
+        flags & BLITZ_UPDATE_FONT_SIZE ? font_size : view->font_size;
+    float next_max_width =
+        flags & BLITZ_UPDATE_MAX_WIDTH ? max_width : view->max_width;
+    float next_line_height =
+        flags & BLITZ_UPDATE_LINE_HEIGHT ? line_height : view->line_height;
+    u32 next_max_lines =
+        flags & BLITZ_UPDATE_MAX_LINES ? max_lines : view->max_lines;
+    u32 next_align = flags & BLITZ_UPDATE_ALIGN ? align : view->align;
+    const char *next_text = view->text;
+    if (flags & BLITZ_UPDATE_TEXT) {
+      next_text = copy_text_input(text_length);
+      if (!next_text) {
+        return 4u;
+      }
+    }
+    layout_text(next_text, next_font_size, next_max_width, next_line_height,
+                next_max_lines);
+    if (text_layout_overflow) {
+      return 5u;
+    }
+    view->text = next_text;
+    view->font_size = next_font_size;
+    view->max_width = next_max_width;
+    view->line_height = next_line_height;
+    view->max_lines = next_max_lines;
+    view->align = next_align;
+    view->baseline_offset = padding + BLITZ_FONT_ASCENDER * next_font_size;
+    if (flags & BLITZ_UPDATE_X) world.positions[entity].x = x - padding;
+    if (flags & BLITZ_UPDATE_Y) world.positions[entity].y = y - padding;
+    world.sizes[entity].x =
+        (next_max_width > 0.0f ? next_max_width : text_layout_width) +
+        padding * 2.0f;
+    world.sizes[entity].y = text_layout_height + padding * 2.0f;
+    if (flags & BLITZ_UPDATE_TEXT_COLOR) {
+      view->color = (Color){text_r, text_g, text_b, text_a};
+    }
+  } else {
+    if (flags & BLITZ_UPDATE_X) world.positions[entity].x = x;
+    if (flags & BLITZ_UPDATE_Y) world.positions[entity].y = y;
+    if (flags & BLITZ_UPDATE_WIDTH) world.sizes[entity].x = width;
+    if (flags & BLITZ_UPDATE_HEIGHT) world.sizes[entity].y = height;
+  }
+
+  if (kind == BLITZ_SHAPE_RECT) {
+    RectView *view = &world.rect_views[entity];
+    if (flags & BLITZ_UPDATE_FILL)
+      view->fill_color = (Color){fill_r, fill_g, fill_b, fill_a};
+    if (flags & BLITZ_UPDATE_STROKE)
+      view->stroke_color = (Color){stroke_r, stroke_g, stroke_b, stroke_a};
+    if (flags & BLITZ_UPDATE_STROKE_WIDTH)
+      view->stroke_width = stroke_width;
+  } else if (kind == BLITZ_SHAPE_TRIANGLE) {
+    TriangleView *view = &world.triangle_views[entity];
+    if (flags & BLITZ_UPDATE_FILL)
+      view->fill_color = (Color){fill_r, fill_g, fill_b, fill_a};
+    if (flags & BLITZ_UPDATE_STROKE)
+      view->stroke_color = (Color){stroke_r, stroke_g, stroke_b, stroke_a};
+    if (flags & BLITZ_UPDATE_STROKE_WIDTH)
+      view->stroke_width = stroke_width;
+  } else if (kind == BLITZ_SHAPE_CIRCLE) {
+    CircleView *view = &world.circle_views[entity];
+    if (flags & BLITZ_UPDATE_FILL)
+      view->fill_color = (Color){fill_r, fill_g, fill_b, fill_a};
+    if (flags & BLITZ_UPDATE_STROKE)
+      view->stroke_color = (Color){stroke_r, stroke_g, stroke_b, stroke_a};
+    if (flags & BLITZ_UPDATE_STROKE_WIDTH)
+      view->stroke_width = stroke_width;
+  }
+  mark_render_list_dirty();
+  return 0u;
 }
 
 EXPORT("blitz_query_scene")
@@ -2040,6 +2423,14 @@ u32 blitz_query_scene(float min_x, float min_y, float max_x, float max_y,
     item->stroke_color[3] = stroke.a;
     item->style[0] = stroke_width;
     item->style[1] = font_size;
+    item->style[2] =
+        kind == BLITZ_SHAPE_TEXT ? world.text_views[entity].max_width : 0.0f;
+    item->style[3] =
+        kind == BLITZ_SHAPE_TEXT ? world.text_views[entity].line_height : 0.0f;
+    item->style[4] =
+        kind == BLITZ_SHAPE_TEXT ? (float)world.text_views[entity].max_lines : 0.0f;
+    item->style[5] =
+        kind == BLITZ_SHAPE_TEXT ? (float)world.text_views[entity].align : 0.0f;
     scene_query_count += 1u;
   }
   return scene_query_count;
@@ -2102,6 +2493,10 @@ u32 blitz_scene_serialize(void) {
     float font_size = 0.0f;
     float origin_x = 0.0f;
     float baseline_offset = 0.0f;
+    float max_width = 0.0f;
+    float line_height = BLITZ_FONT_LINE_HEIGHT;
+    u32 max_lines = 0u;
+    u32 align = 0u;
     const char *text = 0;
     u32 text_length = 0u;
 
@@ -2130,13 +2525,17 @@ u32 blitz_scene_serialize(void) {
       font_size = view.font_size;
       origin_x = view.origin_x;
       baseline_offset = view.baseline_offset;
+      max_width = view.max_width;
+      line_height = view.line_height;
+      max_lines = view.max_lines;
+      align = view.align;
       text = view.text;
       text_length = string_length(text);
     } else {
       continue;
     }
 
-    u32 record_bytes = BLITZ_SCENE_FILE_RECORD_BYTES + align4(text_length);
+    u32 record_bytes = BLITZ_SCENE_FILE_V4_RECORD_BYTES + align4(text_length);
     if (offset + record_bytes > BLITZ_SCENE_FILE_BUFFER_BYTES) {
       return 0u;
     }
@@ -2167,8 +2566,12 @@ u32 blitz_scene_serialize(void) {
     write_u32(scene_file_buffer, offset + 80u, object_id.actor_hi);
     write_u32(scene_file_buffer, offset + 84u, object_id.actor_lo);
     write_u32(scene_file_buffer, offset + 88u, object_id.sequence_hi);
+    write_f32(scene_file_buffer, offset + 92u, max_width);
+    write_f32(scene_file_buffer, offset + 96u, line_height);
+    write_u32(scene_file_buffer, offset + 100u, max_lines);
+    write_u32(scene_file_buffer, offset + 104u, align);
     for (u32 i = 0u; i < align4(text_length); i += 1u) {
-      scene_file_buffer[offset + BLITZ_SCENE_FILE_RECORD_BYTES + i] =
+      scene_file_buffer[offset + BLITZ_SCENE_FILE_V4_RECORD_BYTES + i] =
           i < text_length ? (unsigned char)text[i] : 0u;
     }
     offset += record_bytes;
@@ -2197,7 +2600,7 @@ u32 blitz_scene_deserialize(u32 byte_count) {
     return 2u;
   }
   u32 file_version = read_u32(scene_file_buffer, 4u);
-  if (file_version != 1u && file_version != 2u &&
+  if (file_version != 1u && file_version != 2u && file_version != 3u &&
       file_version != BLITZ_SCENE_FILE_VERSION) {
     return 3u;
   }
@@ -2218,9 +2621,11 @@ u32 blitz_scene_deserialize(u32 byte_count) {
 
   u32 offset = BLITZ_SCENE_FILE_HEADER_BYTES;
   u32 required_text_bytes = 0u;
-  u32 fixed_record_bytes = file_version >= 3u
-                               ? BLITZ_SCENE_FILE_RECORD_BYTES
-                               : BLITZ_SCENE_FILE_LEGACY_RECORD_BYTES;
+  u32 fixed_record_bytes =
+      file_version >= 4u
+          ? BLITZ_SCENE_FILE_V4_RECORD_BYTES
+          : (file_version >= 3u ? BLITZ_SCENE_FILE_RECORD_BYTES
+                                : BLITZ_SCENE_FILE_LEGACY_RECORD_BYTES);
   for (u32 index = 0u; index < object_count; index += 1u) {
     if (offset + fixed_record_bytes > byte_count) {
       return 7u;
@@ -2290,6 +2695,15 @@ u32 blitz_scene_deserialize(u32 byte_count) {
     float font_size = read_f32(scene_file_buffer, offset + 68u);
     float origin_x = read_f32(scene_file_buffer, offset + 72u);
     float baseline_offset = read_f32(scene_file_buffer, offset + 76u);
+    float max_width =
+        file_version >= 4u ? read_f32(scene_file_buffer, offset + 92u) : 0.0f;
+    float line_height = file_version >= 4u
+                            ? read_f32(scene_file_buffer, offset + 96u)
+                            : BLITZ_FONT_LINE_HEIGHT;
+    u32 max_lines =
+        file_version >= 4u ? read_u32(scene_file_buffer, offset + 100u) : 0u;
+    u32 align =
+        file_version >= 4u ? read_u32(scene_file_buffer, offset + 104u) : 0u;
 
     u32 entity = ecs_create_entity();
     if (entity == BLITZ_INVALID_INDEX) {
@@ -2320,7 +2734,8 @@ u32 blitz_scene_deserialize(u32 byte_count) {
       text[text_length] = '\0';
       text_pool_used += text_length + 1u;
       ecs_set_text_view(entity, text, fill, font_size, origin_x,
-                        baseline_offset);
+                        baseline_offset, max_width, line_height, max_lines,
+                        align);
     }
     world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
     world.selected[entity] = 0u;
@@ -2391,6 +2806,96 @@ void blitz_delete_selected(void) {
 EXPORT("blitz_has_selection")
 u32 blitz_has_selection(void) {
   return selected_count > 0u;
+}
+
+EXPORT("blitz_selected_debug_ptr")
+u32 blitz_selected_debug_ptr(void) {
+  selected_debug_mask = 0u;
+  if (selected_count != 1u) {
+    return 0u;
+  }
+  u32 order = 0u;
+  u32 entity = BLITZ_INVALID_INDEX;
+  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
+    if (world.selected[world.draw_order[i]]) {
+      entity = world.draw_order[i];
+      order = i;
+      break;
+    }
+  }
+  if (entity == BLITZ_INVALID_INDEX) {
+    return 0u;
+  }
+  u32 mask = world.masks[entity];
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  Color fill = {0.0f, 0.0f, 0.0f, 0.0f};
+  Color stroke = {0.0f, 0.0f, 0.0f, 0.0f};
+  float stroke_width = 0.0f;
+  float font_size = 0.0f;
+  const char *text = 0;
+  u32 kind = BLITZ_INVALID_INDEX;
+  if (mask & BLITZ_COMPONENT_RECT_VIEW) {
+    RectView view = world.rect_views[entity];
+    kind = BLITZ_SHAPE_RECT;
+    fill = view.fill_color;
+    stroke = view.stroke_color;
+    stroke_width = view.stroke_width;
+  } else if (mask & BLITZ_COMPONENT_TRIANGLE_VIEW) {
+    TriangleView view = world.triangle_views[entity];
+    kind = BLITZ_SHAPE_TRIANGLE;
+    fill = view.fill_color;
+    stroke = view.stroke_color;
+    stroke_width = view.stroke_width;
+  } else if (mask & BLITZ_COMPONENT_CIRCLE_VIEW) {
+    CircleView view = world.circle_views[entity];
+    kind = BLITZ_SHAPE_CIRCLE;
+    fill = view.fill_color;
+    stroke = view.stroke_color;
+    stroke_width = view.stroke_width;
+  } else if (mask & BLITZ_COMPONENT_TEXT_VIEW) {
+    TextView view = world.text_views[entity];
+    kind = BLITZ_SHAPE_TEXT;
+    fill = view.color;
+    font_size = view.font_size;
+    text = view.text;
+  }
+  selected_debug_item.object_id = world.object_ids[entity];
+  selected_debug_item.shape_kind = kind;
+  selected_debug_item.order = order;
+  selected_debug_item.selected = 1u;
+  selected_debug_item.text_ptr = text ? (u32)text : 0u;
+  selected_debug_item.text_length = text ? string_length(text) : 0u;
+  selected_debug_item._pad0 = entity;
+  selected_debug_item.bounds[0] = position.x;
+  selected_debug_item.bounds[1] = position.y;
+  selected_debug_item.bounds[2] = size.x;
+  selected_debug_item.bounds[3] = size.y;
+  selected_debug_item.fill_color[0] = fill.r;
+  selected_debug_item.fill_color[1] = fill.g;
+  selected_debug_item.fill_color[2] = fill.b;
+  selected_debug_item.fill_color[3] = fill.a;
+  selected_debug_item.stroke_color[0] = stroke.r;
+  selected_debug_item.stroke_color[1] = stroke.g;
+  selected_debug_item.stroke_color[2] = stroke.b;
+  selected_debug_item.stroke_color[3] = stroke.a;
+  selected_debug_item.style[0] = stroke_width;
+  selected_debug_item.style[1] = font_size;
+  selected_debug_item.style[2] =
+      kind == BLITZ_SHAPE_TEXT ? world.text_views[entity].max_width : 0.0f;
+  selected_debug_item.style[3] =
+      kind == BLITZ_SHAPE_TEXT ? world.text_views[entity].line_height : 0.0f;
+  selected_debug_item.style[4] =
+      kind == BLITZ_SHAPE_TEXT ? (float)world.text_views[entity].max_lines : 0.0f;
+  selected_debug_item.style[5] =
+      kind == BLITZ_SHAPE_TEXT ? (float)world.text_views[entity].align : 0.0f;
+  selected_debug_mask = mask;
+  return (u32)&selected_debug_item;
+}
+
+EXPORT("blitz_selected_debug_mask")
+u32 blitz_selected_debug_mask(void) {
+  return selected_debug_mask;
 }
 
 // Capability mask: bit 0 = geometric styles, bit 1 = text color.

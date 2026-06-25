@@ -10,6 +10,7 @@
     "build:font": "node scripts/compile-font.mjs",
     "build:wasm": "npm run build:font && node scripts/build-wasm.mjs",
     "mcp:server": "tsx mcp/server.ts",
+    "setup:mcp": "node scripts/setup-local-mcp.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "test:mcp": "tsx scripts/test-mcp-canvas-adapter.ts && node scripts/test-mcp-bridge.mjs",
     "test:storage": "tsx scripts/test-scene-binary.ts && tsx scripts/test-scene-history.ts",

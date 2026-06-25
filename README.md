@@ -29,6 +29,7 @@ Other commands:
 ```sh
 npm run build       # Build WASM, type-check, and create the production bundle
 npm run typecheck   # Type-check the browser and MCP code
+npm run setup:mcp   # Run the interactive local MCP setup
 npm run test:mcp    # Test the WASM adapter and secure MCP bridge
 npm run test:storage # Test binary scene serialization and restoration
 npm run preview     # Serve the production bundle locally
@@ -72,7 +73,7 @@ The binary format is serialized and deserialized entirely inside WASM. It preser
 - Stable 128-bit object IDs
 - An optional starting viewpoint
 
-Current files use format version 3. Version 1 and 2 files remain readable and their legacy IDs are migrated into the 128-bit namespace.
+Current files use format version 4. Versions 1–3 remain readable; legacy IDs are migrated into the 128-bit namespace and older text records receive single-line layout defaults.
 
 Chromium browsers use the File System Access API, allowing subsequent saves to overwrite the selected file. Browsers without that API use file upload and download fallbacks.
 
@@ -115,44 +116,48 @@ browser bridge
 Blitz ECS
 ```
 
-The local connection requires:
+The local connection uses:
 
 - A locally trusted TLS certificate
 - An exact browser-origin allowlist
 - A shared token containing at least 24 characters
 
-### Certificate and token setup
+### Guided setup
 
-Install [`mkcert`](https://github.com/FiloSottile/mkcert), then run:
+Run:
 
 ```sh
-mkcert -install
-mkdir -p .cert
-mkcert \
-  -key-file .cert/localhost-key.pem \
-  -cert-file .cert/localhost.pem \
-  localhost 127.0.0.1 ::1
-
-openssl rand -hex 32 > .cert/bridge-token
-chmod 600 .cert/bridge-token
+npm run setup:mcp
 ```
 
-The `.cert` directory is ignored by Git.
+The interactive setup clears the terminal and opens a live dashboard. The browser URL, token, MCP server state, MCP client state, and canvas connection state remain at the top while status refreshes. It creates the localhost certificate and bridge token when missing. If [`mkcert`](https://github.com/FiloSottile/mkcert) is missing and a supported package manager is available, the CLI offers to install it.
+
+The dashboard can launch a standalone bridge for connection diagnostics. Normal MCP tool use remains client-managed because the MCP transport is `stdio`: Codex or another MCP client must start `npm run mcp:server` and own that process's standard input/output.
+
+Useful options:
+
+```sh
+npm run setup:mcp -- --print # Print the current connection instructions
+npm run setup:mcp -- --force # Rotate the certificate and bridge token
+npm run setup:mcp -- --yes   # Complete setup without interactive prompts
+```
+
+The generated files are stored in the Git-ignored `.cert` directory with owner-only permissions for the private key and token.
 
 ### Start the connection
 
-1. Start or restart Codex from this repository. The project configuration at `.codex/config.toml` starts `blitz_canvas`.
-2. Run the frontend:
+1. Run `npm run setup:mcp` if setup has not already completed.
+2. Start or restart Codex from this repository. The project configuration at `.codex/config.toml` starts `blitz_canvas`.
+3. Run the frontend:
 
    ```sh
    npm run dev
    ```
 
-3. Open the settings button in the Blitz toolbar.
-4. Enter:
+4. Open the settings button in the Blitz toolbar.
+5. Enter the URL and token printed by the setup command.
 
-   - URL: `wss://127.0.0.1:8787`
-   - Token: the output of `cat .cert/bridge-token`
+The default URL is `wss://127.0.0.1:8787`.
 
 The bridge URL is stored in local storage. The token is stored only in the browser tab's session storage and is removed when the tab closes or **Disconnect** is selected.
 
@@ -180,11 +185,16 @@ For GitHub Pages, use the site origin without the repository path. WebSocket `Or
 
 GitHub Pages can host the static Blitz frontend, WASM, shaders, and font atlas. It cannot run the MCP server. The local MCP process must still run on the user's computer, and the Pages origin must be allowed by that process.
 
+The planned hosted, multi-user authentication design is documented in [`docs/ed25519-auth-plan.md`](docs/ed25519-auth-plan.md). It is not part of the current local bridge.
+
 ### MCP tools
 
 - `canvas_add_shapes`: add styled rectangles, triangles, circles, and text at explicit world-space coordinates
+- `canvas_update_objects`: partially update geometry, styles, and wrapped text by stable object ID
 - `canvas_get_state`: return entity counts, selection count, camera center, zoom, and viewport size
 - `canvas_get_scene`: return objects intersecting the viewport or supplied bounds, including geometry, styles, text, z-order, and selection state
+- `canvas_get_text_capabilities`: return the exact supported Unicode code-point ranges and unsupported-glyph replacement behavior
+- `canvas_measure_text`: validate, wrap, and batch-measure text with exact content/object bounds, line advance, cap/x-height, ascender/descender, and first/last baseline offsets
 - `canvas_find_empty_space`: find a non-overlapping rectangle within the visible viewport
 - `canvas_delete_selected`: delete the current selection
 
@@ -234,6 +244,13 @@ Coordinate rules:
 - Colors: `#RRGGBB` or `#RRGGBBAA`
 
 Agents should call `canvas_get_scene` before editing an existing composition and use `canvas_find_empty_space` when new content must avoid overlaps.
+Agents should call `canvas_get_text_capabilities` when choosing a character set and `canvas_measure_text` before adding or laying out text. Text should not be added when a measurement returns `supported: false`; unsupported code points render as `U+FFFD` replacement glyphs.
+Agents should use `canvas_update_objects` with IDs returned by `canvas_get_scene` when correcting an existing composition instead of adding replacement objects on top.
+
+Text shapes support optional `maxWidth`, `lineHeight`, `maxLines`, and `align` (`left`, `center`, or `right`). `maxWidth` enables word wrapping; explicit newline characters always start a new line. Measurement and rendering share the same WASM layout implementation.
+MCP text creation rejects unsupported glyphs and layouts that overflow `maxLines`, forcing the caller to measure and correct the content instead of silently producing clipped text.
+
+For card and slide layouts, text can instead provide a `box` with `x`, `y`, `width`, `height`, `padding`, and `verticalAlign`. Blitz derives the usable wrapping width and exact text origin; `canvas_measure_text` returns that origin as `placement`. This is preferred over manually positioning text from font metrics.
 
 ## Architecture
 
@@ -266,6 +283,7 @@ Agents should call `canvas_get_scene` before editing an existing composition and
 - `src/input/user-events.ts`: canvas pointer, touch, wheel, and keyboard interaction handling
 - `src/mcp/bridge.ts`: authenticated browser WebSocket protocol and request validation
 - `src/mcp/canvas-adapter.ts`: MCP-to-WASM operations, scene decoding, and empty-space search
+- The bug button in the toolbar manually enables a selected-entity debugger showing ECS component masks and current component values.
 - `src/storage/scene-file.ts`: browser file picker/download integration for WASM binary scenes
 - `mcp/server.ts`: stdio MCP server and secure local WSS endpoint
 

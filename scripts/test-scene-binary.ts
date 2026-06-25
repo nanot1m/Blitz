@@ -97,7 +97,20 @@ wasm.blitz_create_triangle(-80, 50, 120, 90, 1, 0.8, 0.4, 1, 0.8, 0.2, 0.1, 1, 3
 
 const text = new TextEncoder().encode("Binary scene ✓");
 new Uint8Array(wasm.memory.buffer, wasm.blitz_text_input_ptr(), text.byteLength).set(text);
-wasm.blitz_create_text(30, 300, 42, 1, 1, 1, 1, text.byteLength);
+wasm.blitz_create_text(
+  30,
+  300,
+  42,
+  1,
+  1,
+  1,
+  1,
+  text.byteLength,
+  180,
+  1.4,
+  3,
+  1,
+);
 if (wasm.blitz_scene_revision() === emptyRevision) {
   throw new Error("Scene mutations did not advance the revision.");
 }
@@ -183,6 +196,21 @@ wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 10);
 const restoredStableId = readObjectId(wasm.blitz_scene_query_ptr());
 if (!objectIdEquals(restoredStableId, firstStableId)) {
   throw new Error("Stable object IDs changed during the binary round trip.");
+}
+const restoredItems = new DataView(
+  wasm.memory.buffer,
+  wasm.blitz_scene_query_ptr(),
+  wasm.blitz_scene_query_item_bytes() * wasm.blitz_scene_query_count(),
+);
+const itemBytes = wasm.blitz_scene_query_item_bytes();
+const restoredTextOffset = itemBytes * 3;
+if (
+  Math.abs(restoredItems.getFloat32(restoredTextOffset + 96, true) - 180) > 0.001 ||
+  Math.abs(restoredItems.getFloat32(restoredTextOffset + 100, true) - 1.4) > 0.001 ||
+  restoredItems.getFloat32(restoredTextOffset + 104, true) !== 3 ||
+  restoredItems.getFloat32(restoredTextOffset + 108, true) !== 1
+) {
+  throw new Error("Multiline text layout settings changed during the binary round trip.");
 }
 
 const uniforms = new Float32Array(

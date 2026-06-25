@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes, randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
+import https from "node:https";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -29,8 +30,41 @@ const transport = new StdioClientTransport({
 const client = new Client({ name: "blitz-bridge-test", version: "0.1.0" });
 let canvas;
 
+async function readBridgeStatus() {
+  return new Promise((resolve, reject) => {
+    https
+      .get(
+        `https://127.0.0.1:${port}/__blitz/status`,
+        { ca: rootCertificate },
+        (response) => {
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => {
+            body += chunk;
+          });
+          response.on("end", () => {
+            try {
+              resolve(JSON.parse(body));
+            } catch (error) {
+              reject(error);
+            }
+          });
+        },
+      )
+      .on("error", reject);
+  });
+}
+
 try {
   await client.connect(transport);
+  const initializedStatus = await readBridgeStatus();
+  if (
+    initializedStatus.server !== "running" ||
+    initializedStatus.mcpClientConnected !== true ||
+    initializedStatus.canvasConnected !== false
+  ) {
+    throw new Error(`Unexpected initialized bridge status: ${JSON.stringify(initializedStatus)}`);
+  }
 
   const expectRejected = async (protocols, origin) => {
     const rejectedSocket = new WebSocket(bridgeUrl, protocols, {
@@ -70,6 +104,13 @@ try {
     canvas.once("open", resolve);
     canvas.once("error", reject);
   });
+  const connectedStatus = await readBridgeStatus();
+  if (
+    connectedStatus.mcpClientConnected !== true ||
+    connectedStatus.canvasConnected !== true
+  ) {
+    throw new Error(`Unexpected connected bridge status: ${JSON.stringify(connectedStatus)}`);
+  }
 
   let entities = 10;
   let selected = 0;
@@ -92,6 +133,44 @@ try {
         ),
         entities,
         selected,
+      };
+    } else if (request.method === "canvas.update_objects") {
+      result = {
+        updated: request.params.updates.length,
+        ids: request.params.updates.map((update) => update.id),
+        entities,
+        selected,
+      };
+    } else if (request.method === "canvas.measure_text") {
+      result = {
+        items: request.params.items.map((item) => ({
+          ...item,
+          width: item.text.length * item.fontSize * 0.5,
+          height: item.fontSize * 1.36181641,
+          ascender: item.fontSize * 1.06884766,
+          descender: item.fontSize * -0.29296875,
+          lineCount: item.maxWidth || item.box ? 2 : 1,
+          lines: item.maxWidth || item.box
+            ? [
+                { text: item.text.split(" ")[0], width: item.maxWidth * 0.6 },
+                { text: item.text.split(" ").slice(1).join(" "), width: item.maxWidth * 0.8 },
+              ]
+            : [{ text: item.text, width: item.text.length * item.fontSize * 0.5 }],
+          overflow: false,
+          supported: !item.text.includes("😀"),
+          unsupportedGlyphs: item.text.includes("😀")
+            ? [{ character: "😀", codepoint: 128512, hex: "U+1F600" }]
+            : [],
+        })),
+      };
+    } else if (request.method === "canvas.get_text_capabilities") {
+      result = {
+        glyphCount: 1008,
+        replacementCodepoint: 65533,
+        replacementCharacter: "�",
+        unsupportedBehavior:
+          "Unsupported Unicode code points render and measure as the replacement character.",
+        ranges: [{ start: 32, end: 126, startHex: "U+0020", endHex: "U+007E" }],
       };
     } else if (request.method === "canvas.delete_selected") {
       const deleted = selected;
@@ -142,6 +221,9 @@ try {
     "canvas_find_empty_space",
     "canvas_get_scene",
     "canvas_get_state",
+    "canvas_get_text_capabilities",
+    "canvas_measure_text",
+    "canvas_update_objects",
   ];
   if (JSON.stringify(toolNames) !== JSON.stringify(expectedTools)) {
     throw new Error(`Unexpected tools: ${toolNames.join(", ")}`);
@@ -216,6 +298,74 @@ try {
   const stateText = stateResult.content[0]?.type === "text" ? stateResult.content[0].text : "";
   if (!stateText.includes('"entities":14')) {
     throw new Error(`Unexpected state result: ${stateText}`);
+  }
+
+  const updateResult = await client.callTool({
+    name: "canvas_update_objects",
+    arguments: {
+      updates: [
+        {
+          id: "0000000000000001:000000000000000b",
+          type: "text",
+          text: "Updated wrapped copy",
+          maxWidth: 180,
+          maxLines: 3,
+        },
+      ],
+    },
+  });
+  const updateText =
+    updateResult.content[0]?.type === "text" ? updateResult.content[0].text : "";
+  if (
+    !updateText.includes('"updated":1') ||
+    !updateText.includes('"0000000000000001:000000000000000b"')
+  ) {
+    throw new Error(`Unexpected update result: ${updateText}`);
+  }
+
+  const measurementResult = await client.callTool({
+    name: "canvas_measure_text",
+    arguments: {
+      items: [
+        {
+          text: "Connection path",
+          fontSize: 28,
+          box: {
+            x: 100,
+            y: 200,
+            width: 200,
+            height: 100,
+            padding: 12,
+            verticalAlign: "middle",
+          },
+        },
+        { text: "Shared bridge token", fontSize: 18 },
+      ],
+    },
+  });
+  const measurementText =
+    measurementResult.content[0]?.type === "text"
+      ? measurementResult.content[0].text
+      : "";
+  if (
+    !measurementText.includes('"text":"Connection path"') ||
+    !measurementText.includes('"lineCount":2') ||
+    !measurementText.includes('"fontSize":18')
+  ) {
+    throw new Error(`Unexpected text measurement result: ${measurementText}`);
+  }
+
+  const capabilityResult = await client.callTool({
+    name: "canvas_get_text_capabilities",
+    arguments: {},
+  });
+  const capabilityText =
+    capabilityResult.content[0]?.type === "text" ? capabilityResult.content[0].text : "";
+  if (
+    !capabilityText.includes('"glyphCount":1008') ||
+    !capabilityText.includes('"startHex":"U+0020"')
+  ) {
+    throw new Error(`Unexpected text capabilities result: ${capabilityText}`);
   }
 
   const sceneResult = await client.callTool({

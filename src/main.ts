@@ -80,6 +80,26 @@ type BlitzExports = {
   ): number;
   blitz_text_input_ptr(): number;
   blitz_text_input_capacity(): number;
+  blitz_measure_text_width(textLength: number, fontSize: number): number;
+  blitz_layout_text(
+    textLength: number,
+    fontSize: number,
+    maxWidth: number,
+    lineHeight: number,
+    maxLines: number,
+  ): number;
+  blitz_text_layout_ptr(): number;
+  blitz_text_layout_line_bytes(): number;
+  blitz_text_layout_width(): number;
+  blitz_text_layout_height(): number;
+  blitz_text_layout_overflow(): number;
+  blitz_font_ascender(): number;
+  blitz_font_descender(): number;
+  blitz_font_line_height(): number;
+  blitz_font_cap_height(): number;
+  blitz_font_x_height(): number;
+  blitz_font_glyph_count(): number;
+  blitz_font_glyph_codepoint(index: number): number;
   blitz_create_text(
     x: number,
     y: number,
@@ -89,7 +109,12 @@ type BlitzExports = {
     colorB: number,
     colorA: number,
     textLength: number,
+    maxWidth: number,
+    lineHeight: number,
+    maxLines: number,
+    align: number,
   ): number;
+  blitz_update_object(...args: number[]): number;
   blitz_query_scene(
     minX: number,
     minY: number,
@@ -110,6 +135,8 @@ type BlitzExports = {
   blitz_stress_test(): void;
   blitz_delete_selected(): void;
   blitz_has_selection(): number;
+  blitz_selected_debug_ptr(): number;
+  blitz_selected_debug_mask(): number;
   blitz_selected_style_kind(): number;
   blitz_selected_style_ptr(): number;
   blitz_selected_style_f32_count(): number;
@@ -176,6 +203,9 @@ const {
   emptyRecentScenes,
   emptyDemoTemplateButton,
   styleIsland,
+  debuggerIsland,
+  debuggerEntityId,
+  debuggerComponents,
   selectedGeometryControls,
   selectedFillInput,
   selectedFillOpacityInput,
@@ -196,6 +226,7 @@ const {
   deleteButton,
   zoomIndicator,
   toggleStatsButton,
+  toggleDebuggerButton,
   statsPanel,
   statsBody,
   openMcpSettingsButton,
@@ -626,12 +657,121 @@ async function boot() {
     }
   };
 
+  const formatDebugNumber = (value: number) =>
+    Number.isInteger(value) ? String(value) : String(Number(value.toFixed(3)));
+
+  const debugComponent = (name: string, values: Record<string, string | number>) => {
+    const section = document.createElement("dl");
+    section.className = "debugger-component";
+    const heading = document.createElement("h3");
+    heading.textContent = name;
+    section.append(heading);
+    for (const [label, rawValue] of Object.entries(values)) {
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const value = document.createElement("dd");
+      value.textContent = typeof rawValue === "number" ? formatDebugNumber(rawValue) : rawValue;
+      section.append(term, value);
+    }
+    return section;
+  };
+
+  let debuggerEnabled = false;
+  const updateDebuggerIsland = () => {
+    const ptr = wasm.blitz_selected_debug_ptr();
+    debuggerIsland.hidden = !debuggerEnabled || ptr === 0;
+    debuggerComponents.replaceChildren();
+    if (ptr === 0) {
+      debuggerEntityId.textContent =
+        wasm.blitz_selected_count() > 1 ? `${wasm.blitz_selected_count()} entities` : "";
+      return;
+    }
+    const view = new DataView(wasm.memory.buffer);
+    const words = Array.from({ length: 4 }, (_value, index) =>
+      view.getUint32(ptr + index * 4, true).toString(16).padStart(8, "0"),
+    );
+    debuggerEntityId.textContent = `${words[0]}${words[1]}:${words[2]}${words[3]}`;
+    const kind = view.getUint32(ptr + 16, true);
+    const kindNames = ["Rectangle", "Triangle", "Circle", "Text"];
+    const mask = wasm.blitz_selected_debug_mask();
+    debuggerComponents.append(
+      debugComponent("Entity", {
+        slot: view.getUint32(ptr + 36, true),
+        order: view.getUint32(ptr + 20, true),
+        mask: `0x${mask.toString(16).padStart(2, "0")}`,
+        kind: kindNames[kind] ?? "Unknown",
+      }),
+      debugComponent("Position", {
+        x: view.getFloat32(ptr + 40, true),
+        y: view.getFloat32(ptr + 44, true),
+      }),
+      debugComponent("Size", {
+        width: view.getFloat32(ptr + 48, true),
+        height: view.getFloat32(ptr + 52, true),
+      }),
+    );
+    if (kind === 3) {
+      const textPtr = view.getUint32(ptr + 28, true);
+      const textLength = view.getUint32(ptr + 32, true);
+      const text = new TextDecoder().decode(
+        new Uint8Array(wasm.memory.buffer, textPtr, textLength),
+      );
+      debuggerComponents.append(
+        debugComponent("TextView", {
+          text,
+          fontSize: view.getFloat32(ptr + 92, true),
+          color: colorHex(
+            view.getFloat32(ptr + 56, true),
+            view.getFloat32(ptr + 60, true),
+            view.getFloat32(ptr + 64, true),
+          ),
+          opacity: view.getFloat32(ptr + 68, true),
+          maxWidth: view.getFloat32(ptr + 96, true),
+          lineHeight: view.getFloat32(ptr + 100, true),
+          maxLines: view.getFloat32(ptr + 104, true),
+          align: ["left", "center", "right"][view.getFloat32(ptr + 108, true)] ?? "left",
+        }),
+      );
+    } else {
+      debuggerComponents.append(
+        debugComponent(`${kindNames[kind] ?? "Shape"}View`, {
+          fill: colorHex(
+            view.getFloat32(ptr + 56, true),
+            view.getFloat32(ptr + 60, true),
+            view.getFloat32(ptr + 64, true),
+          ),
+          fillOpacity: view.getFloat32(ptr + 68, true),
+          stroke: colorHex(
+            view.getFloat32(ptr + 72, true),
+            view.getFloat32(ptr + 76, true),
+            view.getFloat32(ptr + 80, true),
+          ),
+          strokeOpacity: view.getFloat32(ptr + 84, true),
+          strokeWidth: view.getFloat32(ptr + 88, true),
+        }),
+      );
+    }
+    debuggerComponents.append(
+      debugComponent("Capabilities", {
+        selectable: (mask & 64) !== 0 ? "yes" : "no",
+        resizable: (mask & 128) !== 0 ? "yes" : "no",
+      }),
+    );
+  };
+
+  toggleDebuggerButton.addEventListener("click", () => {
+    debuggerEnabled = !debuggerEnabled;
+    toggleDebuggerButton.setAttribute("aria-pressed", String(debuggerEnabled));
+    updateDebuggerIsland();
+  });
+
   const updateSelectionState = () => {
     const disabled = wasm.blitz_has_selection() === 0;
     sendToBackButton.disabled = disabled;
     bringToFrontButton.disabled = disabled;
     deleteButton.disabled = disabled;
     updateStyleIsland();
+    updateDebuggerIsland();
   };
 
   let emptyStateVisible = false;

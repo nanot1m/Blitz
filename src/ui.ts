@@ -1,6 +1,7 @@
 import {
   Activity,
   BringToFront,
+  Bug,
   Circle,
   createIcons,
   FolderOpen,
@@ -28,6 +29,7 @@ export function createBlitzUi() {
     icons: {
       Activity,
       BringToFront,
+      Bug,
       Circle,
       FolderOpen,
       LayoutGrid,
@@ -47,9 +49,7 @@ export function createBlitzUi() {
   const fileMenuContent = requireElement<HTMLDivElement>(".file-menu-content");
   const shapeMenu = requireElement<HTMLDetailsElement>("#shape-menu");
   const shapeMenuContent = requireElement<HTMLDivElement>(".shape-menu-content");
-  const collapsedShapeMenu = window.matchMedia(
-    "(max-width: 620px) and (hover: none) and (pointer: coarse)",
-  );
+  const collapsedShapeMenu = window.matchMedia("(max-width: 720px)");
 
   const syncShapeMenuMode = () => {
     fileMenu.open = !collapsedShapeMenu.matches;
@@ -102,6 +102,9 @@ export function createBlitzUi() {
     emptyRecentScenes: requireElement<HTMLDivElement>("#empty-recent-scenes"),
     emptyDemoTemplateButton: requireElement<HTMLButtonElement>("#empty-demo-template"),
     styleIsland: requireElement<HTMLDivElement>("#style-island"),
+    debuggerIsland: requireElement<HTMLElement>("#debugger-island"),
+    debuggerEntityId: requireElement<HTMLElement>("#debugger-entity-id"),
+    debuggerComponents: requireElement<HTMLDivElement>("#debugger-components"),
     selectedGeometryControls: requireElement<HTMLDivElement>("#selected-geometry-controls"),
     selectedFillInput: requireElement<HTMLInputElement>("#selected-fill"),
     selectedFillOpacityInput: requireElement<HTMLInputElement>("#selected-fill-opacity"),
@@ -122,6 +125,7 @@ export function createBlitzUi() {
     deleteButton: requireElement<HTMLButtonElement>("#delete-selected"),
     zoomIndicator: requireElement<HTMLDivElement>("#zoom-indicator"),
     toggleStatsButton: requireElement<HTMLButtonElement>("#toggle-stats"),
+    toggleDebuggerButton: requireElement<HTMLButtonElement>("#toggle-debugger"),
     statsPanel: requireElement<HTMLDivElement>("#stats-panel"),
     statsBody: requireElement<HTMLPreElement>("#stats-body"),
     openMcpSettingsButton: requireElement<HTMLButtonElement>("#open-mcp-settings"),

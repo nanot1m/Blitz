@@ -9,12 +9,15 @@ import {
 import shaderSource from "./shaders/rect.wgsl?raw";
 import cullSource from "./shaders/cull.wgsl?raw";
 import { setupSceneFileStorage } from "./storage/scene-file";
+import { getOrCreateActorId } from "./storage/actor-id";
 import { createBlitzUi } from "./ui";
 import "./style.css";
 
 type BlitzExports = {
   memory: WebAssembly.Memory;
   blitz_init(): void;
+  blitz_set_actor_id(actorHi: number, actorLo: number): void;
+  blitz_last_created_object_id_ptr(): number;
   blitz_resize(width: number, height: number): void;
   blitz_set_camera(x: number, y: number, zoom: number): void;
   blitz_pan(dxPixels: number, dyPixels: number): void;
@@ -226,6 +229,8 @@ async function boot() {
 
   const wasm = await loadWasm();
   wasm.blitz_init();
+  const actorId = getOrCreateActorId();
+  wasm.blitz_set_actor_id(actorId.hi, actorId.lo);
 
   const adapter = await navigator.gpu.requestAdapter();
   const device = await adapter?.requestDevice();

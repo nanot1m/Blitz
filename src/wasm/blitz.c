@@ -17,9 +17,10 @@ typedef unsigned int u32;
 #define BLITZ_MAX_SCENE_QUERY_ITEMS 65536u
 #define BLITZ_SCENE_FILE_BUFFER_BYTES (16u * 1024u * 1024u)
 #define BLITZ_SCENE_FILE_MAGIC 0x5a544c42u
-#define BLITZ_SCENE_FILE_VERSION 2u
+#define BLITZ_SCENE_FILE_VERSION 3u
 #define BLITZ_SCENE_FILE_HEADER_BYTES 32u
-#define BLITZ_SCENE_FILE_RECORD_BYTES 80u
+#define BLITZ_SCENE_FILE_LEGACY_RECORD_BYTES 80u
+#define BLITZ_SCENE_FILE_RECORD_BYTES 92u
 #define BLITZ_HISTORY_MAX_ENTRIES 128u
 #define BLITZ_HISTORY_MAX_OPS 65536u
 
@@ -46,6 +47,13 @@ typedef struct Vec2 {
   float x;
   float y;
 } Vec2;
+
+typedef struct ObjectId {
+  u32 actor_hi;
+  u32 actor_lo;
+  u32 sequence_hi;
+  u32 sequence_lo;
+} ObjectId;
 
 typedef struct Color {
   float r;
@@ -123,14 +131,13 @@ typedef struct TextDraw {
 } TextDraw;
 
 typedef struct SceneItem {
-  u32 object_id;
+  ObjectId object_id;
   u32 shape_kind;
   u32 order;
   u32 selected;
   u32 text_ptr;
   u32 text_length;
   u32 _pad0;
-  u32 _pad1;
   float bounds[4];
   float fill_color[4];
   float stroke_color[4];
@@ -138,7 +145,7 @@ typedef struct SceneItem {
 } SceneItem;
 
 typedef struct EntitySnapshot {
-  u32 object_id;
+  ObjectId object_id;
   u32 mask;
   u32 order;
   u32 _pad0;
@@ -168,7 +175,7 @@ typedef struct World {
   u32 draw_order[BLITZ_MAX_ENTITIES];
   u32 draw_order_scratch[BLITZ_MAX_ENTITIES];
   u32 selected[BLITZ_MAX_ENTITIES];
-  u32 object_ids[BLITZ_MAX_ENTITIES];
+  ObjectId object_ids[BLITZ_MAX_ENTITIES];
   u32 masks[BLITZ_MAX_ENTITIES];
   Vec2 positions[BLITZ_MAX_ENTITIES];
   Vec2 sizes[BLITZ_MAX_ENTITIES];
@@ -237,7 +244,11 @@ static u32 scene_revision;
 static float scene_start_camera_x;
 static float scene_start_camera_y;
 static float scene_start_camera_zoom;
-static u32 next_object_id;
+static u32 object_id_actor_hi;
+static u32 object_id_actor_lo;
+static u32 next_object_id_sequence_hi;
+static u32 next_object_id_sequence_lo;
+static ObjectId last_created_object_id;
 static u32 history_op_count;
 static u32 history_entry_count;
 static u32 history_cursor;
@@ -298,6 +309,47 @@ static u32 read_u32(const unsigned char *buffer, u32 offset) {
          ((u32)buffer[offset + 3u] << 24u);
 }
 
+static ObjectId object_id_zero(void) {
+  return (ObjectId){0u, 0u, 0u, 0u};
+}
+
+static u32 object_id_is_zero(ObjectId id) {
+  return id.actor_hi == 0u && id.actor_lo == 0u && id.sequence_hi == 0u &&
+         id.sequence_lo == 0u;
+}
+
+static u32 object_id_equal(ObjectId left, ObjectId right) {
+  return left.actor_hi == right.actor_hi && left.actor_lo == right.actor_lo &&
+         left.sequence_hi == right.sequence_hi &&
+         left.sequence_lo == right.sequence_lo;
+}
+
+static ObjectId new_object_id(void) {
+  ObjectId id = {object_id_actor_hi, object_id_actor_lo,
+                 next_object_id_sequence_hi, next_object_id_sequence_lo};
+  next_object_id_sequence_lo += 1u;
+  if (next_object_id_sequence_lo == 0u) {
+    next_object_id_sequence_hi += 1u;
+  }
+  last_created_object_id = id;
+  return id;
+}
+
+static void advance_sequence_past(ObjectId id) {
+  if (id.actor_hi != object_id_actor_hi || id.actor_lo != object_id_actor_lo) {
+    return;
+  }
+  if (id.sequence_hi > next_object_id_sequence_hi ||
+      (id.sequence_hi == next_object_id_sequence_hi &&
+       id.sequence_lo >= next_object_id_sequence_lo)) {
+    next_object_id_sequence_hi = id.sequence_hi;
+    next_object_id_sequence_lo = id.sequence_lo + 1u;
+    if (next_object_id_sequence_lo == 0u) {
+      next_object_id_sequence_hi += 1u;
+    }
+  }
+}
+
 static void write_f32(unsigned char *buffer, u32 offset, float value) {
   union {
     float f;
@@ -354,9 +406,10 @@ static EntitySnapshot snapshot_entity(u32 entity) {
   return snapshot;
 }
 
-static u32 find_entity_by_object_id(u32 object_id) {
+static u32 find_entity_by_object_id(ObjectId object_id) {
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
-    if (world.masks[entity] != 0u && world.object_ids[entity] == object_id) {
+    if (world.masks[entity] != 0u &&
+        object_id_equal(world.object_ids[entity], object_id)) {
       return entity;
     }
   }
@@ -440,7 +493,7 @@ static void history_record_before(u32 entity) {
 static void history_record_created(u32 entity) {
   HistoryOp *op = history_push(BLITZ_HISTORY_CREATE);
   if (op) {
-    op->before.object_id = 0u;
+    op->before.object_id = object_id_zero();
     op->after = snapshot_entity(entity);
   }
 }
@@ -449,7 +502,7 @@ static void history_record_deleted(u32 entity) {
   HistoryOp *op = history_push(BLITZ_HISTORY_DELETE);
   if (op) {
     op->before = snapshot_entity(entity);
-    op->after.object_id = 0u;
+    op->after.object_id = object_id_zero();
   }
 }
 
@@ -520,8 +573,7 @@ static u32 ecs_create_entity(void) {
   world.draw_order_count += 1u;
   world.selected[entity] = 0u;
   world.masks[entity] = 0u;
-  world.object_ids[entity] = next_object_id;
-  next_object_id += 1u;
+  world.object_ids[entity] = new_object_id();
   live_count += 1u;
   return entity;
 }
@@ -624,9 +676,7 @@ static u32 restore_snapshot(EntitySnapshot snapshot) {
       return entity;
     }
     world.object_ids[entity] = snapshot.object_id;
-    if (next_object_id <= snapshot.object_id) {
-      next_object_id = snapshot.object_id + 1u;
-    }
+    advance_sequence_past(snapshot.object_id);
   }
   world.masks[entity] = snapshot.mask;
   world.positions[entity] = snapshot.position;
@@ -671,7 +721,7 @@ static void history_apply_entry(HistoryEntry entry, u32 forward) {
       restore_snapshot(forward ? op->after : op->before);
     } else if ((forward && op->kind == BLITZ_HISTORY_DELETE) ||
                (!forward && op->kind == BLITZ_HISTORY_CREATE)) {
-      u32 object_id =
+      ObjectId object_id =
           forward ? op->before.object_id : op->after.object_id;
       remove_entity(find_entity_by_object_id(object_id));
     } else {
@@ -681,7 +731,7 @@ static void history_apply_entry(HistoryEntry entry, u32 forward) {
   for (u32 offset = 0u; offset < entry.op_count; offset += 1u) {
     HistoryOp *op = &history_ops[entry.op_start + offset];
     EntitySnapshot snapshot = forward ? op->after : op->before;
-    if (snapshot.object_id != 0u) {
+    if (!object_id_is_zero(snapshot.object_id)) {
       u32 entity = find_entity_by_object_id(snapshot.object_id);
       move_entity_to_order(entity, snapshot.order);
     }
@@ -1729,7 +1779,9 @@ void blitz_init(void) {
   scene_start_camera_x = 0.0f;
   scene_start_camera_y = 0.0f;
   scene_start_camera_zoom = 1.0f;
-  next_object_id = 1u;
+  next_object_id_sequence_hi = 0u;
+  next_object_id_sequence_lo = 1u;
+  last_created_object_id = object_id_zero();
   history_replaying = 0u;
   history_reset_internal();
 
@@ -1754,6 +1806,17 @@ void blitz_init(void) {
 
   extract_static_shapes();
   extract_dynamic();
+}
+
+EXPORT("blitz_set_actor_id")
+void blitz_set_actor_id(u32 actor_hi, u32 actor_lo) {
+  object_id_actor_hi = actor_hi;
+  object_id_actor_lo = actor_lo;
+}
+
+EXPORT("blitz_last_created_object_id_ptr")
+u32 blitz_last_created_object_id_ptr(void) {
+  return (u32)&last_created_object_id;
 }
 
 EXPORT("blitz_resize")
@@ -2091,7 +2154,7 @@ u32 blitz_create_rect(float x, float y, float width, float height,
   select_only(entity);
   mark_render_list_dirty();
   if (history_owned) history_commit();
-  return world.object_ids[entity];
+  return entity;
 }
 
 EXPORT("blitz_create_circle")
@@ -2114,7 +2177,7 @@ u32 blitz_create_circle(float center_x, float center_y, float radius,
   select_only(entity);
   mark_render_list_dirty();
   if (history_owned) history_commit();
-  return world.object_ids[entity];
+  return entity;
 }
 
 EXPORT("blitz_create_triangle")
@@ -2136,7 +2199,7 @@ u32 blitz_create_triangle(float x, float y, float width, float height,
   select_only(entity);
   mark_render_list_dirty();
   if (history_owned) history_commit();
-  return world.object_ids[entity];
+  return entity;
 }
 
 EXPORT("blitz_text_input_ptr")
@@ -2170,7 +2233,7 @@ u32 blitz_create_text(float x, float y, float font_size, float color_r,
   select_only(entity);
   mark_render_list_dirty();
   if (history_owned) history_commit();
-  return world.object_ids[entity];
+  return entity;
 }
 
 EXPORT("blitz_query_scene")
@@ -2242,7 +2305,6 @@ u32 blitz_query_scene(float min_x, float min_y, float max_x, float max_y,
     item->text_ptr = text ? (u32)text : 0u;
     item->text_length = text ? string_length(text) : 0u;
     item->_pad0 = 0u;
-    item->_pad1 = 0u;
     item->bounds[0] = position.x;
     item->bounds[1] = position.y;
     item->bounds[2] = size.x;
@@ -2362,7 +2424,8 @@ u32 blitz_scene_serialize(void) {
     Vec2 size = world.sizes[entity];
     write_u32(scene_file_buffer, offset, kind);
     write_u32(scene_file_buffer, offset + 4u, record_bytes);
-    write_u32(scene_file_buffer, offset + 8u, world.object_ids[entity]);
+    ObjectId object_id = world.object_ids[entity];
+    write_u32(scene_file_buffer, offset + 8u, object_id.sequence_lo);
     write_u32(scene_file_buffer, offset + 12u, text_length);
     write_f32(scene_file_buffer, offset + 16u, position.x);
     write_f32(scene_file_buffer, offset + 20u, position.y);
@@ -2380,6 +2443,9 @@ u32 blitz_scene_serialize(void) {
     write_f32(scene_file_buffer, offset + 68u, font_size);
     write_f32(scene_file_buffer, offset + 72u, origin_x);
     write_f32(scene_file_buffer, offset + 76u, baseline_offset);
+    write_u32(scene_file_buffer, offset + 80u, object_id.actor_hi);
+    write_u32(scene_file_buffer, offset + 84u, object_id.actor_lo);
+    write_u32(scene_file_buffer, offset + 88u, object_id.sequence_hi);
     for (u32 i = 0u; i < align4(text_length); i += 1u) {
       scene_file_buffer[offset + BLITZ_SCENE_FILE_RECORD_BYTES + i] =
           i < text_length ? (unsigned char)text[i] : 0u;
@@ -2410,7 +2476,8 @@ u32 blitz_scene_deserialize(u32 byte_count) {
     return 2u;
   }
   u32 file_version = read_u32(scene_file_buffer, 4u);
-  if (file_version != 1u && file_version != BLITZ_SCENE_FILE_VERSION) {
+  if (file_version != 1u && file_version != 2u &&
+      file_version != BLITZ_SCENE_FILE_VERSION) {
     return 3u;
   }
   if (read_u32(scene_file_buffer, 8u) != byte_count) {
@@ -2430,17 +2497,20 @@ u32 blitz_scene_deserialize(u32 byte_count) {
 
   u32 offset = BLITZ_SCENE_FILE_HEADER_BYTES;
   u32 required_text_bytes = 0u;
+  u32 fixed_record_bytes = file_version >= 3u
+                               ? BLITZ_SCENE_FILE_RECORD_BYTES
+                               : BLITZ_SCENE_FILE_LEGACY_RECORD_BYTES;
   for (u32 index = 0u; index < object_count; index += 1u) {
-    if (offset + BLITZ_SCENE_FILE_RECORD_BYTES > byte_count) {
+    if (offset + fixed_record_bytes > byte_count) {
       return 7u;
     }
     u32 kind = read_u32(scene_file_buffer, offset);
     u32 record_bytes = read_u32(scene_file_buffer, offset + 4u);
     u32 text_length = read_u32(scene_file_buffer, offset + 12u);
     if (kind > BLITZ_SHAPE_TEXT ||
-        record_bytes < BLITZ_SCENE_FILE_RECORD_BYTES ||
+        record_bytes < fixed_record_bytes ||
         offset + record_bytes > byte_count ||
-        text_length > record_bytes - BLITZ_SCENE_FILE_RECORD_BYTES) {
+        text_length > record_bytes - fixed_record_bytes) {
       return 8u;
     }
     float width = read_f32(scene_file_buffer, offset + 24u);
@@ -2468,8 +2538,20 @@ u32 blitz_scene_deserialize(u32 byte_count) {
   for (u32 index = 0u; index < object_count; index += 1u) {
     u32 kind = read_u32(scene_file_buffer, offset);
     u32 record_bytes = read_u32(scene_file_buffer, offset + 4u);
-    u32 object_id =
-        file_version >= 2u ? read_u32(scene_file_buffer, offset + 8u) : 0u;
+    ObjectId object_id;
+    if (file_version >= 3u) {
+      object_id.actor_hi = read_u32(scene_file_buffer, offset + 80u);
+      object_id.actor_lo = read_u32(scene_file_buffer, offset + 84u);
+      object_id.sequence_hi = read_u32(scene_file_buffer, offset + 88u);
+      object_id.sequence_lo = read_u32(scene_file_buffer, offset + 8u);
+    } else {
+      object_id.actor_hi = 0u;
+      object_id.actor_lo = 0u;
+      object_id.sequence_hi = 0u;
+      object_id.sequence_lo =
+          file_version >= 2u ? read_u32(scene_file_buffer, offset + 8u)
+                             : index + 1u;
+    }
     u32 text_length = read_u32(scene_file_buffer, offset + 12u);
     float x = read_f32(scene_file_buffer, offset + 16u);
     float y = read_f32(scene_file_buffer, offset + 20u);
@@ -2493,11 +2575,9 @@ u32 blitz_scene_deserialize(u32 byte_count) {
       clear_scene_state();
       return 13u;
     }
-    if (object_id != 0u) {
+    if (!object_id_is_zero(object_id)) {
       world.object_ids[entity] = object_id;
-      if (next_object_id <= object_id) {
-        next_object_id = object_id + 1u;
-      }
+      advance_sequence_past(object_id);
     }
     ecs_set_position(entity, x, y);
     ecs_set_size(entity, width, height);
@@ -2514,7 +2594,7 @@ u32 blitz_scene_deserialize(u32 byte_count) {
       char *text = &text_pool[text_pool_used];
       for (u32 i = 0u; i < text_length; i += 1u) {
         text[i] = (char)scene_file_buffer[
-            offset + BLITZ_SCENE_FILE_RECORD_BYTES + i];
+            offset + fixed_record_bytes + i];
       }
       text[text_length] = '\0';
       text_pool_used += text_length + 1u;

@@ -78,7 +78,7 @@ type BridgeResponse = {
 };
 
 type BridgeHandlers = {
-  addShapes(shapes: CanvasShape[]): CanvasState & { added: number; ids: number[] };
+  addShapes(shapes: CanvasShape[]): CanvasState & { added: number; ids: string[] };
   deleteSelected(): CanvasState & { deleted: number };
   getState(): CanvasState;
   getScene(query: SceneQuery): unknown;

@@ -17,6 +17,8 @@ mkdirSync(resolve(root, "public"), { recursive: true });
 
 const wasmExports = [
   "blitz_init",
+  "blitz_set_actor_id",
+  "blitz_last_created_object_id_ptr",
   "blitz_resize",
   "blitz_set_camera",
   "blitz_pan",

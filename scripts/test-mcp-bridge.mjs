@@ -84,7 +84,12 @@ try {
       selected = added > 0 ? 1 : selected;
       result = {
         added,
-        ids: Array.from({ length: added }, (_value, index) => entities - added + index),
+        ids: Array.from(
+          { length: added },
+          (_value, index) => `0000000000000001:${(entities - added + index + 1)
+            .toString(16)
+            .padStart(16, "0")}`,
+        ),
         entities,
         selected,
       };

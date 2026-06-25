@@ -38,6 +38,12 @@ const added = adapter.addShapes([
 if (added.added !== 2 || added.ids.length !== 2) {
   throw new Error(`Unexpected add result: ${JSON.stringify(added)}`);
 }
+if (
+  added.ids[0] === added.ids[1] ||
+  !added.ids.every((id) => /^[0-9a-f]{16}:[0-9a-f]{16}$/.test(id))
+) {
+  throw new Error(`Object IDs were not returned as unique 128-bit strings: ${added.ids.join(", ")}`);
+}
 
 const scene = adapter.getScene({
   bounds: { x: 1900, y: 2000, width: 500, height: 400 },

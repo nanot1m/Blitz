@@ -8,6 +8,7 @@ export type BlitzMcpExports = {
   blitz_text_input_ptr(): number;
   blitz_text_input_capacity(): number;
   blitz_create_text(...args: number[]): number;
+  blitz_last_created_object_id_ptr(): number;
   blitz_delete_selected(): void;
   blitz_history_begin(): void;
   blitz_history_commit(): void;
@@ -42,7 +43,7 @@ type Bounds = {
 };
 
 type SceneObject = Bounds & {
-  id: number;
+  id: string;
   type: "rect" | "triangle" | "circle" | "text";
   order: number;
   selected: boolean;
@@ -61,6 +62,11 @@ const INVALID_ENTITY = 0xffffffff;
 const MAX_SCENE_QUERY_ITEMS = 65536;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+
+function formatObjectId(words: ArrayLike<number>): string {
+  const hex = (value: number) => (value >>> 0).toString(16).padStart(8, "0");
+  return `${hex(words[0])}${hex(words[1])}:${hex(words[2])}${hex(words[3])}`;
+}
 
 function parseColor(value: string): [number, number, number, number] {
   const red = Number.parseInt(value.slice(1, 3), 16) / 255;
@@ -123,7 +129,14 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
     };
   };
 
-  const addShape = (shape: CanvasShape): number => {
+  const lastCreatedObjectId = (): string => {
+    const ptr = wasm.blitz_last_created_object_id_ptr();
+    const words = new Uint32Array(wasm.memory.buffer, ptr, 4);
+    return formatObjectId(words);
+  };
+
+  const addShape = (shape: CanvasShape): string => {
+    let entity: number;
     if (shape.type === "text") {
       const encoded = textEncoder.encode(shape.text);
       const capacity = wasm.blitz_text_input_capacity();
@@ -132,7 +145,7 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
       }
       new Uint8Array(wasm.memory.buffer, wasm.blitz_text_input_ptr(), encoded.byteLength).set(encoded);
       const [red, green, blue, alpha] = parseColor(shape.color);
-      return wasm.blitz_create_text(
+      entity = wasm.blitz_create_text(
         shape.x,
         shape.y,
         shape.fontSize,
@@ -142,30 +155,36 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
         alpha,
         encoded.byteLength,
       );
+    } else {
+      const fill = parseColor(shape.backgroundColor);
+      const stroke = parseColor(shape.strokeColor);
+      if (shape.type === "circle") {
+        entity = wasm.blitz_create_circle(
+          shape.x,
+          shape.y,
+          shape.radius,
+          ...fill,
+          ...stroke,
+          shape.strokeWidth,
+        );
+      } else {
+        const create =
+          shape.type === "rect" ? wasm.blitz_create_rect : wasm.blitz_create_triangle;
+        entity = create(
+          shape.x,
+          shape.y,
+          shape.width,
+          shape.height,
+          ...fill,
+          ...stroke,
+          shape.strokeWidth,
+        );
+      }
     }
-
-    const fill = parseColor(shape.backgroundColor);
-    const stroke = parseColor(shape.strokeColor);
-    if (shape.type === "circle") {
-      return wasm.blitz_create_circle(
-        shape.x,
-        shape.y,
-        shape.radius,
-        ...fill,
-        ...stroke,
-        shape.strokeWidth,
-      );
+    if ((entity >>> 0) === INVALID_ENTITY) {
+      throw new Error("Blitz could not allocate the requested shape.");
     }
-    const create = shape.type === "rect" ? wasm.blitz_create_rect : wasm.blitz_create_triangle;
-    return create(
-      shape.x,
-      shape.y,
-      shape.width,
-      shape.height,
-      ...fill,
-      ...stroke,
-      shape.strokeWidth,
-    );
+    return lastCreatedObjectId();
   };
 
   const queryScene = (bounds: Bounds, limit: number) => {
@@ -186,8 +205,13 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
 
     for (let index = 0; index < count; index += 1) {
       const offset = base + index * itemBytes;
-      const id = view.getUint32(offset, true);
-      const kind = view.getUint32(offset + 4, true);
+      const id = formatObjectId([
+        view.getUint32(offset, true),
+        view.getUint32(offset + 4, true),
+        view.getUint32(offset + 8, true),
+        view.getUint32(offset + 12, true),
+      ]);
+      const kind = view.getUint32(offset + 16, true);
       const type = kinds[kind];
       if (!type) {
         continue;
@@ -195,36 +219,36 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
       const object: SceneObject = {
         id,
         type,
-        order: view.getUint32(offset + 8, true),
-        selected: view.getUint32(offset + 12, true) !== 0,
-        x: view.getFloat32(offset + 32, true),
-        y: view.getFloat32(offset + 36, true),
-        width: view.getFloat32(offset + 40, true),
-        height: view.getFloat32(offset + 44, true),
+        order: view.getUint32(offset + 20, true),
+        selected: view.getUint32(offset + 24, true) !== 0,
+        x: view.getFloat32(offset + 40, true),
+        y: view.getFloat32(offset + 44, true),
+        width: view.getFloat32(offset + 48, true),
+        height: view.getFloat32(offset + 52, true),
       };
       const fill = colorToHex(
-        view.getFloat32(offset + 48, true),
-        view.getFloat32(offset + 52, true),
         view.getFloat32(offset + 56, true),
         view.getFloat32(offset + 60, true),
+        view.getFloat32(offset + 64, true),
+        view.getFloat32(offset + 68, true),
       );
       if (type === "text") {
-        const textPtr = view.getUint32(offset + 16, true);
-        const textLength = view.getUint32(offset + 20, true);
+        const textPtr = view.getUint32(offset + 28, true);
+        const textLength = view.getUint32(offset + 32, true);
         object.text = textDecoder.decode(
           new Uint8Array(wasm.memory.buffer, textPtr, textLength),
         );
-        object.fontSize = view.getFloat32(offset + 84, true);
+        object.fontSize = view.getFloat32(offset + 92, true);
         object.color = fill;
       } else {
         object.backgroundColor = fill;
         object.strokeColor = colorToHex(
-          view.getFloat32(offset + 64, true),
-          view.getFloat32(offset + 68, true),
           view.getFloat32(offset + 72, true),
           view.getFloat32(offset + 76, true),
+          view.getFloat32(offset + 80, true),
+          view.getFloat32(offset + 84, true),
         );
-        object.strokeWidth = view.getFloat32(offset + 80, true);
+        object.strokeWidth = view.getFloat32(offset + 88, true);
         if (type === "circle") {
           object.centerX = object.x + object.width * 0.5;
           object.centerY = object.y + object.height * 0.5;
@@ -247,14 +271,10 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
     addShapes(shapes: CanvasShape[]) {
       options.stopDragging();
       wasm.blitz_history_begin();
-      let ids: number[];
+      let ids: string[];
       try {
         ids = shapes.map((shape) => {
-          const id = addShape(shape);
-          if ((id >>> 0) === INVALID_ENTITY) {
-            throw new Error("Blitz could not allocate the requested shape.");
-          }
-          return id;
+          return addShape(shape);
         });
       } finally {
         wasm.blitz_history_commit();

@@ -7,6 +7,15 @@ const wasm = instance.exports as Record<string, CallableFunction> & {
 };
 
 wasm.blitz_init();
+wasm.blitz_set_actor_id(0x12345678, 0x9abcdef0);
+
+const readObjectId = (offset: number): number[] => {
+  const view = new DataView(wasm.memory.buffer);
+  return [0, 4, 8, 12].map((wordOffset) => view.getUint32(offset + wordOffset, true));
+};
+
+const objectIdEquals = (left: number[], right: number[]) =>
+  left.every((word, index) => word === right[index]);
 if (wasm.blitz_entity_count() !== 0) {
   throw new Error("A newly initialized scene should be empty.");
 }
@@ -32,7 +41,7 @@ const undoneItem = new DataView(
   wasm.blitz_scene_query_ptr(),
   wasm.blitz_scene_query_item_bytes(),
 );
-if (Math.abs(undoneItem.getFloat32(48, true) - 1) > 0.001) {
+if (Math.abs(undoneItem.getFloat32(56, true) - 1) > 0.001) {
   throw new Error("Undo did not restore the previous fill color.");
 }
 if (!wasm.blitz_history_redo()) {
@@ -44,7 +53,8 @@ wasm.blitz_delete_selected();
 if (!wasm.blitz_history_undo() || wasm.blitz_entity_count() !== 1) {
   throw new Error("Core history did not restore a deleted object.");
 }
-const orderedId = wasm.blitz_create_circle(240, 200, 30, 0, 1, 0, 1, 0, 0, 0, 1, 1);
+wasm.blitz_create_circle(240, 200, 30, 0, 1, 0, 1, 0, 0, 0, 1, 1);
+const orderedId = readObjectId(wasm.blitz_last_created_object_id_ptr());
 wasm.blitz_send_to_back();
 if (!wasm.blitz_history_undo()) {
   throw new Error("Core history did not undo a draw-order update.");
@@ -58,8 +68,8 @@ wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 10);
   let restoredOrder = -1;
   for (let index = 0; index < count; index += 1) {
     const offset = base + index * itemBytes;
-    if (view.getUint32(offset, true) === orderedId) {
-      restoredOrder = view.getUint32(offset + 8, true);
+    if (objectIdEquals(readObjectId(offset), orderedId)) {
+      restoredOrder = view.getUint32(offset + 20, true);
     }
   }
   if (restoredOrder !== 1) {
@@ -111,10 +121,10 @@ const resizedItem = new DataView(
   wasm.blitz_scene_query_item_bytes(),
 );
 if (
-  Math.abs(resizedItem.getFloat32(32, true) + 120) > 0.001 ||
-  Math.abs(resizedItem.getFloat32(36, true) + 70) > 0.001 ||
-  Math.abs(resizedItem.getFloat32(40, true) - 220) > 0.001 ||
-  Math.abs(resizedItem.getFloat32(44, true) - 120) > 0.001
+  Math.abs(resizedItem.getFloat32(40, true) + 120) > 0.001 ||
+  Math.abs(resizedItem.getFloat32(44, true) + 70) > 0.001 ||
+  Math.abs(resizedItem.getFloat32(48, true) - 220) > 0.001 ||
+  Math.abs(resizedItem.getFloat32(52, true) - 120) > 0.001
 ) {
   throw new Error("Rectangle resize did not update ECS position and size.");
 }
@@ -127,14 +137,14 @@ if (wasm.blitz_pointer_down(600, 490, 0) !== 8) {
 wasm.blitz_pointer_move(630, 490);
 wasm.blitz_pointer_up();
 wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
-if (Math.abs(resizedItem.getFloat32(40, true) - 250) > 0.001) {
+if (Math.abs(resizedItem.getFloat32(48, true) - 250) > 0.001) {
   throw new Error("Rectangle edge resize did not update its width.");
 }
 if (!wasm.blitz_history_undo()) {
   throw new Error("Core history did not undo edge resizing.");
 }
 wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
-if (Math.abs(resizedItem.getFloat32(40, true) - 220) > 0.001) {
+if (Math.abs(resizedItem.getFloat32(48, true) - 220) > 0.001) {
   throw new Error("Undo did not restore the previous rectangle width.");
 }
 if (!wasm.blitz_history_redo()) {
@@ -160,11 +170,7 @@ if (wasm.blitz_scene_revision() === emptyRevision) {
 
 const originalEntities = wasm.blitz_entity_count();
 wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 10);
-const firstStableId = new DataView(
-  wasm.memory.buffer,
-  wasm.blitz_scene_query_ptr(),
-  wasm.blitz_scene_query_item_bytes(),
-).getUint32(0, true);
+const firstStableId = readObjectId(wasm.blitz_scene_query_ptr());
 const revisionBeforeSelectAll = wasm.blitz_scene_revision();
 wasm.blitz_select_all();
 if (wasm.blitz_selected_count() !== originalEntities) {
@@ -240,12 +246,8 @@ if (wasm.blitz_selected_count() !== 0) {
   throw new Error("Selection state should not be restored from a scene file.");
 }
 wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 10);
-const restoredStableId = new DataView(
-  wasm.memory.buffer,
-  wasm.blitz_scene_query_ptr(),
-  wasm.blitz_scene_query_item_bytes(),
-).getUint32(0, true);
-if (restoredStableId !== firstStableId) {
+const restoredStableId = readObjectId(wasm.blitz_scene_query_ptr());
+if (!objectIdEquals(restoredStableId, firstStableId)) {
   throw new Error("Stable object IDs changed during the binary round trip.");
 }
 
@@ -275,6 +277,31 @@ if (wasm.blitz_scene_deserialize(byteCount) !== 2) {
 }
 if (wasm.blitz_entity_count() !== liveBeforeInvalidFile) {
   throw new Error("Invalid input modified the live scene.");
+}
+
+const v2Bytes = new Uint8Array(32 + 80);
+v2Bytes.set(fileBytes.subarray(0, 32), 0);
+v2Bytes.set(fileBytes.subarray(32, 32 + 80), 32);
+const v2View = new DataView(v2Bytes.buffer);
+v2View.setUint32(4, 2, true);
+v2View.setUint32(8, v2Bytes.byteLength, true);
+v2View.setUint32(12, 1, true);
+v2View.setUint32(36, 80, true);
+new Uint8Array(wasm.memory.buffer, wasm.blitz_scene_file_buffer_ptr(), v2Bytes.byteLength).set(
+  v2Bytes,
+);
+if (wasm.blitz_scene_deserialize(v2Bytes.byteLength) !== 0) {
+  throw new Error("Version 2 scene migration failed.");
+}
+wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
+const migratedId = readObjectId(wasm.blitz_scene_query_ptr());
+if (
+  migratedId[0] !== 0 ||
+  migratedId[1] !== 0 ||
+  migratedId[2] !== 0 ||
+  migratedId[3] !== firstStableId[3]
+) {
+  throw new Error(`Version 2 object ID was not migrated correctly: ${migratedId.join(",")}.`);
 }
 
 console.log(`Binary scene round-trip passed (${byteCount} bytes).`);

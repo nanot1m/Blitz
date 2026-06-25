@@ -147,7 +147,12 @@ The generated files are stored in the Git-ignored `.cert` directory with owner-o
 ### Start the connection
 
 1. Run `npm run setup:mcp` if setup has not already completed.
-2. Start or restart Codex from this repository. The project configuration at `.codex/config.toml` starts `blitz_canvas`.
+2. Start or restart your MCP client:
+
+   - Codex uses `.codex/config.toml`.
+   - Claude Code uses the project-scoped `.mcp.json`. On first use, approve `blitz_canvas` in Claude or through `/mcp`.
+
+   Both configurations start `blitz_canvas` automatically.
 3. Run the frontend:
 
    ```sh

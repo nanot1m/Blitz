@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "blitz_canvas": {
+      "type": "stdio",
+      "command": "npm",
+      "args": ["run", "mcp:server"],
+      "env": {
+        "BLITZ_BRIDGE_CERT_FILE": ".cert/localhost.pem",
+        "BLITZ_BRIDGE_KEY_FILE": ".cert/localhost-key.pem",
+        "BLITZ_BRIDGE_TOKEN_FILE": ".cert/bridge-token"
+      }
+    }
+  }
+}

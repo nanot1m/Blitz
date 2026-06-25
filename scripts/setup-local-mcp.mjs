@@ -219,6 +219,12 @@ Browser bridge token: ${token}
 Codex uses the repository configuration at:
   ${join(repositoryDirectory, ".codex/config.toml")}
 
+Claude Code uses the project configuration at:
+  ${join(repositoryDirectory, ".mcp.json")}
+
+Claude Code prompts once to approve project-scoped MCP servers. Open Claude in
+this repository and approve blitz_canvas through /mcp.
+
 Other stdio MCP clients can use:
 
 ${clientConfig()}

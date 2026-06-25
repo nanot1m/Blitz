@@ -80,7 +80,7 @@ export type TextLayoutBox = {
   width: number;
   height: number;
   padding: number;
-  verticalAlign: "top" | "middle" | "bottom";
+  verticalAlign: "top" | "middle" | "bottom" | "cap-middle";
 };
 
 type CommonObjectUpdate = {
@@ -320,7 +320,9 @@ function parseTextLayoutBox(value: unknown, label: string): TextLayoutBox | unde
     height,
     padding,
     verticalAlign:
-      box.verticalAlign === "middle" || box.verticalAlign === "bottom"
+      box.verticalAlign === "middle" ||
+      box.verticalAlign === "bottom" ||
+      box.verticalAlign === "cap-middle"
         ? box.verticalAlign
         : "top",
   };

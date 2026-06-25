@@ -251,17 +251,25 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
       let y = shape.y ?? 0;
       if (shape.box) {
         const availableHeight = shape.box.height - shape.box.padding * 2;
-        if (objectHeight > availableHeight + 0.001) {
+        const capHeight = wasm.blitz_font_cap_height() * shape.fontSize;
+        if (
+          shape.box.verticalAlign !== "cap-middle" &&
+          objectHeight > availableHeight + 0.001
+        ) {
           throw new Error(
             `Text does not fit its box height (${objectHeight.toFixed(2)} > ${availableHeight.toFixed(2)}).`,
           );
         }
         const verticalOffset =
-          shape.box.verticalAlign === "middle"
-            ? (availableHeight - objectHeight) * 0.5
-            : shape.box.verticalAlign === "bottom"
-              ? availableHeight - objectHeight
-              : 0;
+          shape.box.verticalAlign === "cap-middle"
+            ? (availableHeight + capHeight) * 0.5 -
+              wasm.blitz_font_ascender() * shape.fontSize -
+              4
+            : shape.box.verticalAlign === "middle"
+              ? (availableHeight - objectHeight) * 0.5
+              : shape.box.verticalAlign === "bottom"
+                ? availableHeight - objectHeight
+                : 0;
         x = shape.box.x + shape.box.padding + 4;
         y = shape.box.y + shape.box.padding + verticalOffset + 4;
       }
@@ -661,13 +669,20 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
           let fitsBox = true;
           if (box) {
             const availableHeight = box.height - box.padding * 2;
-            fitsBox = boundsHeight <= availableHeight + 0.001;
+            fitsBox =
+              box.verticalAlign === "cap-middle"
+                ? capHeightRatio * fontSize <= availableHeight + 0.001
+                : boundsHeight <= availableHeight + 0.001;
             const verticalOffset =
-              box.verticalAlign === "middle"
-                ? (availableHeight - boundsHeight) * 0.5
-                : box.verticalAlign === "bottom"
-                  ? availableHeight - boundsHeight
-                  : 0;
+              box.verticalAlign === "cap-middle"
+                ? (availableHeight + capHeightRatio * fontSize) * 0.5 -
+                  ascender -
+                  padding
+                : box.verticalAlign === "middle"
+                  ? (availableHeight - boundsHeight) * 0.5
+                  : box.verticalAlign === "bottom"
+                    ? availableHeight - boundsHeight
+                    : 0;
             placement = {
               x: box.x + box.padding + padding,
               y: box.y + box.padding + verticalOffset + padding,

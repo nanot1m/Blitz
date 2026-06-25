@@ -65,9 +65,22 @@ const measurements = adapter.measureText([
   },
   { text: "", fontSize: 30 },
   { text: "Unsupported 😀", fontSize: 24 },
+  {
+    text: "1",
+    fontSize: 20,
+    align: "center",
+    box: {
+      x: 500,
+      y: 600,
+      width: 44,
+      height: 44,
+      padding: 0,
+      verticalAlign: "cap-middle",
+    },
+  },
 ]);
 if (
-  measurements.items.length !== 3 ||
+  measurements.items.length !== 4 ||
   measurements.items[0].width <= 0 ||
   measurements.items[0].height <= 42 ||
   measurements.items[0].ascender <= 0 ||
@@ -84,7 +97,13 @@ if (
   measurements.items[0].supported !== true ||
   measurements.items[1].width !== 0 ||
   measurements.items[2].supported !== false ||
-  measurements.items[2].unsupportedGlyphs[0]?.hex !== "U+1F600"
+  measurements.items[2].unsupportedGlyphs[0]?.hex !== "U+1F600" ||
+  !measurements.items[3].fitsBox ||
+  Math.abs(
+    (measurements.items[3].placement!.y + measurements.items[3].ascender -
+      measurements.items[3].capHeight * 0.5) -
+      622,
+  ) > 0.001
 ) {
   throw new Error(`Unexpected text measurements: ${JSON.stringify(measurements)}`);
 }

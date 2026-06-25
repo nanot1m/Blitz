@@ -252,6 +252,8 @@ MCP text creation rejects unsupported glyphs and layouts that overflow `maxLines
 
 For card and slide layouts, text can instead provide a `box` with `x`, `y`, `width`, `height`, `padding`, and `verticalAlign`. Blitz derives the usable wrapping width and exact text origin; `canvas_measure_text` returns that origin as `placement`. This is preferred over manually positioning text from font metrics.
 
+Use `verticalAlign: "cap-middle"` with `align: "center"` for single digits, initials, or other short labels inside circular badges. It centers the visible cap-height region instead of the font's larger line box.
+
 ## Architecture
 
 ### WASM ECS

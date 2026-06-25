@@ -224,7 +224,7 @@ const server = new McpServer(
   { name: "blitz-canvas", version: "0.1.0" },
   {
     instructions:
-      "Inspect with canvas_get_scene before drawing into or revising an existing composition. Use canvas_update_objects with stable IDs to correct existing content instead of layering replacements. For text inside cards, columns, or other shapes, provide a text box and use the placement returned by canvas_measure_text; do not manually estimate origins from font metrics. Call canvas_get_text_capabilities when choosing characters, and do not use text when measurement reports supported=false, overflow=true, or fitsBox=false. Use canvas_find_empty_space when placement should avoid overlap. Coordinates are world-space pixels. Rect and triangle x/y are top-left; circle x/y is its center; unconstrained text x/y is the content top-left.",
+      "Inspect with canvas_get_scene before drawing into or revising an existing composition. Use canvas_update_objects with stable IDs to correct existing content instead of layering replacements. For text inside cards, columns, or other shapes, provide a text box and use the placement returned by canvas_measure_text; do not manually estimate origins from font metrics. Use verticalAlign=cap-middle plus align=center for digits or initials inside circular badges. Call canvas_get_text_capabilities when choosing characters, and do not use text when measurement reports supported=false, overflow=true, or fitsBox=false. Use canvas_find_empty_space when placement should avoid overlap. Coordinates are world-space pixels. Rect and triangle x/y are top-left; circle x/y is its center; unconstrained text x/y is the content top-left.",
   },
 );
 server.server.oninitialized = () => {
@@ -245,7 +245,10 @@ const textLayoutBox = z.object({
   width: dimension,
   height: dimension,
   padding: z.number().finite().min(0).max(100_000).default(0),
-  verticalAlign: z.enum(["top", "middle", "bottom"]).default("top"),
+  verticalAlign: z
+    .enum(["top", "middle", "bottom", "cap-middle"])
+    .default("top")
+    .describe("Use cap-middle for optically centering digits or initials inside badges."),
 });
 
 const rectShape = z.object({

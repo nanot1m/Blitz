@@ -11,6 +11,8 @@ type SceneFileWasm = {
   memory: WebAssembly.Memory;
   blitz_scene_file_buffer_ptr(): number;
   blitz_scene_file_buffer_capacity(): number;
+  blitz_clear_scene(): void;
+  blitz_set_camera(x: number, y: number, zoom: number): void;
   blitz_history_state_id(): number;
   blitz_capture_start_viewpoint(): void;
   blitz_scene_serialize(): number;
@@ -34,6 +36,7 @@ type SceneFileElements = {
   openMenu: HTMLDetailsElement;
   saveMenu: HTMLDetailsElement;
   saveIndicator: HTMLElement;
+  newFileButton: HTMLButtonElement;
   chooseFileButton: HTMLButtonElement;
   saveButton: HTMLButtonElement;
   saveAsButton: HTMLButtonElement;
@@ -355,6 +358,19 @@ export function setupSceneFileStorage(
     });
   };
 
+  const newFile = () => {
+    if (!canReplaceScene()) {
+      return;
+    }
+    wasm.blitz_clear_scene();
+    wasm.blitz_set_camera(0, 0, 1);
+    wasm.blitz_capture_start_viewpoint();
+    currentHandle = undefined;
+    markClean();
+    closeMenus();
+    options.onLoaded();
+  };
+
   const saveFile = () => {
     void run(async () => {
       if (currentHandle) {
@@ -383,6 +399,7 @@ export function setupSceneFileStorage(
       });
   };
 
+  elements.newFileButton.addEventListener("click", newFile);
   elements.chooseFileButton.addEventListener("click", openFile);
   elements.saveButton.addEventListener("click", saveFile);
   elements.saveAsButton.addEventListener("click", () => void run(saveAs));

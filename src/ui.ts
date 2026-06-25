@@ -88,6 +88,7 @@ export function createBlitzUi() {
     openSceneMenu: requireElement<HTMLDetailsElement>("#open-scene-menu"),
     saveSceneMenu: requireElement<HTMLDetailsElement>("#save-scene-menu"),
     saveSceneIndicator: requireElement<HTMLElement>("#save-scene"),
+    newSceneFileButton: requireElement<HTMLButtonElement>("#new-scene-file"),
     chooseSceneFileButton: requireElement<HTMLButtonElement>("#choose-scene-file"),
     saveSceneButton: requireElement<HTMLButtonElement>("#save-scene-current"),
     saveSceneAsButton: requireElement<HTMLButtonElement>("#save-scene-as"),

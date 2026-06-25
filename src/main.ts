@@ -31,6 +31,7 @@ type BlitzExports = {
   blitz_add_circle(): void;
   blitz_add_triangle(): void;
   blitz_add_text(): void;
+  blitz_clear_scene(): void;
   blitz_load_demo_template(): void;
   blitz_create_rect(
     x: number,
@@ -166,6 +167,7 @@ const {
   openSceneMenu,
   saveSceneMenu,
   saveSceneIndicator,
+  newSceneFileButton,
   chooseSceneFileButton,
   saveSceneButton,
   saveSceneAsButton,
@@ -670,6 +672,7 @@ async function boot() {
       openMenu: openSceneMenu,
       saveMenu: saveSceneMenu,
       saveIndicator: saveSceneIndicator,
+      newFileButton: newSceneFileButton,
       chooseFileButton: chooseSceneFileButton,
       saveButton: saveSceneButton,
       saveAsButton: saveSceneAsButton,

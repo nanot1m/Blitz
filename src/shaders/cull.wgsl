@@ -3,6 +3,7 @@ struct BlitzUniforms {
   style: vec4f,
   background_color: vec4f,
   font_params: vec4f,
+  interaction: vec4f,
 };
 
 struct ShapeCommand {

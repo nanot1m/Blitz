@@ -55,6 +55,22 @@ if (!history.redo()) {
 
 wasm.blitz_pointer_down(550, 540, 0);
 wasm.blitz_pointer_up();
+history.begin();
+wasm.blitz_set_selected_stroke(0.8, 0.6, 0.4);
+history.commit();
+if (!history.undo()) {
+  throw new Error("JavaScript history did not undo a style control transaction.");
+}
+wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
+if (Math.abs(item.getFloat32(72, true)) > 0.001) {
+  throw new Error("Style control transaction undo restored the wrong stroke color.");
+}
+if (!history.redo()) {
+  throw new Error("JavaScript history did not redo a style control transaction.");
+}
+
+wasm.blitz_pointer_down(550, 540, 0);
+wasm.blitz_pointer_up();
 history.transact(wasm.blitz_delete_selected);
 if (wasm.blitz_entity_count() !== 0 || !history.undo() || wasm.blitz_entity_count() !== 1) {
   throw new Error("JavaScript history did not restore a deleted object.");

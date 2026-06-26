@@ -118,6 +118,7 @@ typedef struct BlitzUniforms {
   float style[4];
   float background_color[4];
   float font_params[4];
+  float interaction[4];
 } BlitzUniforms;
 
 typedef struct ShapeCommand {
@@ -214,6 +215,7 @@ static u32 rect_draw_count;
 static u32 triangle_draw_count;
 static u32 circle_draw_count;
 static u32 text_draw_count;
+static u32 visible_text_shape_count;
 static u32 dyn_command_count;
 static u32 dyn_rect_count;
 static u32 shape_command_version;
@@ -1183,6 +1185,7 @@ static void extract_dynamic(void) {
   dyn_command_count = 0u;
   dyn_rect_count = 0u;
   text_draw_count = 0u;
+  visible_text_shape_count = 0u;
 
   float scale = uniforms.style[0];
   float half_w = uniforms.viewport_camera[0] * 0.5f / scale;
@@ -1204,6 +1207,7 @@ static void extract_dynamic(void) {
     }
     if (text_visible_in_view(entity, scale, view_min_x, view_min_y, view_max_x,
                              view_max_y)) {
+      visible_text_shape_count += 1u;
       u32 order = order_index;
       if (drag_active && world.selected[entity]) {
         order |= BLITZ_DRAG_FLAG;
@@ -1717,6 +1721,7 @@ void blitz_init(void) {
   triangle_draw_count = 0u;
   circle_draw_count = 0u;
   text_draw_count = 0u;
+  visible_text_shape_count = 0u;
   dyn_command_count = 0u;
   dyn_rect_count = 0u;
   shape_command_version = 0u;
@@ -1774,6 +1779,10 @@ void blitz_init(void) {
   uniforms.font_params[1] = BLITZ_FONT_MSDF_SPREAD;
   uniforms.font_params[2] = 0.0f;
   uniforms.font_params[3] = 0.0f;
+  uniforms.interaction[0] = 0.0f;
+  uniforms.interaction[1] = 0.0f;
+  uniforms.interaction[2] = 0.0f;
+  uniforms.interaction[3] = 0.0f;
 
   extract_static_shapes();
   extract_dynamic();
@@ -1944,8 +1953,8 @@ void blitz_pointer_move(float screen_x, float screen_y) {
   drag_offset.y += world_y - drag_last_world.y;
   drag_last_world.x = world_x;
   drag_last_world.y = world_y;
-  uniforms.font_params[2] = drag_offset.x;
-  uniforms.font_params[3] = drag_offset.y;
+  uniforms.interaction[0] = drag_offset.x;
+  uniforms.interaction[1] = drag_offset.y;
 }
 
 EXPORT("blitz_pointer_up")
@@ -1966,8 +1975,8 @@ void blitz_pointer_up(void) {
     }
     drag_offset.x = 0.0f;
     drag_offset.y = 0.0f;
-    uniforms.font_params[2] = 0.0f;
-    uniforms.font_params[3] = 0.0f;
+    uniforms.interaction[0] = 0.0f;
+    uniforms.interaction[1] = 0.0f;
     drag_active = 0u;
     dragging_selection = 0u;
     mark_render_list_dirty();
@@ -2067,8 +2076,8 @@ static void clear_scene_state(void) {
   drag_offset.y = 0.0f;
   resize_active = 0u;
   resize_entity = BLITZ_INVALID_INDEX;
-  uniforms.font_params[2] = 0.0f;
-  uniforms.font_params[3] = 0.0f;
+  uniforms.interaction[0] = 0.0f;
+  uniforms.interaction[1] = 0.0f;
   marquee_active = 0u;
   marquee_candidate = BLITZ_INVALID_INDEX;
   text_pool_used = 0u;
@@ -2104,6 +2113,26 @@ void blitz_load_demo_template(void) {
 EXPORT("blitz_clear_selection")
 void blitz_clear_selection(void) {
   clear_selection();
+}
+
+EXPORT("blitz_select_object")
+u32 blitz_select_object(u32 actor_hi, u32 actor_lo, u32 sequence_hi,
+                        u32 sequence_lo, u32 additive) {
+  ObjectId id = {actor_hi, actor_lo, sequence_hi, sequence_lo};
+  u32 entity = entity_for_object_id(id);
+  if (entity == BLITZ_INVALID_INDEX ||
+      !(world.masks[entity] & BLITZ_COMPONENT_SELECTABLE)) {
+    return 0u;
+  }
+  if (!additive) {
+    clear_selection();
+  }
+  if (!world.selected[entity]) {
+    world.selected[entity] = 1u;
+    selected_count += 1u;
+    mark_dynamic_dirty();
+  }
+  return 1u;
 }
 
 EXPORT("blitz_create_rect")
@@ -3296,6 +3325,12 @@ u32 blitz_text_draw_f32_count(void) {
 EXPORT("blitz_text_draw_count")
 u32 blitz_text_draw_count(void) {
   return text_draw_count;
+}
+
+EXPORT("blitz_visible_text_shape_count")
+u32 blitz_visible_text_shape_count(void) {
+  extract_dynamic();
+  return visible_text_shape_count;
 }
 
 EXPORT("blitz_render_max_text_draws")

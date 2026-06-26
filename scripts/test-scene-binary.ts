@@ -119,6 +119,13 @@ const originalEntities = wasm.blitz_entity_count();
 wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 10);
 const firstStableId = readObjectId(wasm.blitz_scene_query_ptr());
 const revisionBeforeSelectAll = wasm.blitz_scene_revision();
+wasm.blitz_clear_selection();
+if (wasm.blitz_select_object(firstStableId[0], firstStableId[1], firstStableId[2], firstStableId[3], 0) !== 1) {
+  throw new Error("Selecting by stable object ID failed.");
+}
+if (wasm.blitz_selected_count() !== 1) {
+  throw new Error("Selecting by stable object ID selected the wrong number of objects.");
+}
 wasm.blitz_select_all();
 if (wasm.blitz_selected_count() !== originalEntities) {
   throw new Error("Select all did not select every scene object.");

@@ -127,7 +127,7 @@ export function createBlitzUi() {
     toggleStatsButton: requireElement<HTMLButtonElement>("#toggle-stats"),
     toggleDebuggerButton: requireElement<HTMLButtonElement>("#toggle-debugger"),
     statsPanel: requireElement<HTMLDivElement>("#stats-panel"),
-    statsBody: requireElement<HTMLPreElement>("#stats-body"),
+    statsBody: requireElement<HTMLDivElement>("#stats-body"),
     openMcpSettingsButton: requireElement<HTMLButtonElement>("#open-mcp-settings"),
     mcpSettingsDialog: requireElement<HTMLDialogElement>("#mcp-settings-dialog"),
     mcpSettingsForm: requireElement<HTMLFormElement>("#mcp-settings-form"),

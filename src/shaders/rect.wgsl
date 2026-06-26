@@ -3,6 +3,7 @@ struct BlitzUniforms {
   style: vec4f,
   background_color: vec4f,
   font_params: vec4f,
+  interaction: vec4f,
 };
 
 struct ShapeCommand {
@@ -139,12 +140,12 @@ fn shape_vertex_main(
   }
 
   // High bit of the order word flags a dragged command: translate the
-  // rasterized position by the drag offset (font_params.zw). out.world stays in
+  // rasterized position by the drag offset (interaction.xy). out.world stays in
   // original geometry space so the fragment coverage is just shifted, not warped.
   let order = command.w & 0x7fffffffu;
   var draw_world = world;
   if ((command.w & 0x80000000u) != 0u) {
-    draw_world = world + u.font_params.zw;
+    draw_world = world + u.interaction.xy;
   }
 
   // Draw-order index as depth so the depth test resolves z-order across the

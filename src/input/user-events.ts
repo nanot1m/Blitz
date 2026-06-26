@@ -1,3 +1,5 @@
+import { tr } from "zod/v4/locales/index.js";
+
 type CanvasInteractionWasm = {
   blitz_hit_test(screenX: number, screenY: number): number;
   blitz_pan(dxPixels: number, dyPixels: number): void;
@@ -20,8 +22,11 @@ export type CanvasInteractionController = {
 };
 
 type KeyboardShortcutOptions = {
+  copySelection(): void | Promise<void>;
   deleteSelection(): void;
+  duplicateSelection(): void;
   openFile(): void;
+  pasteClipboard(): void | Promise<void>;
   redo(): void;
   saveFile(): void;
   selectAll(): void;
@@ -572,6 +577,24 @@ export function setupKeyboardShortcuts(options: KeyboardShortcutOptions): void {
         options.selectAll();
         return;
       }
+      if (key === "c") {
+        event.preventDefault();
+        options.stopDragging();
+        void options.copySelection();
+        return;
+      }
+      if (key === "v") {
+        event.preventDefault();
+        options.stopDragging();
+        void options.pasteClipboard();
+        return;
+      }
+      if (key === "d") {
+        event.preventDefault();
+        options.stopDragging();
+        options.duplicateSelection();
+        return;
+      }
       if (key === "o") {
         event.preventDefault();
         options.openFile();
@@ -616,47 +639,59 @@ function colorChannels(value: string): [number, number, number] {
   ];
 }
 
+function debounce<T extends (...args: any[]) => void>(func: T, wait: number): T {
+  let timeout: number | undefined;
+  return function (this: any, ...args: any[]) {
+    clearTimeout(timeout);
+    timeout = window.setTimeout(() => func.apply(this, args), wait);
+  } as T;
+}
+
+function makeTransactionable<T extends (...args: any[]) => void>(func: T, actions: StyleActions): T {
+  let transactionActive = false;
+  const debouncedCommitTransaction = debounce((actions: StyleActions) => {
+    if (!transactionActive) {
+      return;
+    }
+    actions.commitTransaction();
+    transactionActive = false;
+  }, 300);
+  return function (this: any, ...args: any[]) {
+    if (!transactionActive) {
+      actions.beginTransaction();
+      transactionActive = true;
+    }
+    func.apply(this, args);
+    debouncedCommitTransaction(actions);
+  } as T;
+}
+
 export function setupStyleControls(
   elements: StyleControlElements,
   actions: StyleActions,
 ): void {
-  const controls = [
-    elements.fillInput,
-    elements.fillOpacityInput,
-    elements.strokeInput,
-    elements.strokeOpacityInput,
-    elements.strokeWidthInput,
-    elements.textColorInput,
-    elements.textOpacityInput,
-  ];
-  for (const control of controls) {
-    control.addEventListener("pointerdown", actions.beginTransaction);
-    control.addEventListener("focus", actions.beginTransaction);
-    control.addEventListener("change", actions.commitTransaction);
-    control.addEventListener("blur", actions.commitTransaction);
-  }
-  elements.fillInput.addEventListener("input", () => {
+  elements.fillInput.addEventListener("input", makeTransactionable(() => {
     actions.setFill(...colorChannels(elements.fillInput.value));
-  });
-  elements.fillOpacityInput.addEventListener("input", () => {
+  }, actions));
+  elements.fillOpacityInput.addEventListener("input", makeTransactionable(() => {
     actions.setFillOpacity(Number(elements.fillOpacityInput.value));
-  });
-  elements.strokeInput.addEventListener("input", () => {
+  }, actions));
+  elements.strokeInput.addEventListener("input", makeTransactionable(() => {
     actions.setStroke(...colorChannels(elements.strokeInput.value));
-  });
-  elements.strokeOpacityInput.addEventListener("input", () => {
+  }, actions));
+  elements.strokeOpacityInput.addEventListener("input", makeTransactionable(() => {
     actions.setStrokeOpacity(Number(elements.strokeOpacityInput.value));
-  });
-  elements.strokeWidthInput.addEventListener("input", () => {
+  }, actions));
+  elements.strokeWidthInput.addEventListener("input", makeTransactionable(() => {
     const width = Number(elements.strokeWidthInput.value);
     if (Number.isFinite(width)) {
       actions.setStrokeWidth(width);
     }
-  });
-  elements.textColorInput.addEventListener("input", () => {
+  }, actions));
+  elements.textColorInput.addEventListener("input", makeTransactionable(() => {
     actions.setTextColor(...colorChannels(elements.textColorInput.value));
-  });
-  elements.textOpacityInput.addEventListener("input", () => {
+  }, actions));
+  elements.textOpacityInput.addEventListener("input", makeTransactionable(() => {
     actions.setTextOpacity(Number(elements.textOpacityInput.value));
-  });
+  }, actions));
 }

@@ -4,6 +4,7 @@ import {
   Bug,
   Circle,
   Ellipse,
+  Ellipsis,
   createIcons,
   FolderOpen,
   LayoutGrid,
@@ -33,6 +34,7 @@ export function createBlitzUi() {
       Bug,
       Circle,
       Ellipse,
+      Ellipsis,
       FolderOpen,
       LayoutGrid,
       Save,
@@ -51,11 +53,14 @@ export function createBlitzUi() {
   const fileMenuContent = requireElement<HTMLDivElement>(".file-menu-content");
   const shapeMenu = requireElement<HTMLDetailsElement>("#shape-menu");
   const shapeMenuContent = requireElement<HTMLDivElement>(".shape-menu-content");
+  const viewMenu = requireElement<HTMLDetailsElement>("#view-menu");
+  const viewMenuContent = requireElement<HTMLDivElement>(".view-menu-content");
   const collapsedShapeMenu = window.matchMedia("(max-width: 720px)");
 
   const syncShapeMenuMode = () => {
     fileMenu.open = !collapsedShapeMenu.matches;
     shapeMenu.open = !collapsedShapeMenu.matches;
+    viewMenu.open = !collapsedShapeMenu.matches;
   };
   syncShapeMenuMode();
   collapsedShapeMenu.addEventListener("change", syncShapeMenuMode);
@@ -71,6 +76,7 @@ export function createBlitzUi() {
   };
   fileMenuContent.addEventListener("click", (event) => closeCollapsedMenu(fileMenu, event));
   shapeMenuContent.addEventListener("click", (event) => closeCollapsedMenu(shapeMenu, event));
+  viewMenuContent.addEventListener("click", (event) => closeCollapsedMenu(viewMenu, event));
 
   document.addEventListener("pointerdown", (event) => {
     if (collapsedShapeMenu.matches && event.target instanceof Node) {
@@ -79,6 +85,9 @@ export function createBlitzUi() {
       }
       if (shapeMenu.open && !shapeMenu.contains(event.target)) {
         shapeMenu.open = false;
+      }
+      if (viewMenu.open && !viewMenu.contains(event.target)) {
+        viewMenu.open = false;
       }
     }
   });

@@ -89,15 +89,22 @@
         <i data-lucide="trash-2" aria-hidden="true"></i>
       </button>
       <span class="tool-divider" aria-hidden="true"></span>
-      <button id="toggle-stats" type="button" aria-label="Stats for nerds" title="Stats for nerds" aria-pressed="false">
-        <i data-lucide="activity" aria-hidden="true"></i>
-      </button>
-      <button id="toggle-debugger" type="button" aria-label="Selected entity debugger" title="Selected entity debugger" aria-pressed="false">
-        <i data-lucide="bug" aria-hidden="true"></i>
-      </button>
-      <button id="open-mcp-settings" type="button" aria-label="MCP bridge settings" title="MCP bridge: Disconnected">
-        <i data-lucide="settings" aria-hidden="true"></i>
-      </button>
+      <details id="view-menu">
+        <summary aria-label="View and settings" title="View and settings">
+          <i data-lucide="ellipsis" aria-hidden="true"></i>
+        </summary>
+        <div class="view-menu-content" role="group" aria-label="View and settings tools">
+          <button id="toggle-stats" type="button" aria-label="Stats for nerds" title="Stats for nerds" aria-pressed="false">
+            <i data-lucide="activity" aria-hidden="true"></i>
+          </button>
+          <button id="toggle-debugger" type="button" aria-label="Selected entity debugger" title="Selected entity debugger" aria-pressed="false">
+            <i data-lucide="bug" aria-hidden="true"></i>
+          </button>
+          <button id="open-mcp-settings" type="button" aria-label="MCP bridge settings" title="MCP bridge: Disconnected">
+            <i data-lucide="settings" aria-hidden="true"></i>
+          </button>
+        </div>
+      </details>
     </div>
     <div id="style-island" role="toolbar" aria-label="Selected item styles" hidden>
       <div id="selected-geometry-controls" class="selected-style-group">

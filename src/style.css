@@ -310,19 +310,23 @@ dialog {
 
 #file-menu,
 #shape-menu,
+#view-menu,
 .file-menu-content,
-.shape-menu-content {
+.shape-menu-content,
+.view-menu-content {
   display: contents;
 }
 
 #file-menu > summary,
-#shape-menu > summary {
+#shape-menu > summary,
+#view-menu > summary {
   display: none;
   list-style: none;
 }
 
 #file-menu > summary::-webkit-details-marker,
-#shape-menu > summary::-webkit-details-marker {
+#shape-menu > summary::-webkit-details-marker,
+#view-menu > summary::-webkit-details-marker {
   display: none;
 }
 
@@ -1057,24 +1061,28 @@ dialog::backdrop {
   }
 
   #file-menu,
-  #shape-menu {
+  #shape-menu,
+  #view-menu {
     position: relative;
     display: block;
     height: 32px;
   }
 
   #file-menu > summary,
-  #shape-menu > summary {
+  #shape-menu > summary,
+  #view-menu > summary {
     display: inline-flex;
   }
 
   #file-menu:not([open]) .file-menu-content,
-  #shape-menu:not([open]) .shape-menu-content {
+  #shape-menu:not([open]) .shape-menu-content,
+  #view-menu:not([open]) .view-menu-content {
     display: none;
   }
 
   .file-menu-content,
-  .shape-menu-content {
+  .shape-menu-content,
+  .view-menu-content {
     position: absolute;
     top: calc(100% + 8px);
     left: 0;
@@ -1092,13 +1100,20 @@ dialog::backdrop {
     grid-template-columns: repeat(2, 34px);
   }
 
+  .view-menu-content {
+    right: 0;
+    left: auto;
+    grid-template-columns: repeat(3, 34px);
+  }
+
   .scene-action-popup {
     top: calc(100% + 8px);
     left: -5px;
   }
 
   #file-menu[open] > summary,
-  #shape-menu[open] > summary {
+  #shape-menu[open] > summary,
+  #view-menu[open] > summary {
     background: #edf3ff;
     color: #155bd7;
   }

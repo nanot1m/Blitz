@@ -251,22 +251,33 @@ fn shape_fragment_main(in: VertexOut) -> @location(0) vec4f {
 
   if (command.x == 0u) {
     let draw = rect_draws[command.y];
+    let stroke_width = draw.stroke_width_pad.x;
     coverage = rect_alpha(in.world, draw.rect, 0.0, edge_alpha);
-    let inner = rect_alpha(in.world, draw.rect, draw.stroke_width_pad.x, edge_alpha);
-    stroke = coverage * (1.0 - inner);
+    if (stroke_width > 0.0) {
+      let inner = rect_alpha(in.world, draw.rect, stroke_width, edge_alpha);
+      stroke = coverage * (1.0 - inner);
+    } else {
+      stroke = 0.0;
+    }
     fill_color = draw.fill_color;
     stroke_color = draw.stroke_color;
   } else if (command.x == 1u) {
     let draw = triangle_draws[command.y];
+    let stroke_width = draw.stroke_width_pad.x;
     coverage = triangle_alpha(in.world, draw, edge_alpha);
-    stroke = coverage * triangle_stroke(in.world, draw, edge_alpha);
+    stroke = select(0.0, coverage * triangle_stroke(in.world, draw, edge_alpha), stroke_width > 0.0);
     fill_color = draw.fill_color;
     stroke_color = draw.stroke_color;
   } else {
     let draw = circle_draws[command.y];
+    let stroke_width = draw.stroke_width_pad.x;
     coverage = circle_alpha(in.world, draw, 0.0, edge_alpha);
-    let inner = circle_alpha(in.world, draw, draw.stroke_width_pad.x, edge_alpha);
-    stroke = coverage * (1.0 - inner);
+    if (stroke_width > 0.0) {
+      let inner = circle_alpha(in.world, draw, stroke_width, edge_alpha);
+      stroke = coverage * (1.0 - inner);
+    } else {
+      stroke = 0.0;
+    }
     fill_color = draw.fill_color;
     stroke_color = draw.stroke_color;
   }

@@ -1,15 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { delimiter, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultWindowsClang = "C:\\Program Files\\LLVM\\bin\\clang.exe";
-const clang =
-  process.env.CLANG ?? (process.platform === "win32" && existsSync(defaultWindowsClang)
-    ? defaultWindowsClang
-    : "clang");
-const emcc = process.env.EMCC ?? "emcc";
+const homebrewLlvmBin = "/opt/homebrew/opt/llvm/bin";
+const homebrewLldBin = "/opt/homebrew/opt/lld/bin";
 const input = resolve(root, "src/wasm/blitz.c");
 const output = resolve(root, "public/blitz.wasm");
 
@@ -30,6 +27,7 @@ const wasmExports = [
   "blitz_pointer_up",
   "blitz_add_rect",
   "blitz_add_circle",
+  "blitz_add_oval",
   "blitz_add_triangle",
   "blitz_add_text",
   "blitz_clear_scene",
@@ -38,6 +36,7 @@ const wasmExports = [
   "blitz_select_object",
   "blitz_create_rect",
   "blitz_create_circle",
+  "blitz_create_oval",
   "blitz_create_triangle",
   "blitz_text_input_ptr",
   "blitz_text_input_capacity",
@@ -98,9 +97,9 @@ const wasmExports = [
   "blitz_triangle_draw_ptr",
   "blitz_triangle_draw_f32_count",
   "blitz_triangle_draw_count",
-  "blitz_circle_draw_ptr",
-  "blitz_circle_draw_f32_count",
-  "blitz_circle_draw_count",
+  "blitz_oval_draw_ptr",
+  "blitz_oval_draw_f32_count",
+  "blitz_oval_draw_count",
   "blitz_text_draw_ptr",
   "blitz_text_draw_f32_count",
   "blitz_text_draw_count",
@@ -128,12 +127,36 @@ const commandAvailable = (command) => {
   return result.status === 0;
 };
 
+const commandOnPath = (command) => {
+  const pathEntries = (process.env.PATH ?? "").split(delimiter);
+  const extensions = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""];
+  for (const pathEntry of pathEntries) {
+    for (const extension of extensions) {
+      const candidate = resolve(pathEntry, `${command}${extension}`);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return "";
+};
+
+const firstAvailable = (candidates) =>
+  candidates.find((candidate) => candidate && commandAvailable(candidate)) ?? "";
+
+const firstExisting = (candidates) =>
+  candidates.find((candidate) => candidate && existsSync(candidate)) ?? "";
+
 const clangArgs = [
   "--target=wasm32",
   "-O3",
+  "-ffunction-sections",
+  "-fdata-sections",
   "-nostdlib",
   "-Wl,--no-entry",
   "-Wl,--export-memory",
+  "-Wl,--gc-sections",
+  "-Wl,--strip-all",
   ...wasmExports.map((name) => `-Wl,--export=${name}`),
   "-o",
   output,
@@ -152,11 +175,40 @@ const emccArgs = [
   output,
 ];
 
-const compiler = process.env.CLANG || commandAvailable(clang) ? clang : emcc;
-const args = compiler === emcc ? emccArgs : clangArgs;
+const wasmLd = firstExisting([
+  process.env.WASM_LD,
+  commandOnPath("wasm-ld"),
+  resolve(homebrewLldBin, "wasm-ld"),
+  resolve(homebrewLlvmBin, "wasm-ld"),
+]);
+const clang = firstAvailable([
+  process.env.CLANG,
+  resolve(homebrewLlvmBin, "clang"),
+  process.platform === "win32" && existsSync(defaultWindowsClang) ? defaultWindowsClang : "",
+  "clang",
+]);
+const emcc = firstAvailable([process.env.EMCC, commandOnPath("emcc"), "emcc"]);
+
+const explicitCompiler = process.env.CLANG || process.env.EMCC;
+const compiler = explicitCompiler
+  ? explicitCompiler
+  : clang && wasmLd
+    ? clang
+    : emcc || clang;
+const usingEmcc = compiler.includes("emcc");
+const args = usingEmcc ? emccArgs : clangArgs;
+const wasmLdBin = wasmLd ? dirname(wasmLd) : "";
+const env = wasmLdBin && !usingEmcc
+  ? { ...process.env, PATH: `${wasmLdBin}${delimiter}${process.env.PATH ?? ""}` }
+  : process.env;
+
+console.log(
+  `Building WASM with ${usingEmcc ? compiler : `${compiler} + ${wasmLd || "system wasm-ld"}`}`,
+);
 
 const result = spawnSync(compiler, args, {
   cwd: root,
+  env,
   stdio: "inherit",
 });
 

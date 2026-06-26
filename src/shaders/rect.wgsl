@@ -25,8 +25,8 @@ struct TriangleDraw {
   stroke_width_pad: vec4f,
 };
 
-struct CircleDraw {
-  circle: vec4f,
+struct OvalDraw {
+  oval: vec4f,
   fill_color: vec4f,
   stroke_color: vec4f,
   stroke_width_pad: vec4f,
@@ -51,7 +51,7 @@ var<storage, read> rect_draws: array<RectDraw>;
 var<storage, read> triangle_draws: array<TriangleDraw>;
 
 @group(0) @binding(4)
-var<storage, read> circle_draws: array<CircleDraw>;
+var<storage, read> oval_draws: array<OvalDraw>;
 
 @group(0) @binding(5)
 var<storage, read> text_draws: array<TextDraw>;
@@ -97,10 +97,10 @@ fn triangle_bounds(draw: TriangleDraw, vertex_index: u32) -> vec2f {
   return rect_bounds(vec4f(bounds_min, bounds_max - bounds_min), vertex_index);
 }
 
-fn circle_bounds(circle: vec4f, vertex_index: u32) -> vec2f {
-  let center = circle.xy;
-  let radius = circle.z;
-  return rect_bounds(vec4f(center - vec2f(radius), vec2f(radius * 2.0)), vertex_index);
+fn oval_bounds(oval: vec4f, vertex_index: u32) -> vec2f {
+  let center = oval.xy;
+  let radii = oval.zw;
+  return rect_bounds(vec4f(center - radii, radii * 2.0), vertex_index);
 }
 
 fn text_vertex(draw: TextDraw, vertex_index: u32) -> vec4f {
@@ -132,7 +132,7 @@ fn shape_vertex_main(
   } else if (command.x == 1u) {
     world = triangle_bounds(triangle_draws[command.y], shape_vertex_index);
   } else if (command.x == 2u) {
-    world = circle_bounds(circle_draws[command.y].circle, shape_vertex_index);
+    world = oval_bounds(oval_draws[command.y].oval, shape_vertex_index);
   } else {
     let text_position = text_vertex(text_draws[command.y], shape_vertex_index);
     world = text_position.xy;
@@ -211,10 +211,11 @@ fn triangle_stroke(world: vec2f, draw: TriangleDraw, edge_alpha: f32) -> f32 {
   return 1.0 - smoothstep(draw.stroke_width_pad.x, draw.stroke_width_pad.x + edge_alpha, distance_to_edge);
 }
 
-fn circle_alpha(world: vec2f, draw: CircleDraw, inset: f32, edge_alpha: f32) -> f32 {
-  let distance_to_center = length(world - draw.circle.xy);
-  let radius = max(draw.circle.z - inset, 0.0);
-  return 1.0 - smoothstep(radius - edge_alpha, radius, distance_to_center);
+fn oval_alpha(world: vec2f, draw: OvalDraw, inset: f32, edge_alpha: f32) -> f32 {
+  let radii = max(draw.oval.zw - vec2f(inset), vec2f(0.001));
+  let distance_to_center = length((world - draw.oval.xy) / radii);
+  let edge = edge_alpha / max(min(radii.x, radii.y), 0.001);
+  return 1.0 - smoothstep(1.0 - edge, 1.0, distance_to_center);
 }
 
 fn median(value: vec3f) -> f32 {
@@ -269,11 +270,11 @@ fn shape_fragment_main(in: VertexOut) -> @location(0) vec4f {
     fill_color = draw.fill_color;
     stroke_color = draw.stroke_color;
   } else {
-    let draw = circle_draws[command.y];
+    let draw = oval_draws[command.y];
     let stroke_width = draw.stroke_width_pad.x;
-    coverage = circle_alpha(in.world, draw, 0.0, edge_alpha);
+    coverage = oval_alpha(in.world, draw, 0.0, edge_alpha);
     if (stroke_width > 0.0) {
-      let inner = circle_alpha(in.world, draw, stroke_width, edge_alpha);
+      let inner = oval_alpha(in.world, draw, stroke_width, edge_alpha);
       stroke = coverage * (1.0 - inner);
     } else {
       stroke = 0.0;

@@ -25,8 +25,8 @@ struct TriangleDraw {
   stroke_width_pad: vec4f,
 };
 
-struct CircleDraw {
-  circle: vec4f,
+struct OvalDraw {
+  oval: vec4f,
   fill_color: vec4f,
   stroke_color: vec4f,
   stroke_width_pad: vec4f,
@@ -52,7 +52,7 @@ var<storage, read> rect_draws: array<RectDraw>;
 var<storage, read> triangle_draws: array<TriangleDraw>;
 
 @group(0) @binding(4)
-var<storage, read> circle_draws: array<CircleDraw>;
+var<storage, read> oval_draws: array<OvalDraw>;
 
 @group(0) @binding(5)
 var<storage, read_write> visible_commands: array<ShapeCommand>;
@@ -71,8 +71,8 @@ fn shape_bounds(command: vec4u) -> vec4f {
     let bounds_max = max(d.points_a.xy, max(d.points_a.zw, d.points_b.xy));
     return vec4f(bounds_min, bounds_max);
   }
-  let c = circle_draws[command.y].circle;
-  return vec4f(c.xy - vec2f(c.z), c.xy + vec2f(c.z));
+  let c = oval_draws[command.y].oval;
+  return vec4f(c.xy - c.zw, c.xy + c.zw);
 }
 
 @compute @workgroup_size(64)

@@ -36,12 +36,12 @@ type KeyboardShortcutOptions = {
 
 type UiActionElements = {
   addCircleButton: HTMLButtonElement;
+  addOvalButton: HTMLButtonElement;
   addRectButton: HTMLButtonElement;
   addTextButton: HTMLButtonElement;
   addTriangleButton: HTMLButtonElement;
   bringToFrontButton: HTMLButtonElement;
   deleteButton: HTMLButtonElement;
-  emptyAddItemButton: HTMLButtonElement;
   emptyDemoTemplateButton: HTMLButtonElement;
   emptyOpenFileButton: HTMLButtonElement;
   sendToBackButton: HTMLButtonElement;
@@ -52,6 +52,7 @@ type UiActionElements = {
 
 type UiActions = {
   addCircle(): void;
+  addOval(): void;
   addRect(): void;
   addText(): void;
   addTriangle(): void;
@@ -105,11 +106,44 @@ function allowsNativeSelection(target: EventTarget | null): boolean {
   );
 }
 
+function setupBrowserZoomGuards(canvas: HTMLCanvasElement): void {
+  document.addEventListener(
+    "wheel",
+    (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.target !== canvas) {
+        event.preventDefault();
+      }
+    },
+    { capture: true, passive: false },
+  );
+  document.addEventListener(
+    "touchmove",
+    (event) => {
+      if (event.touches.length > 1) {
+        event.preventDefault();
+      }
+    },
+    { capture: true, passive: false },
+  );
+  for (const eventName of ["gesturestart", "gesturechange", "gestureend"]) {
+    document.addEventListener(
+      eventName,
+      (event) => {
+        if (event.target !== canvas) {
+          event.preventDefault();
+        }
+      },
+      { capture: true, passive: false },
+    );
+  }
+}
+
 export function setupCanvasInteractions(
   canvas: HTMLCanvasElement,
   wasm: CanvasInteractionWasm,
   options: CanvasInteractionOptions,
 ): CanvasInteractionController {
+  setupBrowserZoomGuards(canvas);
   let draggingCamera = false;
   let draggingEntity = false;
   let resizingEntity = false;
@@ -616,6 +650,7 @@ export function setupKeyboardShortcuts(options: KeyboardShortcutOptions): void {
 export function setupUiActions(elements: UiActionElements, actions: UiActions): void {
   elements.addRectButton.addEventListener("click", actions.addRect);
   elements.addCircleButton.addEventListener("click", actions.addCircle);
+  elements.addOvalButton.addEventListener("click", actions.addOval);
   elements.addTriangleButton.addEventListener("click", actions.addTriangle);
   elements.addTextButton.addEventListener("click", actions.addText);
   elements.stressTestButton.addEventListener("click", actions.stressTest);
@@ -625,10 +660,6 @@ export function setupUiActions(elements: UiActionElements, actions: UiActions): 
   elements.toggleStatsButton.addEventListener("click", actions.toggleStats);
   elements.emptyOpenFileButton.addEventListener("click", actions.openFile);
   elements.emptyDemoTemplateButton.addEventListener("click", actions.loadDemoTemplate);
-  elements.emptyAddItemButton.addEventListener("click", () => {
-    elements.shapeMenu.open = true;
-    elements.addRectButton.focus();
-  });
 }
 
 function colorChannels(value: string): [number, number, number] {

@@ -59,6 +59,14 @@ select,
   -webkit-touch-callout: default;
 }
 
+@media (max-width: 720px) {
+  input:not([type="checkbox"]):not([type="color"]):not([type="range"]),
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
+
 dialog {
   touch-action: manipulation;
 }
@@ -483,7 +491,7 @@ dialog {
   display: grid;
   place-items: start center;
   overflow: auto;
-  padding: clamp(20px, 7vh, 72px) 0 32px;
+  padding: clamp(14px, 5vh, 46px) 0 24px;
   pointer-events: none;
 }
 
@@ -493,43 +501,49 @@ dialog {
 }
 
 .empty-state-card {
-  width: min(520px, 100%);
-  padding: 28px;
-  border: 1px solid rgba(125, 142, 160, 0.28);
-  border-radius: 14px;
-  background: rgba(21, 27, 34, 0.88);
-  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.22);
-  color: #f1f5f9;
+  width: min(420px, 100%);
+  padding: 18px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: rgba(236, 241, 247, 0.86);
   pointer-events: auto;
   text-align: center;
-  backdrop-filter: blur(12px);
 }
 
 .empty-state-card h1 {
   margin: 0;
-  font-size: clamp(24px, 4vw, 32px);
-  letter-spacing: -0.025em;
+  color: rgba(241, 245, 249, 0.9);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0;
 }
 
 .empty-state-card > p {
-  margin: 10px 0 0;
-  color: #aeb9c6;
-  font-size: 15px;
-  line-height: 1.6;
+  margin: 8px 0 0;
+  color: rgba(174, 185, 198, 0.78);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .empty-inline-action {
   padding: 0;
   border: 0;
-  border-bottom: 1px solid currentColor;
+  border-bottom: 1px solid rgba(132, 170, 225, 0.42);
   background: transparent;
-  color: #7fb0ff;
+  color: rgba(142, 181, 238, 0.86);
   font: inherit;
   cursor: pointer;
 }
 
 .empty-inline-action:hover {
-  color: #a8caff;
+  border-bottom-color: rgba(168, 202, 255, 0.75);
+  color: rgba(190, 215, 255, 0.96);
+}
+
+.empty-primary-text {
+  color: rgba(226, 232, 240, 0.9);
+  font-weight: 650;
 }
 
 .empty-inline-action:focus-visible,
@@ -540,18 +554,18 @@ dialog {
 }
 
 .empty-state-section {
-  margin-top: 24px;
-  padding-top: 20px;
-  border-top: 1px solid rgba(125, 142, 160, 0.22);
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(125, 142, 160, 0.14);
   text-align: left;
 }
 
 .empty-state-section h2 {
-  margin: 0 0 10px;
-  color: #aeb9c6;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
+  margin: 0 0 8px;
+  color: rgba(174, 185, 198, 0.62);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
@@ -592,34 +606,36 @@ dialog {
 
 .template-card {
   display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
+  grid-template-columns: 72px minmax(0, 1fr);
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   width: 100%;
-  padding: 10px;
-  border: 1px solid rgba(125, 142, 160, 0.28);
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.035);
-  color: #e2e8f0;
-  font: 650 14px/1.3 inherit;
+  min-height: 54px;
+  padding: 8px;
+  border: 1px solid rgba(125, 142, 160, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.018);
+  color: rgba(226, 232, 240, 0.82);
+  font: 620 13px/1.3 inherit;
   text-align: left;
   cursor: pointer;
 }
 
 .template-card:hover {
-  border-color: rgba(127, 176, 255, 0.6);
-  background: rgba(127, 176, 255, 0.09);
+  border-color: rgba(127, 176, 255, 0.34);
+  background: rgba(127, 176, 255, 0.055);
+  color: rgba(241, 245, 249, 0.92);
 }
 
 .template-preview {
   position: relative;
   display: block;
-  width: 112px;
+  width: 72px;
   aspect-ratio: 16 / 9;
   overflow: hidden;
-  border: 1px solid #cdd4dd;
-  border-top: 3px solid #ef5148;
-  background: #edf1f6;
+  border: 1px solid rgba(205, 212, 221, 0.54);
+  border-top: 2px solid rgba(239, 81, 72, 0.78);
+  background: rgba(237, 241, 246, 0.84);
 }
 
 .template-preview span {
@@ -1016,15 +1032,15 @@ dialog::backdrop {
   }
 
   .empty-state-card {
-    padding: 22px 18px;
+    padding: 16px;
   }
 
   .template-card {
-    grid-template-columns: 96px minmax(0, 1fr);
+    grid-template-columns: 68px minmax(0, 1fr);
   }
 
   .template-preview {
-    width: 96px;
+    width: 68px;
   }
 
   #tool-island {

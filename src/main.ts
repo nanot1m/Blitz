@@ -30,6 +30,7 @@ type BlitzExports = {
   blitz_pointer_up(): void;
   blitz_add_rect(): void;
   blitz_add_circle(): void;
+  blitz_add_oval(): void;
   blitz_add_triangle(): void;
   blitz_add_text(): void;
   blitz_clear_scene(): void;
@@ -53,6 +54,21 @@ type BlitzExports = {
     centerX: number,
     centerY: number,
     radius: number,
+    fillR: number,
+    fillG: number,
+    fillB: number,
+    fillA: number,
+    strokeR: number,
+    strokeG: number,
+    strokeB: number,
+    strokeA: number,
+    strokeWidth: number,
+  ): number;
+  blitz_create_oval(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
     fillR: number,
     fillG: number,
     fillB: number,
@@ -164,9 +180,9 @@ type BlitzExports = {
   blitz_triangle_draw_ptr(): number;
   blitz_triangle_draw_f32_count(): number;
   blitz_triangle_draw_count(): number;
-  blitz_circle_draw_ptr(): number;
-  blitz_circle_draw_f32_count(): number;
-  blitz_circle_draw_count(): number;
+  blitz_oval_draw_ptr(): number;
+  blitz_oval_draw_f32_count(): number;
+  blitz_oval_draw_count(): number;
   blitz_text_draw_ptr(): number;
   blitz_text_draw_f32_count(): number;
   blitz_text_draw_count(): number;
@@ -200,7 +216,6 @@ const {
   recentScenes,
   recentScenesDivider,
   emptyState,
-  emptyAddItemButton,
   emptyOpenFileButton,
   emptyRecentSection,
   emptyRecentScenes,
@@ -221,6 +236,7 @@ const {
   selectedTextOpacityInput,
   addRectButton,
   addCircleButton,
+  addOvalButton,
   addTriangleButton,
   addTextButton,
   stressTestButton,
@@ -299,8 +315,8 @@ async function boot() {
   const rectDrawBufferByteLength = maxShapes * rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const triangleDrawF32Count = wasm.blitz_triangle_draw_f32_count();
   const triangleDrawBufferByteLength = maxShapes * triangleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
-  const circleDrawF32Count = wasm.blitz_circle_draw_f32_count();
-  const circleDrawBufferByteLength = maxShapes * circleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const ovalDrawF32Count = wasm.blitz_oval_draw_f32_count();
+  const ovalDrawBufferByteLength = maxShapes * ovalDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const textDrawF32Count = wasm.blitz_text_draw_f32_count();
   const textDrawBufferByteLength =
     wasm.blitz_render_max_text_draws() * textDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
@@ -315,7 +331,7 @@ async function boot() {
     shapeCommandBufferByteLength * 2 +
     rectDrawBufferByteLength +
     triangleDrawBufferByteLength +
-    circleDrawBufferByteLength +
+    ovalDrawBufferByteLength +
     textDrawBufferByteLength +
     dynCommandBufferByteLength +
     dynRectBufferByteLength +
@@ -474,9 +490,9 @@ async function boot() {
     size: triangleDrawBufferByteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
-  const circleStorageBuffer = device.createBuffer({
-    label: "Blitz Circle Draw Storage",
-    size: circleDrawBufferByteLength,
+  const ovalStorageBuffer = device.createBuffer({
+    label: "Blitz Oval Draw Storage",
+    size: ovalDrawBufferByteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
   const textStorageBuffer = device.createBuffer({
@@ -520,7 +536,7 @@ async function boot() {
       { binding: 1, resource: { buffer: shapeCommandStorageBuffer } },
       { binding: 2, resource: { buffer: rectStorageBuffer } },
       { binding: 3, resource: { buffer: triangleStorageBuffer } },
-      { binding: 4, resource: { buffer: circleStorageBuffer } },
+      { binding: 4, resource: { buffer: ovalStorageBuffer } },
       { binding: 5, resource: { buffer: visibleCommandStorageBuffer } },
       { binding: 6, resource: { buffer: drawArgsBuffer } },
     ],
@@ -535,13 +551,13 @@ async function boot() {
       { binding: 1, resource: { buffer: visibleCommandStorageBuffer } },
       { binding: 2, resource: { buffer: rectStorageBuffer } },
       { binding: 3, resource: { buffer: triangleStorageBuffer } },
-      { binding: 4, resource: { buffer: circleStorageBuffer } },
+      { binding: 4, resource: { buffer: ovalStorageBuffer } },
       { binding: 5, resource: { buffer: textStorageBuffer } },
       { binding: 6, resource: fontAtlasTexture.createView() },
       { binding: 7, resource: fontSampler },
     ],
   });
-  // Dynamic pass draws text + selection/marquee; triangle/circle bindings are
+  // Dynamic pass draws text + selection/marquee; triangle/oval bindings are
   // unused but the layout requires them.
   const dynamicRenderBindGroup = device.createBindGroup({
     label: "Blitz Dynamic Render Bind Group",
@@ -551,7 +567,7 @@ async function boot() {
       { binding: 1, resource: { buffer: dynCommandStorageBuffer } },
       { binding: 2, resource: { buffer: dynRectStorageBuffer } },
       { binding: 3, resource: { buffer: triangleStorageBuffer } },
-      { binding: 4, resource: { buffer: circleStorageBuffer } },
+      { binding: 4, resource: { buffer: ovalStorageBuffer } },
       { binding: 5, resource: { buffer: textStorageBuffer } },
       { binding: 6, resource: fontAtlasTexture.createView() },
       { binding: 7, resource: fontSampler },
@@ -594,8 +610,8 @@ async function boot() {
     const shapeCount = wasm.blitz_entity_count();
     const rectShapeCount = wasm.blitz_rect_draw_count();
     const triangleShapeCount = wasm.blitz_triangle_draw_count();
-    const circleShapeCount = wasm.blitz_circle_draw_count();
-    const geometryShapeCount = rectShapeCount + triangleShapeCount + circleShapeCount;
+    const ovalShapeCount = wasm.blitz_oval_draw_count();
+    const geometryShapeCount = rectShapeCount + triangleShapeCount + ovalShapeCount;
     const textShapeCount = Math.max(0, shapeCount - geometryShapeCount);
     const staticCommandCount = wasm.blitz_shape_command_count();
     const dynamicCommandCount = wasm.blitz_dyn_command_count();
@@ -613,7 +629,7 @@ async function boot() {
         ${statsBreakdown([
           ["Rect", formatNumber(rectShapeCount)],
           ["Tri", formatNumber(triangleShapeCount)],
-          ["Circ", formatNumber(circleShapeCount)],
+          ["Oval", formatNumber(ovalShapeCount)],
           ["Text", formatNumber(textShapeCount)],
         ])}
       </div>
@@ -726,7 +742,7 @@ async function boot() {
     );
     debuggerEntityId.textContent = `${words[0]}${words[1]}:${words[2]}${words[3]}`;
     const kind = view.getUint32(ptr + 16, true);
-    const kindNames = ["Rectangle", "Triangle", "Circle", "Text"];
+    const kindNames = ["Rectangle", "Triangle", "Oval", "Text"];
     const mask = wasm.blitz_selected_debug_mask();
     debuggerComponents.append(
       debugComponent("Entity", {
@@ -1013,10 +1029,11 @@ async function boot() {
         shape.align,
       );
     } else if (shape.type === "circle") {
-      entity = wasm.blitz_create_circle(
-        x + shape.width * 0.5,
-        y + shape.height * 0.5,
-        Math.min(shape.width, shape.height) * 0.5,
+      entity = wasm.blitz_create_oval(
+        x,
+        y,
+        shape.width,
+        shape.height,
         shape.fill[0],
         shape.fill[1],
         shape.fill[2],
@@ -1196,12 +1213,12 @@ async function boot() {
   setupUiActions(
     {
       addCircleButton,
+      addOvalButton,
       addRectButton,
       addTextButton,
       addTriangleButton,
       bringToFrontButton,
       deleteButton,
-      emptyAddItemButton,
       emptyDemoTemplateButton,
       emptyOpenFileButton,
       sendToBackButton,
@@ -1211,6 +1228,7 @@ async function boot() {
     },
     {
       addCircle: () => runSceneAction(wasm.blitz_add_circle),
+      addOval: () => runSceneAction(wasm.blitz_add_oval),
       addRect: () => runSceneAction(wasm.blitz_add_rect),
       addText: () => runSceneAction(wasm.blitz_add_text),
       addTriangle: () => runSceneAction(wasm.blitz_add_triangle),
@@ -1331,8 +1349,8 @@ async function boot() {
       const rectDrawCount = wasm.blitz_rect_draw_count();
       const triangleDrawPtr = wasm.blitz_triangle_draw_ptr();
       const triangleDrawCount = wasm.blitz_triangle_draw_count();
-      const circleDrawPtr = wasm.blitz_circle_draw_ptr();
-      const circleDrawCount = wasm.blitz_circle_draw_count();
+      const ovalDrawPtr = wasm.blitz_oval_draw_ptr();
+      const ovalDrawCount = wasm.blitz_oval_draw_count();
       currentShapeCommandCount = shapeCommandCount;
       if (shapeCommandCount > 0) {
         device.queue.writeBuffer(
@@ -1355,11 +1373,11 @@ async function boot() {
           new Float32Array(wasm.memory.buffer, triangleDrawPtr, triangleDrawCount * triangleDrawF32Count),
         );
       }
-      if (circleDrawCount > 0) {
+      if (ovalDrawCount > 0) {
         device.queue.writeBuffer(
-          circleStorageBuffer,
+          ovalStorageBuffer,
           0,
-          new Float32Array(wasm.memory.buffer, circleDrawPtr, circleDrawCount * circleDrawF32Count),
+          new Float32Array(wasm.memory.buffer, ovalDrawPtr, ovalDrawCount * ovalDrawF32Count),
         );
       }
       lastUploadedShapeCommandVersion = shapeCommandVersion;

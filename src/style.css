@@ -121,19 +121,17 @@ dialog {
 #style-island {
   position: fixed;
   top: 72px;
-  left: 50%;
+  right: 16px;
   z-index: 2;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 42px;
-  padding: 6px 10px;
+  display: grid;
+  gap: 8px;
+  width: 206px;
+  padding: 9px;
   border: 1px solid #d4d9e1;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
   color: #313b48;
-  transform: translateX(-50%);
 }
 
 #debugger-island {
@@ -208,17 +206,27 @@ dialog {
   display: none;
 }
 
+.style-panel-heading {
+  padding: 0 2px 2px;
+  color: #657080;
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .selected-style-group,
 .selected-stroke-controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  display: grid;
+  gap: 6px;
 }
 
 .style-control {
-  display: flex;
+  display: grid;
+  grid-template-columns: 48px 28px minmax(0, 1fr);
   align-items: center;
-  gap: 7px;
+  gap: 6px;
+  min-height: 28px;
   color: #657080;
   font-size: 12px;
   font-weight: 650;
@@ -245,13 +253,18 @@ dialog {
 }
 
 .style-opacity {
-  width: 72px;
+  width: 100%;
+  min-width: 0;
   accent-color: #155bd7;
   cursor: pointer;
 }
 
+.style-width-control {
+  grid-template-columns: 48px minmax(0, 1fr);
+}
+
 .style-width-control input {
-  width: 58px;
+  width: 100%;
   height: 28px;
   padding: 0 6px;
   border: 1px solid #c8ced8;
@@ -262,9 +275,33 @@ dialog {
 }
 
 .style-divider {
-  width: 1px;
-  height: 24px;
+  width: 100%;
+  height: 1px;
   background: #dfe3e9;
+}
+
+.style-compact-button {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid #c8ced8;
+  border-radius: 6px;
+  background: #fff;
+  color: #313b48;
+  font: 650 12px/1 inherit;
+  cursor: pointer;
+}
+
+.style-compact-button:hover:not(:disabled) {
+  border-color: #9db8eb;
+  background: #edf3ff;
+  color: #155bd7;
+}
+
+.style-compact-button:disabled {
+  color: #9aa3af;
+  cursor: default;
+  opacity: 0.72;
 }
 
 #tool-island button,
@@ -1015,17 +1052,9 @@ dialog::backdrop {
 @media (max-width: 720px) {
   #style-island {
     top: 62px;
-    max-width: calc(100vw - 20px);
-    gap: 7px;
-    padding: 6px 8px;
-  }
-
-  .selected-stroke-controls {
-    gap: 7px;
-  }
-
-  .style-control {
-    gap: 5px;
+    right: max(10px, env(safe-area-inset-right));
+    width: min(206px, calc(100vw - 20px));
+    padding: 8px;
   }
 
   .empty-state {

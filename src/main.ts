@@ -165,6 +165,7 @@ type BlitzExports = {
   blitz_set_selected_stroke_width(width: number): void;
   blitz_set_selected_text_color(red: number, green: number, blue: number): void;
   blitz_set_selected_text_opacity(opacity: number): void;
+  blitz_reset_selected_text_width(): void;
   blitz_select_all(): void;
   blitz_bring_to_front(): void;
   blitz_send_to_back(): void;
@@ -234,9 +235,9 @@ const {
   selectedTextControls,
   selectedTextColorInput,
   selectedTextOpacityInput,
+  selectedTextAutoWidthButton,
   addRectButton,
   addCircleButton,
-  addOvalButton,
   addTriangleButton,
   addTextButton,
   stressTestButton,
@@ -704,6 +705,7 @@ async function boot() {
     if (text) {
       selectedTextColorInput.value = colorHex(style[9], style[10], style[11]);
       selectedTextOpacityInput.value = String(style[12]);
+      selectedTextAutoWidthButton.disabled = !(style[13] > 0);
     }
   };
 
@@ -1213,7 +1215,6 @@ async function boot() {
   setupUiActions(
     {
       addCircleButton,
-      addOvalButton,
       addRectButton,
       addTextButton,
       addTriangleButton,
@@ -1228,7 +1229,6 @@ async function boot() {
     },
     {
       addCircle: () => runSceneAction(wasm.blitz_add_circle),
-      addOval: () => runSceneAction(wasm.blitz_add_oval),
       addRect: () => runSceneAction(wasm.blitz_add_rect),
       addText: () => runSceneAction(wasm.blitz_add_text),
       addTriangle: () => runSceneAction(wasm.blitz_add_triangle),
@@ -1263,6 +1263,7 @@ async function boot() {
       strokeInput: selectedStrokeInput,
       strokeOpacityInput: selectedStrokeOpacityInput,
       strokeWidthInput: selectedStrokeWidthInput,
+      textAutoWidthButton: selectedTextAutoWidthButton,
       textColorInput: selectedTextColorInput,
       textOpacityInput: selectedTextOpacityInput,
     },
@@ -1297,6 +1298,10 @@ async function boot() {
       },
       setTextOpacity(opacity) {
         wasm.blitz_set_selected_text_opacity(opacity);
+        updateStyleIsland();
+      },
+      resetTextWidth() {
+        sceneHistory.transact(wasm.blitz_reset_selected_text_width);
         updateStyleIsland();
       },
     },

@@ -45,7 +45,8 @@ usize strlen(const char *text) {
 #define BLITZ_COMPONENT_OVAL_VIEW 16u
 #define BLITZ_COMPONENT_TEXT_VIEW 32u
 #define BLITZ_COMPONENT_SELECTABLE 64u
-#define BLITZ_COMPONENT_RESIZABLE 128u
+#define BLITZ_COMPONENT_RESIZABLE_X 128u
+#define BLITZ_COMPONENT_RESIZABLE_Y 256u
 
 #define BLITZ_SHAPE_RECT 0u
 #define BLITZ_SHAPE_TRIANGLE 1u
@@ -215,7 +216,7 @@ static SceneItem scene_query_items[BLITZ_MAX_SCENE_QUERY_ITEMS];
 static u32 scene_query_count;
 static u32 scene_query_total;
 static unsigned char scene_file_buffer[BLITZ_SCENE_FILE_BUFFER_BYTES];
-static float selected_style[13];
+static float selected_style[14];
 static SceneItem selected_debug_item;
 static u32 selected_debug_mask;
 static World world;
@@ -469,10 +470,42 @@ static void ecs_set_size(u32 entity, float width, float height) {
   world.masks[entity] |= BLITZ_COMPONENT_SIZE;
 }
 
-static void ecs_set_resizable(u32 entity) {
+static void ecs_set_resizable(u32 entity, u32 horizontal, u32 vertical) {
   if (entity != BLITZ_INVALID_INDEX) {
-    world.masks[entity] |= BLITZ_COMPONENT_RESIZABLE;
+    if (horizontal) {
+      world.masks[entity] |= BLITZ_COMPONENT_RESIZABLE_X;
+    }
+    if (vertical) {
+      world.masks[entity] |= BLITZ_COMPONENT_RESIZABLE_Y;
+    }
   }
+}
+
+static u32 entity_resize_axes(u32 entity) {
+  if (entity == BLITZ_INVALID_INDEX) {
+    return 0u;
+  }
+  u32 axes = 0u;
+  if (world.masks[entity] & BLITZ_COMPONENT_RESIZABLE_X) {
+    axes |= 1u;
+  }
+  if (world.masks[entity] & BLITZ_COMPONENT_RESIZABLE_Y) {
+    axes |= 2u;
+  }
+  return axes;
+}
+
+static u32 resize_handle_allowed(u32 handle, u32 axes) {
+  if (axes == 3u) {
+    return handle < 8u;
+  }
+  if (axes == 1u) {
+    return handle == 5u || handle == 7u;
+  }
+  if (axes == 2u) {
+    return handle == 4u || handle == 6u;
+  }
+  return 0u;
 }
 
 static void ecs_set_rect_view(u32 entity, Color fill_color, Color stroke_color,
@@ -1245,24 +1278,29 @@ static void extract_dynamic(void) {
       continue;
     }
     push_selection_draw(entity, overlay_order);
-    if (selected_count == 1u &&
-        (world.masks[entity] & BLITZ_COMPONENT_RESIZABLE)) {
+    u32 resize_axes = entity_resize_axes(entity);
+    if (selected_count == 1u && resize_axes != 0u) {
       float left = position.x;
       float top = position.y;
       float right = position.x + size.x;
       float bottom = position.y + size.y;
-      push_resize_handle_draw(left, top, overlay_order + 1u);
-      push_resize_handle_draw(right, top, overlay_order + 1u);
-      push_resize_handle_draw(right, bottom, overlay_order + 1u);
-      push_resize_handle_draw(left, bottom, overlay_order + 1u);
-      push_resize_handle_draw((left + right) * 0.5f, top,
-                              overlay_order + 1u);
-      push_resize_handle_draw(right, (top + bottom) * 0.5f,
-                              overlay_order + 1u);
-      push_resize_handle_draw((left + right) * 0.5f, bottom,
-                              overlay_order + 1u);
-      push_resize_handle_draw(left, (top + bottom) * 0.5f,
-                              overlay_order + 1u);
+      float centers[16] = {
+          left,          top,
+          right,         top,
+          right,         bottom,
+          left,          bottom,
+          (left + right) * 0.5f, top,
+          right,         (top + bottom) * 0.5f,
+          (left + right) * 0.5f, bottom,
+          left,          (top + bottom) * 0.5f,
+      };
+      for (u32 handle = 0u; handle < 8u; handle += 1u) {
+        if (resize_handle_allowed(handle, resize_axes)) {
+          push_resize_handle_draw(centers[handle * 2u],
+                                  centers[handle * 2u + 1u],
+                                  overlay_order + 1u);
+        }
+      }
     }
   }
   push_marquee_draw(world.draw_order_count + 3u);
@@ -1326,13 +1364,26 @@ static int point_in_oval(float world_x, float world_y, u32 entity) {
   return dx * dx + dy * dy <= 1.0f;
 }
 
+static void resize_text_entity_to_width(u32 entity, float width) {
+  TextView *view = &world.text_views[entity];
+  float padding = view->origin_x;
+  float content_width = width - padding * 2.0f;
+  if (content_width < 1.0f) {
+    content_width = 1.0f;
+  }
+  layout_text(view->text, view->font_size, content_width, view->line_height,
+              view->max_lines);
+  view->max_width = content_width;
+  world.sizes[entity].x = content_width + padding * 2.0f;
+  world.sizes[entity].y = text_layout_height + padding * 2.0f;
+}
+
 static u32 selected_resizable_entity(void) {
   if (selected_count != 1u) {
     return BLITZ_INVALID_INDEX;
   }
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
-    if (world.selected[entity] &&
-        (world.masks[entity] & BLITZ_COMPONENT_RESIZABLE)) {
+    if (world.selected[entity] && entity_resize_axes(entity) != 0u) {
       return entity;
     }
   }
@@ -1341,6 +1392,10 @@ static u32 selected_resizable_entity(void) {
 
 static u32 hit_test_resize_handle(float world_x, float world_y, u32 entity) {
   if (entity == BLITZ_INVALID_INDEX) {
+    return BLITZ_INVALID_INDEX;
+  }
+  u32 axes = entity_resize_axes(entity);
+  if (axes == 0u) {
     return BLITZ_INVALID_INDEX;
   }
   Vec2 position = world.positions[entity];
@@ -1357,6 +1412,9 @@ static u32 hit_test_resize_handle(float world_x, float world_y, u32 entity) {
       position.x, position.y + size.y * 0.5f,
   };
   for (u32 handle = 0u; handle < 8u; handle += 1u) {
+    if (!resize_handle_allowed(handle, axes)) {
+      continue;
+    }
     float dx = world_x - centers[handle * 2u];
     float dy = world_y - centers[handle * 2u + 1u];
     if (dx >= -hit_radius && dx <= hit_radius &&
@@ -1369,6 +1427,10 @@ static u32 hit_test_resize_handle(float world_x, float world_y, u32 entity) {
 
 static void resize_entity_to(float world_x, float world_y) {
   if (!resize_active || resize_entity == BLITZ_INVALID_INDEX) {
+    return;
+  }
+  u32 axes = entity_resize_axes(resize_entity);
+  if (!resize_handle_allowed(resize_handle, axes)) {
     return;
   }
 
@@ -1390,27 +1452,35 @@ static void resize_entity_to(float world_x, float world_y) {
   float next_width = resize_start_size.x;
   float next_height = resize_start_size.y;
 
-  if (resize_handle == 0u || resize_handle == 3u || resize_handle == 7u) {
+  if ((axes & 1u) &&
+      (resize_handle == 0u || resize_handle == 3u || resize_handle == 7u)) {
     next_x = world_x < anchor_x - min_size ? world_x : anchor_x - min_size;
     next_width = anchor_x - next_x;
-  } else if (resize_handle == 1u || resize_handle == 2u ||
-             resize_handle == 5u) {
+  } else if ((axes & 1u) &&
+             (resize_handle == 1u || resize_handle == 2u ||
+              resize_handle == 5u)) {
     next_x = anchor_x;
     next_width = world_x > anchor_x + min_size ? world_x - anchor_x : min_size;
   }
-  if (resize_handle == 0u || resize_handle == 1u || resize_handle == 4u) {
+  if ((axes & 2u) &&
+      (resize_handle == 0u || resize_handle == 1u || resize_handle == 4u)) {
     next_y = world_y < anchor_y - min_size ? world_y : anchor_y - min_size;
     next_height = anchor_y - next_y;
-  } else if (resize_handle == 2u || resize_handle == 3u ||
-             resize_handle == 6u) {
+  } else if ((axes & 2u) &&
+             (resize_handle == 2u || resize_handle == 3u ||
+              resize_handle == 6u)) {
     next_y = anchor_y;
     next_height = world_y > anchor_y + min_size ? world_y - anchor_y : min_size;
   }
 
   world.positions[resize_entity].x = next_x;
   world.positions[resize_entity].y = next_y;
-  world.sizes[resize_entity].x = next_width;
-  world.sizes[resize_entity].y = next_height;
+  if (world.masks[resize_entity] & BLITZ_COMPONENT_TEXT_VIEW) {
+    resize_text_entity_to_width(resize_entity, next_width);
+  } else {
+    world.sizes[resize_entity].x = next_width;
+    world.sizes[resize_entity].y = next_height;
+  }
   mark_render_list_dirty();
 }
 
@@ -1450,7 +1520,7 @@ static u32 create_base_rect(float x, float y, float width, float height,
   ecs_set_size(entity, width, height);
   ecs_set_rect_view(entity, fill, stroke, stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
-  ecs_set_resizable(entity);
+  ecs_set_resizable(entity, 1u, 1u);
   if (history_transaction_active) {
     history_record_created(entity);
   }
@@ -1467,7 +1537,7 @@ static u32 create_base_oval(float x, float y, float width, float height,
   ecs_set_size(entity, width, height);
   ecs_set_oval_view(entity, fill, stroke, stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
-  ecs_set_resizable(entity);
+  ecs_set_resizable(entity, 1u, 1u);
   if (history_transaction_active) {
     history_record_created(entity);
   }
@@ -1485,7 +1555,7 @@ static u32 create_base_triangle(float x, float y, float width, float height,
   ecs_set_size(entity, width, height);
   ecs_set_triangle_view(entity, fill, stroke, stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
-  ecs_set_resizable(entity);
+  ecs_set_resizable(entity, 1u, 1u);
   if (history_transaction_active) {
     history_record_created(entity);
   }
@@ -1518,6 +1588,7 @@ static u32 create_base_text(const char *text, float x, float top,
                     padding + BLITZ_FONT_ASCENDER * font_size, max_width,
                     line_height, max_lines, align);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  ecs_set_resizable(entity, 1u, 0u);
   if (history_transaction_active) {
     history_record_created(entity);
   }
@@ -2753,13 +2824,13 @@ u32 blitz_scene_deserialize(u32 byte_count) {
     ecs_set_size(entity, width, height);
     if (kind == BLITZ_SHAPE_RECT) {
       ecs_set_rect_view(entity, fill, stroke, stroke_width);
-      ecs_set_resizable(entity);
+      ecs_set_resizable(entity, 1u, 1u);
     } else if (kind == BLITZ_SHAPE_TRIANGLE) {
       ecs_set_triangle_view(entity, fill, stroke, stroke_width);
-      ecs_set_resizable(entity);
+      ecs_set_resizable(entity, 1u, 1u);
     } else if (kind == BLITZ_SHAPE_OVAL) {
       ecs_set_oval_view(entity, fill, stroke, stroke_width);
-      ecs_set_resizable(entity);
+      ecs_set_resizable(entity, 1u, 1u);
     } else {
       char *text = &text_pool[text_pool_used];
       for (u32 i = 0u; i < text_length; i += 1u) {
@@ -2771,6 +2842,7 @@ u32 blitz_scene_deserialize(u32 byte_count) {
       ecs_set_text_view(entity, text, fill, font_size, origin_x,
                         baseline_offset, max_width, line_height, max_lines,
                         align);
+      ecs_set_resizable(entity, 1u, 0u);
     }
     world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
     world.selected[entity] = 0u;
@@ -2959,6 +3031,7 @@ u32 blitz_selected_style_ptr(void) {
   Color stroke = {0.0f, 0.0f, 0.0f, 1.0f};
   Color text_color = {0.0f, 0.0f, 0.0f, 1.0f};
   float stroke_width = 0.0f;
+  float text_max_width = 0.0f;
   u32 found_geometry = 0u;
   u32 found_text = 0u;
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
@@ -2990,6 +3063,7 @@ u32 blitz_selected_style_ptr(void) {
     if (!found_text && (world.masks[entity] & BLITZ_COMPONENT_TEXT_VIEW)) {
       found_text = 1u;
       text_color = world.text_views[entity].color;
+      text_max_width = world.text_views[entity].max_width;
     }
     if (found_geometry && found_text) {
       break;
@@ -3008,12 +3082,13 @@ u32 blitz_selected_style_ptr(void) {
   selected_style[10] = text_color.g;
   selected_style[11] = text_color.b;
   selected_style[12] = text_color.a;
+  selected_style[13] = text_max_width;
   return (u32)&selected_style[0];
 }
 
 EXPORT("blitz_selected_style_f32_count")
 u32 blitz_selected_style_f32_count(void) {
-  return 13u;
+  return 14u;
 }
 
 EXPORT("blitz_set_selected_fill")
@@ -3196,6 +3271,36 @@ void blitz_set_selected_text_opacity(float opacity) {
       continue;
     }
     world.text_views[entity].color.a = opacity;
+    changed = 1u;
+  }
+  if (changed) {
+    mark_render_list_dirty();
+    if (history_owned) history_commit();
+  } else {
+    if (history_owned) history_cancel();
+  }
+}
+
+EXPORT("blitz_reset_selected_text_width")
+void blitz_reset_selected_text_width(void) {
+  u32 history_owned = !history_transaction_active;
+  history_record_selected_before();
+  u32 changed = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity] ||
+        !(world.masks[entity] & BLITZ_COMPONENT_TEXT_VIEW)) {
+      continue;
+    }
+    TextView *view = &world.text_views[entity];
+    if (!(view->max_width > 0.0f)) {
+      continue;
+    }
+    float padding = view->origin_x;
+    layout_text(view->text, view->font_size, 0.0f, view->line_height,
+                view->max_lines);
+    view->max_width = 0.0f;
+    world.sizes[entity].x = text_layout_width + padding * 2.0f;
+    world.sizes[entity].y = text_layout_height + padding * 2.0f;
     changed = 1u;
   }
   if (changed) {

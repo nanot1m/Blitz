@@ -64,9 +64,6 @@
           <button id="add-circle" type="button" aria-label="Add circle" title="Add circle">
             <i data-lucide="circle" aria-hidden="true"></i>
           </button>
-          <button id="add-oval" type="button" aria-label="Add oval" title="Add oval">
-            <i data-lucide="ellipse" aria-hidden="true"></i>
-          </button>
           <button id="add-triangle" type="button" aria-label="Add triangle" title="Add triangle">
             <i data-lucide="triangle" aria-hidden="true"></i>
           </button>
@@ -107,7 +104,8 @@
         </div>
       </details>
     </div>
-    <div id="style-island" role="toolbar" aria-label="Selected item styles" hidden>
+    <aside id="style-island" aria-label="Shape properties" hidden>
+      <div class="style-panel-heading">Properties</div>
       <div id="selected-geometry-controls" class="selected-style-group">
         <label class="style-control">
           <span>Fill</span>
@@ -151,20 +149,25 @@
         </div>
       </div>
       <span id="selected-mixed-divider" class="style-divider" aria-hidden="true" hidden></span>
-      <label id="selected-text-controls" class="style-control" hidden>
-        <span>Text</span>
-        <input id="selected-text-color" type="color" aria-label="Text color" />
-        <input
-          id="selected-text-opacity"
-          class="style-opacity"
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          aria-label="Text opacity"
-        />
-      </label>
-    </div>
+      <div id="selected-text-controls" class="selected-style-group" hidden>
+        <label class="style-control">
+          <span>Text</span>
+          <input id="selected-text-color" type="color" aria-label="Text color" />
+          <input
+            id="selected-text-opacity"
+            class="style-opacity"
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            aria-label="Text opacity"
+          />
+        </label>
+        <button id="selected-text-auto-width" class="style-compact-button" type="button">
+          Auto width
+        </button>
+      </div>
+    </aside>
     <aside id="debugger-island" aria-label="Selected entity components" hidden>
       <div class="debugger-heading">
         <span>Selected entity</span>

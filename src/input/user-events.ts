@@ -36,7 +36,6 @@ type KeyboardShortcutOptions = {
 
 type UiActionElements = {
   addCircleButton: HTMLButtonElement;
-  addOvalButton: HTMLButtonElement;
   addRectButton: HTMLButtonElement;
   addTextButton: HTMLButtonElement;
   addTriangleButton: HTMLButtonElement;
@@ -52,7 +51,6 @@ type UiActionElements = {
 
 type UiActions = {
   addCircle(): void;
-  addOval(): void;
   addRect(): void;
   addText(): void;
   addTriangle(): void;
@@ -71,6 +69,7 @@ type StyleControlElements = {
   strokeInput: HTMLInputElement;
   strokeOpacityInput: HTMLInputElement;
   strokeWidthInput: HTMLInputElement;
+  textAutoWidthButton: HTMLButtonElement;
   textColorInput: HTMLInputElement;
   textOpacityInput: HTMLInputElement;
 };
@@ -85,6 +84,7 @@ type StyleActions = {
   setStrokeWidth(width: number): void;
   setTextColor(red: number, green: number, blue: number): void;
   setTextOpacity(opacity: number): void;
+  resetTextWidth(): void;
 };
 
 type TouchMode =
@@ -650,7 +650,6 @@ export function setupKeyboardShortcuts(options: KeyboardShortcutOptions): void {
 export function setupUiActions(elements: UiActionElements, actions: UiActions): void {
   elements.addRectButton.addEventListener("click", actions.addRect);
   elements.addCircleButton.addEventListener("click", actions.addCircle);
-  elements.addOvalButton.addEventListener("click", actions.addOval);
   elements.addTriangleButton.addEventListener("click", actions.addTriangle);
   elements.addTextButton.addEventListener("click", actions.addText);
   elements.stressTestButton.addEventListener("click", actions.stressTest);
@@ -725,4 +724,7 @@ export function setupStyleControls(
   elements.textOpacityInput.addEventListener("input", makeTransactionable(() => {
     actions.setTextOpacity(Number(elements.textOpacityInput.value));
   }, actions));
+  elements.textAutoWidthButton.addEventListener("click", () => {
+    actions.resetTextWidth();
+  });
 }

@@ -8,7 +8,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "npm run build:wasm && tsc && vite build",
     "build:font": "node scripts/compile-font.mjs",
-    "build:wasm": "npm run build:font && node scripts/build-wasm.mjs",
+    "build:wasm": "node scripts/compile-font.mjs && node scripts/build-wasm.mjs",
     "mcp:server": "tsx mcp/server.ts",
     "setup:mcp": "node scripts/setup-local-mcp.mjs",
     "preview": "vite preview --host 127.0.0.1",

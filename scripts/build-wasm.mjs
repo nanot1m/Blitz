@@ -152,7 +152,7 @@ const emccArgs = [
   output,
 ];
 
-const compiler = process.env.CLANG || commandAvailable("wasm-ld") ? clang : emcc;
+const compiler = process.env.CLANG || commandAvailable(clang) ? clang : emcc;
 const args = compiler === emcc ? emccArgs : clangArgs;
 
 const result = spawnSync(compiler, args, {

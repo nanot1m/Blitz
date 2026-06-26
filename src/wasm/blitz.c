@@ -1,8 +1,17 @@
 typedef unsigned int u32;
+typedef unsigned long usize;
 
 #include "font.generated.h"
 
 #define EXPORT(name) __attribute__((export_name(name)))
+
+usize strlen(const char *text) {
+  usize length = 0;
+  while (text[length] != '\0') {
+    length += 1;
+  }
+  return length;
+}
 
 #define BLITZ_MAX_ENTITIES 1000000u
 #define BLITZ_RENDER_CHUNK_RECTS 250000u

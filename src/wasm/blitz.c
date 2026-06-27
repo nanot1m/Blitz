@@ -3190,6 +3190,29 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
   return 2u;
 }
 
+// Force a marquee starting at the given point, clearing the current selection
+// first, regardless of what is under it. Used by the touch long-press gesture
+// so a selection box can start on top of an object, not only on empty space.
+EXPORT("blitz_begin_marquee")
+void blitz_begin_marquee(float screen_x, float screen_y) {
+  world_sync_for_read();
+  float world_x = 0.0f;
+  float world_y = 0.0f;
+  screen_to_world(screen_x, screen_y, &world_x, &world_y);
+  resize_active = 0u;
+  dragging_selection = 0u;
+  drag_top_level_count = 0u;
+  clear_selection();
+  marquee_active = 1u;
+  marquee_additive = 0u;
+  marquee_candidate = BLITZ_INVALID_INDEX;
+  marquee_start.x = world_x;
+  marquee_start.y = world_y;
+  marquee_end = marquee_start;
+  snapshot_selection_base();
+  mark_dynamic_dirty();
+}
+
 EXPORT("blitz_hit_test")
 u32 blitz_hit_test(float screen_x, float screen_y) {
   world_sync_for_read();

@@ -21,6 +21,7 @@ const wasmExports = [
   "blitz_pan",
   "blitz_zoom_at",
   "blitz_pointer_down",
+  "blitz_begin_marquee",
   "blitz_hit_test",
   "blitz_resize_mode_at",
   "blitz_pointer_move",

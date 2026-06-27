@@ -30,6 +30,7 @@ type BlitzExports = {
     screenY: number,
     additive: number,
   ): number;
+  blitz_begin_marquee(screenX: number, screenY: number): void;
   blitz_pointer_move(screenX: number, screenY: number): void;
   blitz_pointer_up(): void;
   blitz_add_rect(): void;

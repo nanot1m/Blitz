@@ -1,9 +1,8 @@
-import { tr } from "zod/v4/locales/index.js";
-
 type CanvasInteractionWasm = {
   blitz_hit_test(screenX: number, screenY: number): number;
   blitz_pan(dxPixels: number, dyPixels: number): void;
   blitz_pointer_down(screenX: number, screenY: number, additive: number): number;
+  blitz_begin_marquee(screenX: number, screenY: number): void;
   blitz_pointer_move(screenX: number, screenY: number): void;
   blitz_pointer_up(): void;
   blitz_resize_mode_at(screenX: number, screenY: number): number;
@@ -177,6 +176,11 @@ export function setupCanvasInteractions(
   const touchMoveThreshold = 8;
   const mouseDragThreshold = 4;
   const longPressDelay = 450;
+  const doubleTapDelay = 300;
+  const doubleTapDistance = 24;
+  let lastTapAt = 0;
+  let lastTapX = 0;
+  let lastTapY = 0;
 
   const eventToCanvasPixels = (event: PointerEvent | WheelEvent) => {
     const rect = canvas.getBoundingClientRect();
@@ -240,21 +244,31 @@ export function setupCanvasInteractions(
 
   const beginTouchPointerInteraction = (mode: "entity" | "marquee") => {
     const start = clientPointToCanvasPixels(touchStartX, touchStartY);
+    if (mode === "marquee") {
+      // Long-press starts a fresh selection box regardless of what is under the
+      // finger; this clears the current selection and never drags an object.
+      wasm.blitz_begin_marquee(start.x, start.y);
+      touchMode = "marquee";
+      draggingEntity = false;
+      resizingEntity = false;
+      resizePointerMode = 0;
+      selectingArea = true;
+      canvas.classList.toggle("is-dragging-entity", false);
+      canvas.classList.toggle("is-selecting", true);
+      options.onSelectionChanged();
+      return;
+    }
     options.beginEdit();
     editTransactionActive = true;
     const pointerMode = wasm.blitz_pointer_down(start.x, start.y, 0);
-    touchMode = pointerMode >= 3 ? "resize" : mode;
+    touchMode = pointerMode >= 3 ? "resize" : "entity";
     draggingEntity = pointerMode === 1;
     resizingEntity = pointerMode >= 3;
     resizePointerMode = resizingEntity ? pointerMode : 0;
-    selectingArea = mode === "marquee";
-    if (selectingArea) {
-      options.cancelEdit();
-      editTransactionActive = false;
-    }
+    selectingArea = false;
     canvas.classList.toggle("is-dragging-entity", draggingEntity);
     setResizeCursor(pointerMode);
-    canvas.classList.toggle("is-selecting", selectingArea);
+    canvas.classList.toggle("is-selecting", false);
     options.onSelectionChanged();
   };
 
@@ -317,17 +331,18 @@ export function setupCanvasInteractions(
       const point = eventToCanvasPixels(event);
       touchMode =
         wasm.blitz_hit_test(point.x, point.y) === -1 ? "pending-empty" : "pending-object";
-      if (touchMode === "pending-empty") {
-        longPressTimer = window.setTimeout(() => {
-          longPressTimer = undefined;
-          if (touchMode === "pending-empty" && primaryTouchId !== null) {
-            const current = activeTouches.get(primaryTouchId);
-            if (current) {
-              beginTouchPointerInteraction("marquee");
-            }
-          }
-        }, longPressDelay);
-      }
+      // A long press anywhere (over empty space or an object) starts a marquee
+      // selection, clearing the current selection first.
+      longPressTimer = window.setTimeout(() => {
+        longPressTimer = undefined;
+        if (
+          (touchMode === "pending-empty" || touchMode === "pending-object") &&
+          primaryTouchId !== null &&
+          activeTouches.get(primaryTouchId)
+        ) {
+          beginTouchPointerInteraction("marquee");
+        }
+      }, longPressDelay);
       return;
     }
 
@@ -366,6 +381,26 @@ export function setupCanvasInteractions(
         setResizeCursor(pointerMode);
       }
       canvas.classList.toggle("is-selecting", selectingArea);
+      // Long click on an object starts a fresh marquee selection (mirrors the
+      // touch long-press); a drag past the threshold cancels it (see pointermove).
+      if (!additive && pointerMode === 1) {
+        longPressTimer = window.setTimeout(() => {
+          longPressTimer = undefined;
+          if (editTransactionActive) {
+            options.cancelEdit();
+            editTransactionActive = false;
+          }
+          wasm.blitz_begin_marquee(point.x, point.y);
+          draggingEntity = false;
+          resizingEntity = false;
+          resizePointerMode = 0;
+          mouseEntityDragPending = false;
+          selectingArea = true;
+          canvas.classList.toggle("is-dragging-entity", false);
+          canvas.classList.toggle("is-selecting", true);
+          options.onSelectionChanged();
+        }, longPressDelay);
+      }
       options.onSelectionChanged();
     }
 
@@ -439,6 +474,7 @@ export function setupCanvasInteractions(
           return;
         }
         mouseEntityDragPending = false;
+        clearLongPressTimer();
         if (draggingEntity) {
           canvas.classList.add("is-dragging-entity");
         }
@@ -480,6 +516,20 @@ export function setupCanvasInteractions(
           wasm.blitz_pointer_up();
           options.commitEdit();
           editTransactionActive = false;
+          // A second tap on the same spot edits the selected text (mirrors the
+          // desktop double-click). beginTextEdit no-ops if no text is selected.
+          const now = performance.now();
+          const nearLastTap =
+            Math.hypot(event.clientX - lastTapX, event.clientY - lastTapY) <=
+            doubleTapDistance;
+          if (now - lastTapAt <= doubleTapDelay && nearLastTap) {
+            options.beginTextEdit();
+            lastTapAt = 0;
+          } else {
+            lastTapAt = now;
+            lastTapX = event.clientX;
+            lastTapY = event.clientY;
+          }
         } else if (
           touchMode === "entity" ||
           touchMode === "resize" ||

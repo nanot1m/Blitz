@@ -280,38 +280,50 @@ if (Math.abs(frameStyle[14] - 30) > 0.001) {
 wasm.blitz_clear_scene();
 wasm.blitz_resize(1000, 1000);
 wasm.blitz_set_camera(0, 0, 1);
+// Create the child below the container in z, then drop it onto the container.
+// The only z-order rule — a shape dropped onto a new container becomes its
+// topmost child — must lift the child above the container.
+wasm.blitz_create_rect(300, 0, 50, 50, 1, 0.8, 0.8, 1, 0, 0, 0, 1, 1);
+const childId = readLastCreatedObjectId();
 wasm.blitz_create_rect(0, 0, 200, 200, 0.8, 0.8, 1, 1, 0, 0, 0, 1, 1);
 const containerId = readLastCreatedObjectId();
 if (wasm.blitz_set_container(...containerId, 1) !== 1) {
   throw new Error("Failed to tag a rectangle as a container.");
 }
-wasm.blitz_create_rect(300, 0, 50, 50, 1, 0.8, 0.8, 1, 0, 0, 0, 1, 1);
-const childId = readLastCreatedObjectId();
 wasm.blitz_pointer_down(825, 525, 0);
 wasm.blitz_pointer_move(600, 600);
 wasm.blitz_pointer_up();
 let childItem = querySceneItemByObjectId(childId);
 expectNear(childItem.x, 75, "Dropped child x");
 expectNear(childItem.y, 75, "Dropped child y");
+let containerItem = querySceneItemByObjectId(containerId);
+if (childItem.order <= containerItem.order) {
+  throw new Error("Dropping a shape onto a container should lift it above the container.");
+}
 if (updateRectPosition(containerId, 20, 30) !== 0) {
   throw new Error("Failed to move a container rectangle.");
 }
 childItem = querySceneItemByObjectId(childId);
 expectNear(childItem.x, 95, "Relative child x after container move");
 expectNear(childItem.y, 105, "Relative child y after container move");
+// The rule is enforced only at drop, so sending the child to the back now
+// legitimately places it behind its parent (no continuous normalization).
 wasm.blitz_select_object(childId[0], childId[1], childId[2], childId[3], 0);
 wasm.blitz_send_to_back();
-const containerAfterSendBack = querySceneItemByObjectId(containerId);
+containerItem = querySceneItemByObjectId(containerId);
 childItem = querySceneItemByObjectId(childId);
-if (childItem.order <= containerAfterSendBack.order) {
-  throw new Error("A relative child was allowed to move behind its parent container.");
+if (childItem.order >= containerItem.order) {
+  throw new Error("send_to_back should place the child behind its parent now (rule is drop-only).");
 }
+// Bring the child back above the container (it is still selected) so the detach
+// drag further down grabs the child rather than the container it sits over.
+wasm.blitz_bring_to_front();
 wasm.blitz_select_object(containerId[0], containerId[1], containerId[2], containerId[3], 0);
 wasm.blitz_pointer_down(560, 560, 0);
 wasm.blitz_pointer_move(580, 580);
-const parentDragCommand = shapeCommandForEntity(0);
-const childDragCommand = shapeCommandForEntity(1);
-if ((parentDragCommand.order & 0x80000000) === 0 || (childDragCommand.order & 0x80000000) === 0) {
+const childDragCommand = shapeCommandForEntity(0);
+const containerDragCommand = shapeCommandForEntity(1);
+if ((childDragCommand.order & 0x80000000) === 0 || (containerDragCommand.order & 0x80000000) === 0) {
   wasm.blitz_pointer_up();
   throw new Error("Dragging a container did not mark its child for live drag rendering.");
 }

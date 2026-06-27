@@ -143,8 +143,9 @@ fn shape_vertex_main(
   // rasterized position by the drag offset (interaction.xy). out.world stays in
   // original geometry space so the fragment coverage is just shifted, not warped.
   let order = command.w & 0x7fffffffu;
+  let dragged = (command.w & 0x80000000u) != 0u;
   var draw_world = world;
-  if ((command.w & 0x80000000u) != 0u) {
+  if (dragged) {
     draw_world = world + u.interaction.xy;
   }
 
@@ -152,7 +153,13 @@ fn shape_vertex_main(
   // separately-drawn static and dynamic passes. Spread across the full [0,1]
   // range (style.w is the draw-order count) so adjacent orders never quantize
   // to the same depth; +1 keeps order 0 above the cleared 0.
-  let depth = (f32(order) + 1.0) / (u.style.w + 4.0);
+  var depth = (f32(order) + 1.0) / (u.style.w + 4.0);
+  // While a dragged shape hovers a new container (interaction.w), lift it into a
+  // depth band above every non-dragged shape, keeping dragged shapes' relative
+  // order among themselves. (interaction.z is the grid-visibility flag.)
+  if (dragged && u.interaction.w > 0.5) {
+    depth = (u.style.w + 2.0 + f32(order) / (u.style.w + 1.0)) / (u.style.w + 4.0);
+  }
   var out: VertexOut;
   out.position = vec4f(world_to_clip(draw_world), depth, 1.0);
   out.world = world;

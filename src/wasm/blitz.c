@@ -1518,48 +1518,71 @@ static void append_draw_order_hierarchy(u32 entity, u32 *output) {
   }
 }
 
-static void normalize_draw_order_hierarchy(void) {
-  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
-    u32 entity = world.draw_order[i];
-    draw_order_seen[entity] = 0u;
-    draw_order_child_head[entity] = BLITZ_INVALID_INDEX;
-    draw_order_child_tail[entity] = BLITZ_INVALID_INDEX;
-    draw_order_next_child[entity] = BLITZ_INVALID_INDEX;
-  }
+// Draw order is no longer continuously normalized into parent-then-children
+// runs. Entities keep their own z-order; the single rule (a child must not
+// render below the container it was dropped onto) is enforced only at drop time
+// by lift_entity_above_container.
+static void normalize_draw_order_hierarchy(void) {}
 
+// True when `container` is an ancestor of `entity` in the relative-transform
+// hierarchy (i.e. `entity` lives inside `container`).
+static u32 entity_in_container(u32 entity, u32 container) {
+  u32 cursor = entity;
+  for (u32 guard = 0u; guard < world.entity_count; guard += 1u) {
+    if (!(world.masks[cursor] & BLITZ_COMPONENT_RELATIVE_TRANSFORM)) {
+      return 0u;
+    }
+    cursor = world.relative_transforms[cursor].parent;
+    if (cursor == BLITZ_INVALID_INDEX) {
+      return 0u;
+    }
+    if (cursor == container) {
+      return 1u;
+    }
+  }
+  return 0u;
+}
+
+// Make `entity` the topmost element of `container` in z: move it just above the
+// highest-ordered member of the container's subtree (the container itself or
+// any of its descendants). Used when a shape is dropped onto a new container so
+// it sits above the container's existing children; a no-op if already highest.
+static void lift_entity_above_container(u32 entity, u32 container) {
+  u32 entity_index = BLITZ_INVALID_INDEX;
+  u32 top_index = BLITZ_INVALID_INDEX;
+  u32 top_member = BLITZ_INVALID_INDEX;
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
-    u32 entity = world.draw_order[i];
-    if (!(world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM)) {
+    u32 current = world.draw_order[i];
+    if (current == entity) {
+      entity_index = i;
       continue;
     }
-    u32 parent = world.relative_transforms[entity].parent;
-    if (parent == BLITZ_INVALID_INDEX || world.masks[parent] == 0u) {
-      continue;
+    if (current == container || entity_in_container(current, container)) {
+      top_index = i; // ascending scan keeps the highest-ordered member
+      top_member = current;
     }
-    if (draw_order_child_tail[parent] == BLITZ_INVALID_INDEX) {
-      draw_order_child_head[parent] = entity;
-    } else {
-      draw_order_next_child[draw_order_child_tail[parent]] = entity;
-    }
-    draw_order_child_tail[parent] = entity;
   }
-
+  if (entity_index == BLITZ_INVALID_INDEX ||
+      top_member == BLITZ_INVALID_INDEX || entity_index > top_index) {
+    return;
+  }
   u32 output = 0u;
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
-    u32 entity = world.draw_order[i];
-    if ((world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM) &&
-        world.relative_transforms[entity].parent != BLITZ_INVALID_INDEX &&
-        world.masks[world.relative_transforms[entity].parent] != 0u) {
+    u32 current = world.draw_order[i];
+    if (current == entity) {
       continue;
     }
-    append_draw_order_hierarchy(entity, &output);
-  }
-  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
-    append_draw_order_hierarchy(world.draw_order[i], &output);
+    world.draw_order_scratch[output] = current;
+    output += 1u;
+    if (current == top_member) {
+      world.draw_order_scratch[output] = entity;
+      output += 1u;
+    }
   }
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
     world.draw_order[i] = world.draw_order_scratch[i];
   }
+  mark_render_list_dirty();
 }
 
 static void request_draw_order_normalize(void) {
@@ -2642,6 +2665,27 @@ static u32 drag_hover_container_target(void) {
   return hit_test_drop_container(drag_last_world.x, drag_last_world.y);
 }
 
+// True while the drag hovers a container that at least one dragged shape is not
+// already inside — i.e. a drop here would re-parent it. Drives the visual
+// uplift; hovering empty canvas or the shapes' current container returns 0.
+static u32 drag_hover_targets_new_container(void) {
+  if (drag_hover_container == BLITZ_INVALID_INDEX) {
+    return 0u;
+  }
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity] || entity_has_selected_ancestor(entity)) {
+      continue;
+    }
+    u32 parent = (world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM)
+                     ? world.relative_transforms[entity].parent
+                     : BLITZ_INVALID_INDEX;
+    if (parent != drag_hover_container) {
+      return 1u;
+    }
+  }
+  return 0u;
+}
+
 static u32 create_base_rect(float x, float y, float width, float height,
                             Color fill, Color stroke, float stroke_width) {
   u32 entity = ecs_create_entity();
@@ -3273,6 +3317,10 @@ void blitz_pointer_move(float screen_x, float screen_y) {
     drag_hover_container = next_hover_container;
     mark_dynamic_dirty();
   }
+  // Per-frame uplift flag for the shader: dragged shapes rise to the top only
+  // while hovering a new container (no re-extraction needed during the drag).
+  // interaction[3] (.w); [2] (.z) is owned by the grid-visibility toggle.
+  uniforms.interaction[3] = drag_hover_targets_new_container() ? 1.0f : 0.0f;
 }
 
 EXPORT("blitz_pointer_up")
@@ -3294,9 +3342,18 @@ void blitz_pointer_up(void) {
         float next_y = world.positions[entity].y + drag_offset.y;
         ecs_move_absolute(entity, next_x, next_y);
         if (drop_container != BLITZ_INVALID_INDEX) {
+          u32 previous_parent =
+              (world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM)
+                  ? world.relative_transforms[entity].parent
+                  : BLITZ_INVALID_INDEX;
           attach_relative_transform(entity, drop_container,
                                     next_x - world.positions[drop_container].x,
                                     next_y - world.positions[drop_container].y);
+          // Dropping onto a new container makes the shape its topmost child;
+          // re-dropping within the same container leaves z-order untouched.
+          if (previous_parent != drop_container) {
+            lift_entity_above_container(entity, drop_container);
+          }
         } else {
           detach_from_parent(entity);
           mark_transform_subtree_dirty(entity);
@@ -3308,6 +3365,7 @@ void blitz_pointer_up(void) {
     drag_hover_container = BLITZ_INVALID_INDEX;
     uniforms.interaction[0] = 0.0f;
     uniforms.interaction[1] = 0.0f;
+    uniforms.interaction[3] = 0.0f;
     drag_active = 0u;
     dragging_selection = 0u;
     drag_top_level_count = 0u;

@@ -145,7 +145,10 @@ dialog {
   position: fixed;
   top: 16px;
   left: 50%;
-  z-index: 2;
+  /* Above the other fixed panels (z-index 2) and the text editor (4) so the
+     toolbar's dropdown popups are never covered. The MCP settings dialog uses
+     showModal(), so it stays above this via the browser top layer. */
+  z-index: 10;
   display: flex;
   align-items: center;
   gap: 4px;

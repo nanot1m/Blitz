@@ -8,6 +8,7 @@ import {
 } from "./input/user-events";
 import shaderSource from "./shaders/rect.wgsl?raw";
 import cullSource from "./shaders/cull.wgsl?raw";
+import backgroundSource from "./shaders/background.wgsl?raw";
 import { setupSceneFileStorage } from "./storage/scene-file";
 import { getOrCreateActorId } from "./storage/actor-id";
 import { createSceneHistory } from "./history/scene-history";
@@ -383,6 +384,44 @@ async function boot() {
     label: "Blitz Shape Shader",
     code: shaderSource,
   });
+  const backgroundShader = device.createShaderModule({
+    label: "Blitz Background Shader",
+    code: backgroundSource,
+  });
+  const backgroundBindGroupLayout = device.createBindGroupLayout({
+    label: "Blitz Background Bind Group Layout",
+    entries: [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: "uniform" },
+      },
+    ],
+  });
+  const backgroundPipeline = device.createRenderPipeline({
+    label: "Blitz Background Pipeline",
+    layout: device.createPipelineLayout({
+      label: "Blitz Background Pipeline Layout",
+      bindGroupLayouts: [backgroundBindGroupLayout],
+    }),
+    vertex: {
+      module: backgroundShader,
+      entryPoint: "background_vertex_main",
+    },
+    fragment: {
+      module: backgroundShader,
+      entryPoint: "background_fragment_main",
+      targets: [{ format }],
+    },
+    primitive: {
+      topology: "triangle-list",
+    },
+    depthStencil: {
+      format: depthFormat,
+      depthWriteEnabled: false,
+      depthCompare: "always",
+    },
+  });
   const bindGroupLayout = device.createBindGroupLayout({
     label: "Blitz Shape Bind Group Layout",
     entries: [
@@ -576,6 +615,11 @@ async function boot() {
     size: dynRectBufferByteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
+  const backgroundBindGroup = device.createBindGroup({
+    label: "Blitz Background Bind Group",
+    layout: backgroundBindGroupLayout,
+    entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
+  });
   const cullBindGroup = device.createBindGroup({
     label: "Blitz Cull Bind Group",
     layout: cullBindGroupLayout,
@@ -628,6 +672,7 @@ async function boot() {
   let lastZoomPercent = -1;
   const drawArgsReset = new Uint32Array([6, 0, 0, 0]);
   let statsVisible = false;
+  let gridVisible = true;
   let frameMs = 16;
   let lastFrameStamp = 0;
   let lastStatsAt = 0;
@@ -1876,6 +1921,7 @@ async function boot() {
       sendToBackButton: ui.sendToBackButton,
       shapeMenu: ui.shapeMenu,
       stressTestButton: ui.stressTestButton,
+      toggleGridButton: ui.toggleGridButton,
       toggleStatsButton: ui.toggleStatsButton,
     },
     {
@@ -1897,6 +1943,13 @@ async function boot() {
         sceneHistory.transact(wasm.blitz_send_to_back);
       },
       stressTest: () => runSceneAction(wasm.blitz_stress_test),
+      toggleGrid() {
+        gridVisible = !gridVisible;
+        ui.toggleGridButton.setAttribute(
+          "aria-pressed",
+          gridVisible ? "true" : "false",
+        );
+      },
       toggleStats() {
         statsVisible = !statsVisible;
         ui.statsPanel.hidden = !statsVisible;
@@ -2138,6 +2191,7 @@ async function boot() {
       uniformPtr,
       wasm.blitz_uniform_f32_count(),
     );
+    uniforms[18] = gridVisible ? 1 : 0;
     device.queue.writeBuffer(uniformBuffer, 0, uniforms);
     positionTextEditor();
     const zoomPercent = Math.round(uniforms[4] * 100);
@@ -2161,7 +2215,7 @@ async function boot() {
       colorAttachments: [
         {
           view: context.getCurrentTexture().createView(),
-          clearValue: { r: 0.05, g: 0.05, b: 0.05, a: 1 },
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
           loadOp: "clear",
           storeOp: "store",
         },
@@ -2173,6 +2227,9 @@ async function boot() {
         depthStoreOp: "store",
       },
     });
+    pass.setPipeline(backgroundPipeline);
+    pass.setBindGroup(0, backgroundBindGroup);
+    pass.draw(3);
     pass.setPipeline(shapePipeline);
     if (currentShapeCommandCount > 0) {
       pass.setBindGroup(0, staticRenderBindGroup);

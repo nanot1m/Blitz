@@ -49,6 +49,7 @@ type UiActionElements = {
   sendToBackButton: HTMLButtonElement;
   shapeMenu: HTMLDetailsElement;
   stressTestButton: HTMLButtonElement;
+  toggleGridButton: HTMLButtonElement;
   toggleStatsButton: HTMLButtonElement;
 };
 
@@ -64,6 +65,7 @@ type UiActions = {
   openFile(): void;
   sendToBack(): void;
   stressTest(): void;
+  toggleGrid(): void;
   toggleStats(): void;
 };
 
@@ -677,6 +679,7 @@ export function setupUiActions(elements: UiActionElements, actions: UiActions): 
   elements.deleteButton.addEventListener("click", actions.deleteSelection);
   elements.sendToBackButton.addEventListener("click", actions.sendToBack);
   elements.bringToFrontButton.addEventListener("click", actions.bringToFront);
+  elements.toggleGridButton.addEventListener("click", actions.toggleGrid);
   elements.toggleStatsButton.addEventListener("click", actions.toggleStats);
   elements.emptyOpenFileButton.addEventListener("click", actions.openFile);
   elements.emptyDemoTemplateButton.addEventListener("click", actions.loadDemoTemplate);

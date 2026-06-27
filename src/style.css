@@ -821,8 +821,8 @@ dialog {
 }
 
 #tool-island button[aria-pressed="true"] {
-  background: #155bd7;
-  color: #fff;
+  background: #edf3ff;
+  color: #155bd7;
 }
 
 #open-mcp-settings {
@@ -1249,7 +1249,7 @@ dialog::backdrop {
   .view-menu-content {
     right: 0;
     left: auto;
-    grid-template-columns: repeat(3, 34px);
+    grid-template-columns: repeat(4, 34px);
   }
 
   .scene-action-popup {

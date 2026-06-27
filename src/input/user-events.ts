@@ -38,6 +38,7 @@ type KeyboardShortcutOptions = {
 
 type UiActionElements = {
   addCircleButton: HTMLButtonElement;
+  addFrameButton: HTMLButtonElement;
   addRectButton: HTMLButtonElement;
   addTextButton: HTMLButtonElement;
   addTriangleButton: HTMLButtonElement;
@@ -53,6 +54,7 @@ type UiActionElements = {
 
 type UiActions = {
   addCircle(): void;
+  addFrame(): void;
   addRect(): void;
   addText(): void;
   addTriangle(): void;
@@ -67,6 +69,7 @@ type UiActions = {
 
 type StyleControlElements = {
   containerInput: HTMLInputElement;
+  frameTitleInput: HTMLInputElement;
   fillInput: HTMLInputElement;
   fillOpacityInput: HTMLInputElement;
   strokeInput: HTMLInputElement;
@@ -87,6 +90,7 @@ type StyleActions = {
   setStrokeOpacity(opacity: number): void;
   setStrokeWidth(width: number): void;
   setContainer(enabled: boolean): void;
+  setFrameTitle(title: string): void;
   setTextColor(red: number, green: number, blue: number): void;
   setTextFontSize(fontSize: number): void;
   setTextOpacity(opacity: number): void;
@@ -665,6 +669,7 @@ export function setupKeyboardShortcuts(options: KeyboardShortcutOptions): void {
 
 export function setupUiActions(elements: UiActionElements, actions: UiActions): void {
   elements.addRectButton.addEventListener("click", actions.addRect);
+  elements.addFrameButton.addEventListener("click", actions.addFrame);
   elements.addCircleButton.addEventListener("click", actions.addCircle);
   elements.addTriangleButton.addEventListener("click", actions.addTriangle);
   elements.addTextButton.addEventListener("click", actions.addText);
@@ -718,6 +723,9 @@ export function setupStyleControls(
 ): void {
   elements.containerInput.addEventListener("change", () => {
     actions.setContainer(elements.containerInput.checked);
+  });
+  elements.frameTitleInput.addEventListener("change", () => {
+    actions.setFrameTitle(elements.frameTitleInput.value);
   });
   elements.fillInput.addEventListener("input", makeTransactionable(() => {
     actions.setFill(...colorChannels(elements.fillInput.value));

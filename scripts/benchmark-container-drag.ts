@@ -90,4 +90,14 @@ const stressResult = runDrag(500, 500, 536, 536);
 printResult(`stress scene (${stressEntities} entities, setup=${stressSetup.duration.toFixed(1)} ms)`, stressResult);
 assertUnder("Stress container pointer_up", stressResult.pointerUp.duration, 1_500);
 
+wasm.blitz_select_all();
+const stressCopy = time("stress_copy", () => {
+  const copied = wasm.blitz_copy_selected_to_internal_clipboard();
+  if (copied !== stressEntities) {
+    throw new Error(`Internal clipboard copied ${copied} entities; expected ${stressEntities}.`);
+  }
+});
+console.log(`stress copy (${stressEntities} entities): copy=${stressCopy.duration.toFixed(1)} ms`);
+assertUnder("Stress internal clipboard copy", stressCopy.duration, 1_500);
+
 console.log("Container drag benchmarks passed.");

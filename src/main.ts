@@ -13,7 +13,6 @@ import { getOrCreateActorId } from "./storage/actor-id";
 import { createSceneHistory } from "./history/scene-history";
 import { createBlitzUi } from "./ui";
 import "./style.css";
-
 type BlitzExports = {
   memory: WebAssembly.Memory;
   blitz_init(): void;
@@ -25,16 +24,45 @@ type BlitzExports = {
   blitz_zoom_at(screenX: number, screenY: number, zoomDelta: number): void;
   blitz_hit_test(screenX: number, screenY: number): number;
   blitz_resize_mode_at(screenX: number, screenY: number): number;
-  blitz_pointer_down(screenX: number, screenY: number, additive: number): number;
+  blitz_pointer_down(
+    screenX: number,
+    screenY: number,
+    additive: number,
+  ): number;
   blitz_pointer_move(screenX: number, screenY: number): void;
   blitz_pointer_up(): void;
   blitz_add_rect(): void;
+  blitz_add_frame(): void;
   blitz_add_circle(): void;
   blitz_add_oval(): void;
   blitz_add_triangle(): void;
   blitz_add_text(): void;
+  blitz_duplicate_selected(offsetX: number, offsetY: number): number;
+  blitz_copy_selected_to_internal_clipboard(): number;
+  blitz_internal_clipboard_bounds_ptr(): number;
+  blitz_internal_clipboard_count(): number;
+  blitz_paste_internal_clipboard(offsetX: number, offsetY: number): number;
   blitz_clear_scene(): void;
   blitz_load_demo_template(): void;
+  blitz_set_container(
+    actorHi: number,
+    actorLo: number,
+    sequenceHi: number,
+    sequenceLo: number,
+    enabled: number,
+  ): number;
+  blitz_set_relative_transform(
+    childActorHi: number,
+    childActorLo: number,
+    childSequenceHi: number,
+    childSequenceLo: number,
+    parentActorHi: number,
+    parentActorLo: number,
+    parentSequenceHi: number,
+    parentSequenceLo: number,
+    offsetX: number,
+    offsetY: number,
+  ): number;
   blitz_create_rect(
     x: number,
     y: number,
@@ -49,6 +77,27 @@ type BlitzExports = {
     strokeB: number,
     strokeA: number,
     strokeWidth: number,
+  ): number;
+  blitz_create_frame(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    fillR: number,
+    fillG: number,
+    fillB: number,
+    fillA: number,
+    strokeR: number,
+    strokeG: number,
+    strokeB: number,
+    strokeA: number,
+    strokeWidth: number,
+    titleR: number,
+    titleG: number,
+    titleB: number,
+    titleA: number,
+    titleFontSize: number,
+    titleLength: number,
   ): number;
   blitz_create_circle(
     centerX: number,
@@ -150,7 +199,13 @@ type BlitzExports = {
   blitz_scene_deserialize(byteCount: number): number;
   blitz_stress_test(): void;
   blitz_clear_selection(): void;
-  blitz_select_object(actorHi: number, actorLo: number, sequenceHi: number, sequenceLo: number, additive: number): number;
+  blitz_select_object(
+    actorHi: number,
+    actorLo: number,
+    sequenceHi: number,
+    sequenceLo: number,
+    additive: number,
+  ): number;
   blitz_set_selected_container(enabled: number): number;
   blitz_selected_container_state(): number;
   blitz_delete_selected(): void;
@@ -168,6 +223,9 @@ type BlitzExports = {
   blitz_set_selected_text_color(red: number, green: number, blue: number): void;
   blitz_set_selected_text_opacity(opacity: number): void;
   blitz_set_selected_text_font_size(fontSize: number): void;
+  blitz_selected_frame_title_ptr(): number;
+  blitz_selected_frame_title_length(): number;
+  blitz_set_selected_frame_title(textLength: number): void;
   blitz_set_hidden_text_entity(entity: number): void;
   blitz_reset_selected_text_width(): void;
   blitz_select_all(): void;
@@ -206,108 +264,43 @@ type BlitzExports = {
   blitz_render_max_shapes(): number;
   blitz_render_max_text_draws(): number;
 };
-
 const blitzShapeText = 3;
 const blitzUpdateText = 128;
 const blitzInvalidIndex = 0xffffffff;
 const textPaddingWorld = 4;
 const textEditorBorderPx = 1;
 const textCaretViewportMargin = 36;
-
-const {
-  canvas,
-  textEditor,
-  shapeMenu,
-  openSceneMenu,
-  saveSceneMenu,
-  saveSceneIndicator,
-  newSceneFileButton,
-  chooseSceneFileButton,
-  saveSceneButton,
-  saveSceneAsButton,
-  saveCurrentViewpointInput,
-  recentScenes,
-  recentScenesDivider,
-  emptyState,
-  emptyOpenFileButton,
-  emptyRecentSection,
-  emptyRecentScenes,
-  emptyDemoTemplateButton,
-  styleIsland,
-  debuggerIsland,
-  debuggerEntityId,
-  debuggerComponents,
-  selectedContainerInput,
-  selectedGeometryControls,
-  selectedFillInput,
-  selectedFillOpacityInput,
-  selectedStrokeInput,
-  selectedStrokeOpacityInput,
-  selectedStrokeWidthInput,
-  selectedMixedDivider,
-  selectedTextControls,
-  selectedTextColorInput,
-  selectedTextOpacityInput,
-  selectedTextFontSizeInput,
-  selectedTextAutoWidthButton,
-  addRectButton,
-  addCircleButton,
-  addTriangleButton,
-  addTextButton,
-  stressTestButton,
-  sendToBackButton,
-  bringToFrontButton,
-  deleteButton,
-  zoomIndicator,
-  toggleStatsButton,
-  toggleDebuggerButton,
-  statsPanel,
-  statsBody,
-  openMcpSettingsButton,
-  mcpSettingsDialog,
-  mcpSettingsForm,
-  closeMcpSettingsButton,
-  mcpBridgeUrlInput,
-  mcpBridgeTokenInput,
-  disconnectMcpBridgeButton,
-  mcpBridgeStatus,
-  showFallback,
-} = createBlitzUi();
-
+const ui = createBlitzUi();
 async function loadWasm(): Promise<BlitzExports> {
-  const response = await fetch(`${import.meta.env.BASE_URL}blitz.wasm`, { cache: "no-store" });
+  const response = await fetch(`${import.meta.env.BASE_URL}blitz.wasm`, {
+    cache: "no-store",
+  });
   if (!response.ok) {
     throw new Error("Run `npm run build:wasm` before starting Blitz.");
   }
-
   const module = await WebAssembly.instantiateStreaming(response, {});
   return module.instance.exports as BlitzExports;
 }
-
 async function boot() {
   if (!navigator.gpu) {
-    showFallback("WebGPU is not available in this browser.");
+    ui.showFallback("WebGPU is not available in this browser.");
     return;
   }
-
   const wasm = await loadWasm();
   wasm.blitz_init();
   const actorId = getOrCreateActorId();
   wasm.blitz_set_actor_id(actorId.hi, actorId.lo);
-
   const adapter = await navigator.gpu.requestAdapter();
   const device = await adapter?.requestDevice();
   if (!device) {
-    showFallback("No WebGPU adapter is available.");
+    ui.showFallback("No WebGPU adapter is available.");
     return;
   }
-
-  const context = canvas.getContext("webgpu");
+  const context = ui.canvas.getContext("webgpu");
   if (!context) {
-    showFallback("Could not create a WebGPU canvas context.");
+    ui.showFallback("Could not create a WebGPU canvas context.");
     return;
   }
-
   const format = navigator.gpu.getPreferredCanvasFormat();
   const depthFormat: GPUTextureFormat = "depth32float";
   context.configure({
@@ -315,9 +308,9 @@ async function boot() {
     format,
     alphaMode: "opaque",
   });
-
   const uniformPtr = wasm.blitz_uniform_ptr();
-  const uniformByteLength = wasm.blitz_uniform_f32_count() * Float32Array.BYTES_PER_ELEMENT;
+  const uniformByteLength =
+    wasm.blitz_uniform_f32_count() * Float32Array.BYTES_PER_ELEMENT;
   const uniformBuffer = device.createBuffer({
     label: "Blitz Uniforms",
     size: uniformByteLength,
@@ -325,20 +318,28 @@ async function boot() {
   });
   const maxShapes = wasm.blitz_render_max_shapes();
   const shapeCommandU32Count = wasm.blitz_shape_command_u32_count();
-  const shapeCommandBufferByteLength = maxShapes * shapeCommandU32Count * Uint32Array.BYTES_PER_ELEMENT;
+  const shapeCommandBufferByteLength =
+    maxShapes * shapeCommandU32Count * Uint32Array.BYTES_PER_ELEMENT;
   const rectDrawF32Count = wasm.blitz_rect_draw_f32_count();
-  const rectDrawBufferByteLength = maxShapes * rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const rectDrawBufferByteLength =
+    maxShapes * rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const triangleDrawF32Count = wasm.blitz_triangle_draw_f32_count();
-  const triangleDrawBufferByteLength = maxShapes * triangleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const triangleDrawBufferByteLength =
+    maxShapes * triangleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const ovalDrawF32Count = wasm.blitz_oval_draw_f32_count();
-  const ovalDrawBufferByteLength = maxShapes * ovalDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const ovalDrawBufferByteLength =
+    maxShapes * ovalDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const textDrawF32Count = wasm.blitz_text_draw_f32_count();
   const textDrawBufferByteLength =
-    wasm.blitz_render_max_text_draws() * textDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+    wasm.blitz_render_max_text_draws() *
+    textDrawF32Count *
+    Float32Array.BYTES_PER_ELEMENT;
   const maxDynCommands = wasm.blitz_render_max_dyn_commands();
-  const dynCommandBufferByteLength = maxDynCommands * shapeCommandU32Count * Uint32Array.BYTES_PER_ELEMENT;
+  const dynCommandBufferByteLength =
+    maxDynCommands * shapeCommandU32Count * Uint32Array.BYTES_PER_ELEMENT;
   const maxDynRects = wasm.blitz_render_max_dyn_rects();
-  const dynRectBufferByteLength = maxDynRects * rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const dynRectBufferByteLength =
+    maxDynRects * rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   // Total bytes of the fixed storage buffers, for the stats panel (excludes the
   // resize-dependent depth texture, reported separately).
   const gpuBufferBytes =
@@ -351,8 +352,9 @@ async function boot() {
     dynCommandBufferByteLength +
     dynRectBufferByteLength +
     16;
-
-  const atlasResponse = await fetch(`${import.meta.env.BASE_URL}font-atlas.png`);
+  const atlasResponse = await fetch(
+    `${import.meta.env.BASE_URL}font-atlas.png`,
+  );
   if (!atlasResponse.ok) {
     throw new Error("Font atlas could not be loaded.");
   }
@@ -361,7 +363,10 @@ async function boot() {
     label: "Blitz Font Atlas",
     size: [atlasBitmap.width, atlasBitmap.height],
     format: "rgba8unorm",
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+    usage:
+      GPUTextureUsage.TEXTURE_BINDING |
+      GPUTextureUsage.COPY_DST |
+      GPUTextureUsage.RENDER_ATTACHMENT,
   });
   device.queue.copyExternalImageToTexture(
     { source: atlasBitmap },
@@ -374,12 +379,10 @@ async function boot() {
     magFilter: "linear",
     minFilter: "linear",
   });
-
   const shader = device.createShaderModule({
     label: "Blitz Shape Shader",
     code: shaderSource,
   });
-
   const bindGroupLayout = device.createBindGroupLayout({
     label: "Blitz Shape Bind Group Layout",
     entries: [
@@ -429,7 +432,6 @@ async function boot() {
     label: "Blitz Shape Pipeline Layout",
     bindGroupLayouts: [bindGroupLayout],
   });
-
   const shapePipeline = device.createRenderPipeline({
     label: "Blitz Shape Pipeline",
     layout: pipelineLayout,
@@ -467,7 +469,6 @@ async function boot() {
       depthCompare: "greater-equal",
     },
   });
-
   const cullShader = device.createShaderModule({
     label: "Blitz Cull Shader",
     code: cullSource,
@@ -475,21 +476,50 @@ async function boot() {
   const cullBindGroupLayout = device.createBindGroupLayout({
     label: "Blitz Cull Bind Group Layout",
     entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      {
+        binding: 0,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "uniform" },
+      },
+      {
+        binding: 1,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" },
+      },
+      {
+        binding: 2,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" },
+      },
+      {
+        binding: 3,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" },
+      },
+      {
+        binding: 4,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" },
+      },
+      {
+        binding: 5,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "storage" },
+      },
+      {
+        binding: 6,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "storage" },
+      },
     ],
   });
   const cullPipeline = device.createComputePipeline({
     label: "Blitz Cull Pipeline",
-    layout: device.createPipelineLayout({ bindGroupLayouts: [cullBindGroupLayout] }),
+    layout: device.createPipelineLayout({
+      bindGroupLayouts: [cullBindGroupLayout],
+    }),
     compute: { module: cullShader, entryPoint: "cull_main" },
   });
-
   const shapeCommandStorageBuffer = device.createBuffer({
     label: "Blitz Shape Command Storage",
     size: shapeCommandBufferByteLength,
@@ -524,7 +554,11 @@ async function boot() {
   const drawArgsBuffer = device.createBuffer({
     label: "Blitz Draw Args",
     size: 4 * Uint32Array.BYTES_PER_ELEMENT,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    usage:
+      GPUBufferUsage.STORAGE |
+      GPUBufferUsage.INDIRECT |
+      GPUBufferUsage.COPY_DST |
+      GPUBufferUsage.COPY_SRC,
   });
   // Reads back the post-cull visible instance count for the stats panel.
   const drawArgsReadback = device.createBuffer({
@@ -542,7 +576,6 @@ async function boot() {
     size: dynRectBufferByteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
-
   const cullBindGroup = device.createBindGroup({
     label: "Blitz Cull Bind Group",
     layout: cullBindGroupLayout,
@@ -588,21 +621,18 @@ async function boot() {
       { binding: 7, resource: fontSampler },
     ],
   });
-
   let lastUploadedShapeCommandVersion = -1;
   let currentShapeCommandCount = 0;
   let lastUploadedDynVersion = -1;
   let currentDynCommandCount = 0;
   let lastZoomPercent = -1;
   const drawArgsReset = new Uint32Array([6, 0, 0, 0]);
-
   let statsVisible = false;
   let frameMs = 16;
   let lastFrameStamp = 0;
   let lastStatsAt = 0;
   let visibleGeometryShapeCount = 0;
   let readbackPending = false;
-
   const formatBytes = (bytes: number) => {
     if (bytes >= 1 << 30) return `${(bytes / (1 << 30)).toFixed(1)} GB`;
     if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(1)} MB`;
@@ -611,27 +641,31 @@ async function boot() {
   };
   const formatNumber = (value: number) => value.toLocaleString();
   const formatPercent = (value: number) => `${value}%`;
-  const metricRow = (label: string, value: string) => `<div class="stats-row"><span>${label}</span><strong>${value}</strong></div>`;
+  const metricRow = (label: string, value: string) =>
+    `<div class="stats-row"><span>${label}</span><strong>${value}</strong></div>`;
   const statsBreakdown = (items: Array<[string, string]>) =>
     `<div class="stats-breakdown">${items
-      .map(([label, value]) => `<span><em>${label}</em><strong>${value}</strong></span>`)
+      .map(
+        ([label, value]) =>
+          `<span><em>${label}</em><strong>${value}</strong></span>`,
+      )
       .join("")}</div>`;
-
   const updateStats = () => {
     // Keep lazy WASM extraction current before reading render counters.
     wasm.blitz_shape_command_ptr();
     wasm.blitz_dyn_command_ptr();
-
     const shapeCount = wasm.blitz_entity_count();
     const rectShapeCount = wasm.blitz_rect_draw_count();
     const triangleShapeCount = wasm.blitz_triangle_draw_count();
     const ovalShapeCount = wasm.blitz_oval_draw_count();
-    const geometryShapeCount = rectShapeCount + triangleShapeCount + ovalShapeCount;
+    const geometryShapeCount =
+      rectShapeCount + triangleShapeCount + ovalShapeCount;
     const textShapeCount = Math.max(0, shapeCount - geometryShapeCount);
     const staticCommandCount = wasm.blitz_shape_command_count();
     const dynamicCommandCount = wasm.blitz_dyn_command_count();
-    const visibleShapeCount = visibleGeometryShapeCount + wasm.blitz_visible_text_shape_count();
-    statsBody.innerHTML = `
+    const visibleShapeCount =
+      visibleGeometryShapeCount + wasm.blitz_visible_text_shape_count();
+    ui.statsBody.innerHTML = `
       <div class="stats-heading">
         <span>Stats</span>
         <strong>${formatNumber(Math.round(1000 / frameMs))} fps · ${frameMs.toFixed(1)} ms</strong>
@@ -657,21 +691,23 @@ async function boot() {
         ${metricRow("WASM reserved", formatBytes(wasm.memory.buffer.byteLength))}
         ${metricRow("WASM live", formatBytes(wasm.blitz_wasm_live_bytes()))}
         ${metricRow("GPU buffers", formatBytes(gpuBufferBytes))}
-        ${metricRow("Depth texture", formatBytes(canvas.width * canvas.height * 4))}
+        ${metricRow("Depth texture", formatBytes(ui.canvas.width * ui.canvas.height * 4))}
       </div>
     `;
   };
-
   let depthTexture: GPUTexture | null = null;
   let depthView: GPUTextureView | null = null;
-
   const resize = () => {
     const dpr = window.devicePixelRatio || 1;
-    const width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
-    const height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
-    if (canvas.width !== width || canvas.height !== height || !depthTexture) {
-      canvas.width = width;
-      canvas.height = height;
+    const width = Math.max(1, Math.floor(ui.canvas.clientWidth * dpr));
+    const height = Math.max(1, Math.floor(ui.canvas.clientHeight * dpr));
+    if (
+      ui.canvas.width !== width ||
+      ui.canvas.height !== height ||
+      !depthTexture
+    ) {
+      ui.canvas.width = width;
+      ui.canvas.height = height;
       wasm.blitz_resize(width, height);
       depthTexture?.destroy();
       depthTexture = device.createTexture({
@@ -683,7 +719,6 @@ async function boot() {
       depthView = depthTexture.createView();
     }
   };
-
   const colorHex = (red: number, green: number, blue: number) =>
     `#${[red, green, blue]
       .map((channel) =>
@@ -692,10 +727,9 @@ async function boot() {
           .padStart(2, "0"),
       )
       .join("")}`;
-
   const updateStyleIsland = () => {
     const kind = wasm.blitz_selected_style_kind();
-    styleIsland.hidden = kind === 0;
+    ui.styleIsland.hidden = kind === 0;
     if (kind === 0) {
       return;
     }
@@ -706,32 +740,47 @@ async function boot() {
     );
     const geometric = (kind & 1) !== 0;
     const text = (kind & 2) !== 0;
+    const frameTitlePtr = wasm.blitz_selected_frame_title_ptr();
+    const frameTitleLength =
+      frameTitlePtr === 0 ? 0 : wasm.blitz_selected_frame_title_length();
+    const frame = frameTitlePtr !== 0;
     const containerState = wasm.blitz_selected_container_state();
-    selectedContainerInput.checked = containerState === 2;
-    selectedContainerInput.indeterminate = containerState === 3;
-    selectedContainerInput.disabled = containerState === 0;
-    selectedGeometryControls.hidden = !geometric;
-    selectedTextControls.hidden = !text;
-    selectedMixedDivider.hidden = !(geometric && text);
+    ui.selectedContainerInput.checked = containerState === 2;
+    ui.selectedContainerInput.indeterminate = containerState === 3;
+    ui.selectedContainerInput.disabled = containerState === 0;
+    ui.selectedGeometryControls.hidden = !geometric;
+    ui.selectedFrameControls.hidden = !frame;
+    ui.selectedTextControls.hidden = !text;
+    ui.selectedMixedDivider.hidden = !(geometric && text);
     if (geometric) {
-      selectedFillInput.value = colorHex(style[0], style[1], style[2]);
-      selectedFillOpacityInput.value = String(style[3]);
-      selectedStrokeInput.value = colorHex(style[4], style[5], style[6]);
-      selectedStrokeOpacityInput.value = String(style[7]);
-      selectedStrokeWidthInput.value = String(Number(style[8].toFixed(2)));
+      ui.selectedFillInput.value = colorHex(style[0], style[1], style[2]);
+      ui.selectedFillOpacityInput.value = String(style[3]);
+      ui.selectedStrokeInput.value = colorHex(style[4], style[5], style[6]);
+      ui.selectedStrokeOpacityInput.value = String(style[7]);
+      ui.selectedStrokeWidthInput.value = String(Number(style[8].toFixed(2)));
     }
     if (text) {
-      selectedTextColorInput.value = colorHex(style[9], style[10], style[11]);
-      selectedTextOpacityInput.value = String(style[12]);
-      selectedTextAutoWidthButton.disabled = !(style[13] > 0);
-      selectedTextFontSizeInput.value = String(Number(style[14].toFixed(1)));
+      ui.selectedTextColorInput.value = colorHex(
+        style[9],
+        style[10],
+        style[11],
+      );
+      ui.selectedTextOpacityInput.value = String(style[12]);
+      ui.selectedTextAutoWidthButton.disabled = !(style[13] > 0);
+      ui.selectedTextFontSizeInput.value = String(Number(style[14].toFixed(1)));
+    }
+    if (frame) {
+      ui.selectedFrameTitleInput.value = new TextDecoder().decode(
+        new Uint8Array(wasm.memory.buffer, frameTitlePtr, frameTitleLength),
+      );
     }
   };
-
   const formatDebugNumber = (value: number) =>
     Number.isInteger(value) ? String(value) : String(Number(value.toFixed(3)));
-
-  const debugComponent = (name: string, values: Record<string, string | number>) => {
+  const debugComponent = (
+    name: string,
+    values: Record<string, string | number>,
+  ) => {
     const section = document.createElement("dl");
     section.className = "debugger-component";
     const heading = document.createElement("h3");
@@ -741,31 +790,36 @@ async function boot() {
       const term = document.createElement("dt");
       term.textContent = label;
       const value = document.createElement("dd");
-      value.textContent = typeof rawValue === "number" ? formatDebugNumber(rawValue) : rawValue;
+      value.textContent =
+        typeof rawValue === "number" ? formatDebugNumber(rawValue) : rawValue;
       section.append(term, value);
     }
     return section;
   };
-
   let debuggerEnabled = false;
   const updateDebuggerIsland = () => {
     const ptr = wasm.blitz_selected_debug_ptr();
-    debuggerIsland.hidden = !debuggerEnabled || ptr === 0;
-    debuggerComponents.replaceChildren();
+    ui.debuggerIsland.hidden = !debuggerEnabled || ptr === 0;
+    ui.debuggerComponents.replaceChildren();
     if (ptr === 0) {
-      debuggerEntityId.textContent =
-        wasm.blitz_selected_count() > 1 ? `${wasm.blitz_selected_count()} entities` : "";
+      ui.debuggerEntityId.textContent =
+        wasm.blitz_selected_count() > 1
+          ? `${wasm.blitz_selected_count()} entities`
+          : "";
       return;
     }
     const view = new DataView(wasm.memory.buffer);
     const words = Array.from({ length: 4 }, (_value, index) =>
-      view.getUint32(ptr + index * 4, true).toString(16).padStart(8, "0"),
+      view
+        .getUint32(ptr + index * 4, true)
+        .toString(16)
+        .padStart(8, "0"),
     );
-    debuggerEntityId.textContent = `${words[0]}${words[1]}:${words[2]}${words[3]}`;
+    ui.debuggerEntityId.textContent = `${words[0]}${words[1]}:${words[2]}${words[3]}`;
     const kind = view.getUint32(ptr + 16, true);
-    const kindNames = ["Rectangle", "Triangle", "Oval", "Text"];
+    const kindNames = ["Rectangle", "Triangle", "Oval", "Text", "Frame"];
     const mask = wasm.blitz_selected_debug_mask();
-    debuggerComponents.append(
+    ui.debuggerComponents.append(
       debugComponent("Entity", {
         slot: view.getUint32(ptr + 36, true),
         order: view.getUint32(ptr + 20, true),
@@ -781,30 +835,44 @@ async function boot() {
         height: view.getFloat32(ptr + 52, true),
       }),
     );
-    if (kind === 3) {
+    if (kind === 3 || kind === 4) {
       const textPtr = view.getUint32(ptr + 28, true);
       const textLength = view.getUint32(ptr + 32, true);
       const text = new TextDecoder().decode(
         new Uint8Array(wasm.memory.buffer, textPtr, textLength),
       );
-      debuggerComponents.append(
-        debugComponent("TextView", {
-          text,
-          fontSize: view.getFloat32(ptr + 92, true),
-          color: colorHex(
-            view.getFloat32(ptr + 56, true),
-            view.getFloat32(ptr + 60, true),
-            view.getFloat32(ptr + 64, true),
-          ),
-          opacity: view.getFloat32(ptr + 68, true),
-          maxWidth: view.getFloat32(ptr + 96, true),
-          lineHeight: view.getFloat32(ptr + 100, true),
-          maxLines: view.getFloat32(ptr + 104, true),
-          align: ["left", "center", "right"][view.getFloat32(ptr + 108, true)] ?? "left",
-        }),
+      ui.debuggerComponents.append(
+        kind === 3
+          ? debugComponent("TextView", {
+              text,
+              fontSize: view.getFloat32(ptr + 92, true),
+              color: colorHex(
+                view.getFloat32(ptr + 56, true),
+                view.getFloat32(ptr + 60, true),
+                view.getFloat32(ptr + 64, true),
+              ),
+              opacity: view.getFloat32(ptr + 68, true),
+              maxWidth: view.getFloat32(ptr + 96, true),
+              lineHeight: view.getFloat32(ptr + 100, true),
+              maxLines: view.getFloat32(ptr + 104, true),
+              align:
+                ["left", "center", "right"][view.getFloat32(ptr + 108, true)] ??
+                "left",
+            })
+          : debugComponent("FrameTitle", {
+              text,
+              fontSize: view.getFloat32(ptr + 92, true),
+              color: colorHex(
+                view.getFloat32(ptr + 96, true),
+                view.getFloat32(ptr + 100, true),
+                view.getFloat32(ptr + 104, true),
+              ),
+              opacity: view.getFloat32(ptr + 108, true),
+            }),
       );
-    } else {
-      debuggerComponents.append(
+    }
+    if (kind !== 3) {
+      ui.debuggerComponents.append(
         debugComponent(`${kindNames[kind] ?? "Shape"}View`, {
           fill: colorHex(
             view.getFloat32(ptr + 56, true),
@@ -822,7 +890,7 @@ async function boot() {
         }),
       );
     }
-    debuggerComponents.append(
+    ui.debuggerComponents.append(
       debugComponent("Capabilities", {
         selectable: (mask & 64) !== 0 ? "yes" : "no",
         resizableX: (mask & 128) !== 0 ? "yes" : "no",
@@ -834,22 +902,24 @@ async function boot() {
       }),
     );
   };
-
-  toggleDebuggerButton.addEventListener("click", () => {
+  ui.toggleDebuggerButton.addEventListener("click", () => {
     debuggerEnabled = !debuggerEnabled;
-    toggleDebuggerButton.setAttribute("aria-pressed", String(debuggerEnabled));
+    ui.toggleDebuggerButton.setAttribute(
+      "aria-pressed",
+      String(debuggerEnabled),
+    );
     updateDebuggerIsland();
   });
-
+  let updateHistoryControls = () => {};
   const updateSelectionState = () => {
     const disabled = wasm.blitz_has_selection() === 0;
-    sendToBackButton.disabled = disabled;
-    bringToFrontButton.disabled = disabled;
-    deleteButton.disabled = disabled;
+    ui.sendToBackButton.disabled = disabled;
+    ui.bringToFrontButton.disabled = disabled;
+    ui.deleteButton.disabled = disabled;
+    updateHistoryControls();
     updateStyleIsland();
     updateDebuggerIsland();
   };
-
   let emptyStateVisible = false;
   const updateEmptyState = () => {
     const visible = wasm.blitz_entity_count() === 0;
@@ -857,12 +927,14 @@ async function boot() {
       return;
     }
     emptyStateVisible = visible;
-    emptyState.hidden = !visible;
+    ui.emptyState.hidden = !visible;
   };
-
   type ClipboardShape = {
-    type: "rect" | "triangle" | "circle" | "text";
+    id: string;
+    parentId?: string;
+    type: "rect" | "frame" | "triangle" | "circle" | "text";
     order: number;
+    container: boolean;
     x: number;
     y: number;
     width: number;
@@ -872,6 +944,7 @@ async function boot() {
     strokeWidth: number;
     text: string;
     fontSize: number;
+    titleColor?: [number, number, number, number];
     maxWidth: number;
     lineHeight: number;
     maxLines: number;
@@ -883,59 +956,81 @@ async function boot() {
     shapes: ClipboardShape[];
   };
   type ObjectIdWords = [number, number, number, number];
-
   const clipboardSource = "blitz";
   const clipboardVersion = 1;
   const maxClipboardItems = 65536;
-  const worldQueryExtent = 1_000_000_000;
+  const maxSystemClipboardItems = 10000;
+  const worldQueryExtent = 1000000000;
   const clipboardTextEncoder = new TextEncoder();
   const clipboardTextDecoder = new TextDecoder();
   let localClipboardText = "";
-  let lastCursorCanvasPoint: { x: number; y: number } | null = null;
-
+  let localClipboardHasInternal = false;
+  let lastCursorCanvasPoint: {
+    x: number;
+    y: number;
+  } | null = null;
   const updateCursorCanvasPoint = (event: PointerEvent) => {
-    const rect = canvas.getBoundingClientRect();
+    const rect = ui.canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     lastCursorCanvasPoint = {
       x: (event.clientX - rect.left) * dpr,
       y: (event.clientY - rect.top) * dpr,
     };
   };
-  canvas.addEventListener("pointerdown", updateCursorCanvasPoint);
-  canvas.addEventListener("pointermove", updateCursorCanvasPoint);
-
+  ui.canvas.addEventListener("pointerdown", updateCursorCanvasPoint);
+  ui.canvas.addEventListener("pointermove", updateCursorCanvasPoint);
   const cursorWorldPoint = () => {
-    const uniforms = new Float32Array(wasm.memory.buffer, uniformPtr, wasm.blitz_uniform_f32_count());
-    const point = lastCursorCanvasPoint ?? { x: uniforms[0] * 0.5, y: uniforms[1] * 0.5 };
+    const uniforms = new Float32Array(
+      wasm.memory.buffer,
+      uniformPtr,
+      wasm.blitz_uniform_f32_count(),
+    );
+    const point = lastCursorCanvasPoint ?? {
+      x: uniforms[0] * 0.5,
+      y: uniforms[1] * 0.5,
+    };
     const zoom = uniforms[4] || 1;
     return {
       x: (point.x - uniforms[0] * 0.5) / zoom + uniforms[2],
       y: (point.y - uniforms[1] * 0.5) / zoom + uniforms[3],
     };
   };
-
   const querySelectedShapes = (): ClipboardShape[] => {
-    wasm.blitz_query_scene(-worldQueryExtent, -worldQueryExtent, worldQueryExtent, worldQueryExtent, maxClipboardItems);
+    wasm.blitz_query_scene(
+      -worldQueryExtent,
+      -worldQueryExtent,
+      worldQueryExtent,
+      worldQueryExtent,
+      maxClipboardItems,
+    );
     const count = wasm.blitz_scene_query_count();
     const itemBytes = wasm.blitz_scene_query_item_bytes();
     const base = wasm.blitz_scene_query_ptr();
     const view = new DataView(wasm.memory.buffer);
     const shapes: ClipboardShape[] = [];
-    const kinds = ["rect", "triangle", "circle", "text"] as const;
+    const kinds = ["rect", "triangle", "circle", "text", "frame"] as const;
     for (let index = 0; index < count; index += 1) {
       const offset = base + index * itemBytes;
-      if (view.getUint32(offset + 24, true) === 0) {
+      if (view.getUint32(offset + 132, true) === 0) {
         continue;
       }
       const type = kinds[view.getUint32(offset + 16, true)];
       if (!type) {
         continue;
       }
+      const id = readObjectIdAt(view, offset);
+      const parentId = readObjectIdAt(view, offset + 112);
+      const componentMask = view.getUint32(offset + 128, true);
       const textPtr = view.getUint32(offset + 28, true);
       const textLength = view.getUint32(offset + 32, true);
       shapes.push({
+        id: formatObjectId(id),
+        parentId: objectIdIsEmpty(parentId)
+          ? undefined
+          : formatObjectId(parentId),
         type,
         order: view.getUint32(offset + 20, true),
+        container: (componentMask & 1024) !== 0,
         x: view.getFloat32(offset + 40, true),
         y: view.getFloat32(offset + 44, true),
         width: view.getFloat32(offset + 48, true),
@@ -954,10 +1049,18 @@ async function boot() {
         ],
         strokeWidth: view.getFloat32(offset + 88, true),
         text:
-          type === "text"
-            ? clipboardTextDecoder.decode(new Uint8Array(wasm.memory.buffer, textPtr, textLength))
+          type === "text" || type === "frame"
+            ? clipboardTextDecoder.decode(
+                new Uint8Array(wasm.memory.buffer, textPtr, textLength),
+              )
             : "",
         fontSize: view.getFloat32(offset + 92, true),
+        titleColor: [
+          view.getFloat32(offset + 96, true),
+          view.getFloat32(offset + 100, true),
+          view.getFloat32(offset + 104, true),
+          view.getFloat32(offset + 108, true),
+        ],
         maxWidth: view.getFloat32(offset + 96, true),
         lineHeight: view.getFloat32(offset + 100, true),
         maxLines: Math.round(view.getFloat32(offset + 104, true)),
@@ -966,7 +1069,6 @@ async function boot() {
     }
     return shapes.sort((left, right) => left.order - right.order);
   };
-
   const clipboardBounds = (shapes: ClipboardShape[]) => {
     const left = Math.min(...shapes.map((shape) => shape.x));
     const top = Math.min(...shapes.map((shape) => shape.y));
@@ -974,19 +1076,32 @@ async function boot() {
     const bottom = Math.max(...shapes.map((shape) => shape.y + shape.height));
     return { x: left, y: top, width: right - left, height: bottom - top };
   };
-
   const parseClipboardPayload = (text: string): ClipboardPayload | null => {
     try {
       const value = JSON.parse(text) as Partial<ClipboardPayload>;
-      if (value.source !== clipboardSource || value.version !== clipboardVersion || !Array.isArray(value.shapes)) {
+      if (
+        value.source !== clipboardSource ||
+        value.version !== clipboardVersion ||
+        !Array.isArray(value.shapes)
+      ) {
         return null;
       }
-      const isColor = (color: unknown): color is [number, number, number, number] =>
-        Array.isArray(color) && color.length === 4 && color.every(Number.isFinite);
+      const isColor = (
+        color: unknown,
+      ): color is [number, number, number, number] =>
+        Array.isArray(color) &&
+        color.length === 4 &&
+        color.every(Number.isFinite);
       const shapes = value.shapes.filter((shape): shape is ClipboardShape => {
         return (
           !!shape &&
-          ["rect", "triangle", "circle", "text"].includes(shape.type) &&
+          ["rect", "frame", "triangle", "circle", "text"].includes(
+            shape.type,
+          ) &&
+          typeof shape.id === "string" &&
+          (shape.parentId === undefined ||
+            typeof shape.parentId === "string") &&
+          typeof shape.container === "boolean" &&
           Number.isFinite(shape.x) &&
           Number.isFinite(shape.y) &&
           Number.isFinite(shape.width) &&
@@ -995,6 +1110,7 @@ async function boot() {
           isColor(shape.stroke) &&
           Number.isFinite(shape.strokeWidth) &&
           Number.isFinite(shape.fontSize) &&
+          (shape.titleColor === undefined || isColor(shape.titleColor)) &&
           Number.isFinite(shape.maxWidth) &&
           Number.isFinite(shape.lineHeight) &&
           Number.isFinite(shape.maxLines) &&
@@ -1004,12 +1120,13 @@ async function boot() {
           shape.height > 0
         );
       });
-      return shapes.length > 0 ? { source: clipboardSource, version: clipboardVersion, shapes } : null;
+      return shapes.length > 0
+        ? { source: clipboardSource, version: clipboardVersion, shapes }
+        : null;
     } catch {
       return null;
     }
   };
-
   const readLastCreatedObjectId = (): ObjectIdWords => {
     const ptr = wasm.blitz_last_created_object_id_ptr();
     const view = new DataView(wasm.memory.buffer);
@@ -1020,17 +1137,28 @@ async function boot() {
       view.getUint32(ptr + 12, true),
     ];
   };
-
+  const readObjectIdAt = (view: DataView, offset: number): ObjectIdWords => [
+    view.getUint32(offset, true),
+    view.getUint32(offset + 4, true),
+    view.getUint32(offset + 8, true),
+    view.getUint32(offset + 12, true),
+  ];
+  const objectIdIsEmpty = (id: ObjectIdWords) => id.every((word) => word === 0);
+  const formatObjectId = (id: ObjectIdWords) =>
+    `${id[0].toString(16).padStart(8, "0")}${id[1].toString(16).padStart(8, "0")}:${id[2].toString(16).padStart(8, "0")}${id[3].toString(16).padStart(8, "0")}`;
   const writeTextInput = (text: string): number => {
     const encoded = clipboardTextEncoder.encode(text);
     const capacity = wasm.blitz_text_input_capacity();
     if (encoded.byteLength >= capacity) {
       return -1;
     }
-    new Uint8Array(wasm.memory.buffer, wasm.blitz_text_input_ptr(), encoded.byteLength).set(encoded);
+    new Uint8Array(
+      wasm.memory.buffer,
+      wasm.blitz_text_input_ptr(),
+      encoded.byteLength,
+    ).set(encoded);
     return encoded.byteLength;
   };
-
   type TextEditSession = {
     objectId: ObjectIdWords;
     entity: number;
@@ -1046,7 +1174,6 @@ async function boot() {
     maxLines: number;
     align: number;
   };
-
   let textEditSession: TextEditSession | null = null;
   let closingTextEditor = false;
   const textCaretMirror = document.createElement("div");
@@ -1063,7 +1190,6 @@ async function boot() {
   textCaretMirror.style.boxSizing = "content-box";
   textCaretMirror.append(textCaretMarker);
   document.body.append(textCaretMirror);
-
   const selectedTextEditSession = (): TextEditSession | null => {
     const ptr = wasm.blitz_selected_debug_ptr();
     if (ptr === 0) {
@@ -1083,7 +1209,9 @@ async function boot() {
         view.getUint32(ptr + 12, true),
       ],
       entity: view.getUint32(ptr + 36, true),
-      text: clipboardTextDecoder.decode(new Uint8Array(wasm.memory.buffer, textPtr, textLength)),
+      text: clipboardTextDecoder.decode(
+        new Uint8Array(wasm.memory.buffer, textPtr, textLength),
+      ),
       x: view.getFloat32(ptr + 40, true),
       y: view.getFloat32(ptr + 44, true),
       width: view.getFloat32(ptr + 48, true),
@@ -1101,9 +1229,12 @@ async function boot() {
       align: Math.round(view.getFloat32(ptr + 108, true)),
     };
   };
-
   const textEditorScale = () => {
-    const uniforms = new Float32Array(wasm.memory.buffer, uniformPtr, wasm.blitz_uniform_f32_count());
+    const uniforms = new Float32Array(
+      wasm.memory.buffer,
+      uniformPtr,
+      wasm.blitz_uniform_f32_count(),
+    );
     const dpr = window.devicePixelRatio || 1;
     return {
       cameraX: uniforms[2],
@@ -1114,20 +1245,21 @@ async function boot() {
       dpr,
     };
   };
-
   const positionTextEditor = () => {
     if (!textEditSession) {
       return;
     }
     const scale = textEditorScale();
-    const rect = canvas.getBoundingClientRect();
+    const rect = ui.canvas.getBoundingClientRect();
     const screenX =
       rect.left +
-      ((textEditSession.x - scale.cameraX) * scale.zoom + scale.viewportWidth * 0.5) /
+      ((textEditSession.x - scale.cameraX) * scale.zoom +
+        scale.viewportWidth * 0.5) /
         scale.dpr;
     const screenY =
       rect.top +
-      ((textEditSession.y - scale.cameraY) * scale.zoom + scale.viewportHeight * 0.5) /
+      ((textEditSession.y - scale.cameraY) * scale.zoom +
+        scale.viewportHeight * 0.5) /
         scale.dpr;
     const padding = Math.max(0, (textPaddingWorld * scale.zoom) / scale.dpr);
     let contentWidth = Math.max(
@@ -1136,40 +1268,45 @@ async function boot() {
     );
     let contentHeight = Math.max(
       1,
-      ((textEditSession.height - textPaddingWorld * 2) * scale.zoom) / scale.dpr,
+      ((textEditSession.height - textPaddingWorld * 2) * scale.zoom) /
+        scale.dpr,
     );
-    textEditor.style.left = `${screenX - textEditorBorderPx}px`;
-    textEditor.style.top = `${screenY - textEditorBorderPx}px`;
-    textEditor.style.width = `${contentWidth}px`;
-    textEditor.style.height = `${contentHeight}px`;
-    textEditor.style.padding = `${padding}px`;
-    textEditor.style.fontSize = `${Math.max(1, (textEditSession.fontSize * scale.zoom) / scale.dpr)}px`;
-    textEditor.style.lineHeight = String(textEditSession.lineHeight);
-    textEditor.style.textAlign = ["left", "center", "right"][textEditSession.align] ?? "left";
-    textEditor.style.color = `rgba(${Math.round(textEditSession.color[0] * 255)}, ${Math.round(
-      textEditSession.color[1] * 255,
-    )}, ${Math.round(textEditSession.color[2] * 255)}, ${textEditSession.color[3]})`;
-    const scrollContentWidth = Math.max(1, textEditor.scrollWidth - padding * 2);
-    const scrollContentHeight = Math.max(1, textEditor.scrollHeight - padding * 2);
+    ui.textEditor.style.left = `${screenX - textEditorBorderPx}px`;
+    ui.textEditor.style.top = `${screenY - textEditorBorderPx}px`;
+    ui.textEditor.style.width = `${contentWidth}px`;
+    ui.textEditor.style.height = `${contentHeight}px`;
+    ui.textEditor.style.padding = `${padding}px`;
+    ui.textEditor.style.fontSize = `${Math.max(1, (textEditSession.fontSize * scale.zoom) / scale.dpr)}px`;
+    ui.textEditor.style.lineHeight = String(textEditSession.lineHeight);
+    ui.textEditor.style.textAlign =
+      ["left", "center", "right"][textEditSession.align] ?? "left";
+    ui.textEditor.style.color = `rgba(${Math.round(textEditSession.color[0] * 255)}, ${Math.round(textEditSession.color[1] * 255)}, ${Math.round(textEditSession.color[2] * 255)}, ${textEditSession.color[3]})`;
+    const scrollContentWidth = Math.max(
+      1,
+      ui.textEditor.scrollWidth - padding * 2,
+    );
+    const scrollContentHeight = Math.max(
+      1,
+      ui.textEditor.scrollHeight - padding * 2,
+    );
     if (textEditSession.maxWidth <= 0 && scrollContentWidth > contentWidth) {
       contentWidth = scrollContentWidth;
-      textEditor.style.width = `${contentWidth}px`;
+      ui.textEditor.style.width = `${contentWidth}px`;
     }
     if (scrollContentHeight > contentHeight) {
       contentHeight = scrollContentHeight;
-      textEditor.style.height = `${contentHeight}px`;
+      ui.textEditor.style.height = `${contentHeight}px`;
     }
   };
-
   const copyTextEditorMirrorStyle = () => {
-    const style = getComputedStyle(textEditor);
-    const editorRect = textEditor.getBoundingClientRect();
+    const style = getComputedStyle(ui.textEditor);
+    const editorRect = ui.textEditor.getBoundingClientRect();
     textCaretMirror.style.left = `${editorRect.left}px`;
     textCaretMirror.style.top = `${editorRect.top}px`;
-    textCaretMirror.style.width = textEditor.style.width;
-    textCaretMirror.style.minHeight = textEditor.style.height;
-    textCaretMirror.style.padding = textEditor.style.padding;
-    textCaretMirror.style.border = textEditor.style.border;
+    textCaretMirror.style.width = ui.textEditor.style.width;
+    textCaretMirror.style.minHeight = ui.textEditor.style.height;
+    textCaretMirror.style.padding = ui.textEditor.style.padding;
+    textCaretMirror.style.border = ui.textEditor.style.border;
     textCaretMirror.style.fontFamily = style.fontFamily;
     textCaretMirror.style.fontFeatureSettings = style.fontFeatureSettings;
     textCaretMirror.style.fontKerning = style.fontKerning;
@@ -1181,25 +1318,31 @@ async function boot() {
     textCaretMirror.style.textTransform = style.textTransform;
     textCaretMirror.style.wordSpacing = style.wordSpacing;
   };
-
   const ensureTextCaretVisible = () => {
-    if (!textEditSession || textEditor.hidden) {
+    if (!textEditSession || ui.textEditor.hidden) {
       return;
     }
     copyTextEditorMirrorStyle();
-    const caretIndex = textEditor.selectionEnd ?? textEditor.value.length;
-    const before = textEditor.value.slice(0, caretIndex);
+    const caretIndex = ui.textEditor.selectionEnd ?? ui.textEditor.value.length;
+    const before = ui.textEditor.value.slice(0, caretIndex);
     textCaretMirror.textContent = before.length > 0 ? before : "\u200b";
     textCaretMarker.textContent = "\u200b";
     textCaretMirror.append(textCaretMarker);
     const markerRect = textCaretMarker.getBoundingClientRect();
-    const editorRect = textEditor.getBoundingClientRect();
-    const lineHeight = Number.parseFloat(getComputedStyle(textEditor).lineHeight) || 16;
+    const editorRect = ui.textEditor.getBoundingClientRect();
+    const lineHeight =
+      Number.parseFloat(getComputedStyle(ui.textEditor).lineHeight) || 16;
     const caretRect = {
-      left: Number.isFinite(markerRect.left) ? markerRect.left : editorRect.left,
-      right: Number.isFinite(markerRect.left) ? markerRect.left : editorRect.left,
+      left: Number.isFinite(markerRect.left)
+        ? markerRect.left
+        : editorRect.left,
+      right: Number.isFinite(markerRect.left)
+        ? markerRect.left
+        : editorRect.left,
       top: Number.isFinite(markerRect.top) ? markerRect.top : editorRect.top,
-      bottom: (Number.isFinite(markerRect.top) ? markerRect.top : editorRect.top) + lineHeight,
+      bottom:
+        (Number.isFinite(markerRect.top) ? markerRect.top : editorRect.top) +
+        lineHeight,
     };
     let panX = 0;
     let panY = 0;
@@ -1210,7 +1353,10 @@ async function boot() {
     }
     if (caretRect.top < textCaretViewportMargin) {
       panY = textCaretViewportMargin - caretRect.top;
-    } else if (caretRect.bottom > window.innerHeight - textCaretViewportMargin) {
+    } else if (
+      caretRect.bottom >
+      window.innerHeight - textCaretViewportMargin
+    ) {
       panY = window.innerHeight - textCaretViewportMargin - caretRect.bottom;
     }
     if (panX !== 0 || panY !== 0) {
@@ -1219,16 +1365,14 @@ async function boot() {
       positionTextEditor();
     }
   };
-
   const scheduleTextCaretVisibility = () => {
     requestAnimationFrame(ensureTextCaretVisible);
   };
-
   const resizeTextEditorToValue = () => {
     if (!textEditSession) {
       return;
     }
-    const textLength = writeTextInput(textEditor.value);
+    const textLength = writeTextInput(ui.textEditor.value);
     if (textLength < 0) {
       return;
     }
@@ -1241,41 +1385,43 @@ async function boot() {
     );
     const padding = textPaddingWorld;
     const contentWidth =
-      textEditSession.maxWidth > 0 ? textEditSession.maxWidth : wasm.blitz_text_layout_width();
+      textEditSession.maxWidth > 0
+        ? textEditSession.maxWidth
+        : wasm.blitz_text_layout_width();
     textEditSession.width = Math.max(1, contentWidth) + padding * 2;
-    textEditSession.height = Math.max(1, wasm.blitz_text_layout_height()) + padding * 2;
+    textEditSession.height =
+      Math.max(1, wasm.blitz_text_layout_height()) + padding * 2;
     positionTextEditor();
     scheduleTextCaretVisibility();
   };
-
   const closeTextEditor = () => {
     closingTextEditor = true;
     wasm.blitz_set_hidden_text_entity(blitzInvalidIndex);
-    textEditor.hidden = true;
-    textEditor.value = "";
+    ui.textEditor.hidden = true;
+    ui.textEditor.value = "";
     textEditSession = null;
     closingTextEditor = false;
   };
-
   const cancelTextEdit = () => {
     closeTextEditor();
-    canvas.focus();
+    ui.canvas.focus();
   };
-
   const commitTextEdit = () => {
     const session = textEditSession;
     if (!session) {
       return;
     }
-    const nextText = textEditor.value;
+    const nextText = ui.textEditor.value;
     if (nextText === session.text) {
       closeTextEditor();
-      canvas.focus();
+      ui.canvas.focus();
       return;
     }
     const textLength = writeTextInput(nextText);
     if (textLength < 0) {
-      showFallback(`Text is too long. Maximum UTF-8 size is ${wasm.blitz_text_input_capacity() - 1} bytes.`);
+      ui.showFallback(
+        `Text is too long. Maximum UTF-8 size is ${wasm.blitz_text_input_capacity() - 1} bytes.`,
+      );
       return;
     }
     let updateResult = 0;
@@ -1313,14 +1459,15 @@ async function boot() {
       );
     });
     if (updateResult !== 0) {
-      showFallback(`Text edit could not be applied (error ${updateResult}).`);
+      ui.showFallback(
+        `Text edit could not be applied (error ${updateResult}).`,
+      );
       return;
     }
     closeTextEditor();
-    canvas.focus();
+    ui.canvas.focus();
     updateSelectionState();
   };
-
   const beginTextEdit = () => {
     const session = selectedTextEditSession();
     if (!session) {
@@ -1328,19 +1475,18 @@ async function boot() {
     }
     textEditSession = session;
     wasm.blitz_set_hidden_text_entity(session.entity);
-    textEditor.value = session.text;
-    textEditor.hidden = false;
+    ui.textEditor.value = session.text;
+    ui.textEditor.hidden = false;
     resizeTextEditorToValue();
-    textEditor.focus();
-    textEditor.select();
+    ui.textEditor.focus();
+    ui.textEditor.select();
     scheduleTextCaretVisibility();
   };
-
-  textEditor.addEventListener("input", resizeTextEditorToValue);
-  textEditor.addEventListener("click", scheduleTextCaretVisibility);
-  textEditor.addEventListener("keyup", scheduleTextCaretVisibility);
-  textEditor.addEventListener("select", scheduleTextCaretVisibility);
-  textEditor.addEventListener("keydown", (event) => {
+  ui.textEditor.addEventListener("input", resizeTextEditorToValue);
+  ui.textEditor.addEventListener("click", scheduleTextCaretVisibility);
+  ui.textEditor.addEventListener("keyup", scheduleTextCaretVisibility);
+  ui.textEditor.addEventListener("select", scheduleTextCaretVisibility);
+  ui.textEditor.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.preventDefault();
       cancelTextEdit();
@@ -1351,7 +1497,7 @@ async function boot() {
       commitTextEdit();
     }
   });
-  textEditor.addEventListener("blur", () => {
+  ui.textEditor.addEventListener("blur", () => {
     if (!closingTextEditor && textEditSession) {
       commitTextEdit();
     }
@@ -1359,15 +1505,18 @@ async function boot() {
   document.addEventListener(
     "pointerdown",
     (event) => {
-      if (!textEditSession || event.target === textEditor) {
+      if (!textEditSession || event.target === ui.textEditor) {
         return;
       }
       commitTextEdit();
     },
     { capture: true },
   );
-
-  const createClipboardShape = (shape: ClipboardShape, offsetX: number, offsetY: number): ObjectIdWords | null => {
+  const createClipboardShape = (
+    shape: ClipboardShape,
+    offsetX: number,
+    offsetY: number,
+  ): ObjectIdWords | null => {
     const x = shape.x + offsetX;
     const y = shape.y + offsetY;
     let entity = 0xffffffff;
@@ -1390,6 +1539,30 @@ async function boot() {
         shape.maxLines,
         shape.align,
       );
+    } else if (shape.type === "frame") {
+      const titleLength = shape.text ? writeTextInput(shape.text) : 0;
+      const titleColor = shape.titleColor ?? [0.08, 0.1, 0.13, 1];
+      entity = wasm.blitz_create_frame(
+        x,
+        y,
+        shape.width,
+        shape.height,
+        shape.fill[0],
+        shape.fill[1],
+        shape.fill[2],
+        shape.fill[3],
+        shape.stroke[0],
+        shape.stroke[1],
+        shape.stroke[2],
+        shape.stroke[3],
+        shape.strokeWidth,
+        titleColor[0],
+        titleColor[1],
+        titleColor[2],
+        titleColor[3],
+        shape.fontSize > 0 ? shape.fontSize : 18,
+        titleLength,
+      );
     } else if (shape.type === "circle") {
       entity = wasm.blitz_create_oval(
         x,
@@ -1407,7 +1580,10 @@ async function boot() {
         shape.strokeWidth,
       );
     } else {
-      const create = shape.type === "rect" ? wasm.blitz_create_rect : wasm.blitz_create_triangle;
+      const create =
+        shape.type === "rect"
+          ? wasm.blitz_create_rect
+          : wasm.blitz_create_triangle;
       entity = create(
         x,
         y,
@@ -1424,43 +1600,116 @@ async function boot() {
         shape.strokeWidth,
       );
     }
-    return entity === 0xffffffff ? null : readLastCreatedObjectId();
+    if (entity === 0xffffffff) {
+      return null;
+    }
+    const id = readLastCreatedObjectId();
+    if (shape.container && shape.type !== "frame") {
+      wasm.blitz_set_container(id[0], id[1], id[2], id[3], 1);
+    }
+    return id;
   };
-
-  const insertClipboardShapes = (shapes: ClipboardShape[], offsetX: number, offsetY: number) => {
+  const insertClipboardShapes = (
+    shapes: ClipboardShape[],
+    offsetX: number,
+    offsetY: number,
+  ) => {
     const createdIds: ObjectIdWords[] = [];
+    const createdBySourceId = new Map<string, ObjectIdWords>();
     sceneHistory.transact(() => {
       for (const shape of shapes) {
         const id = createClipboardShape(shape, offsetX, offsetY);
         if (id) {
           createdIds.push(id);
+          createdBySourceId.set(shape.id, id);
         }
+      }
+      for (const shape of shapes) {
+        if (!shape.parentId) {
+          continue;
+        }
+        const child = createdBySourceId.get(shape.id);
+        const parent = createdBySourceId.get(shape.parentId);
+        const parentShape = shapes.find(({ id }) => id === shape.parentId);
+        if (!child || !parent || !parentShape) {
+          continue;
+        }
+        wasm.blitz_set_relative_transform(
+          child[0],
+          child[1],
+          child[2],
+          child[3],
+          parent[0],
+          parent[1],
+          parent[2],
+          parent[3],
+          shape.x - parentShape.x,
+          shape.y - parentShape.y,
+        );
       }
       if (createdIds.length > 0) {
         wasm.blitz_clear_selection();
         createdIds.forEach((id, index) => {
-          wasm.blitz_select_object(id[0], id[1], id[2], id[3], index === 0 ? 0 : 1);
+          wasm.blitz_select_object(
+            id[0],
+            id[1],
+            id[2],
+            id[3],
+            index === 0 ? 0 : 1,
+          );
         });
       }
     });
     updateSelectionState();
     updateEmptyState();
   };
-
   const copySelection = async () => {
-    const shapes = querySelectedShapes();
-    if (shapes.length === 0) {
+    const copied = wasm.blitz_copy_selected_to_internal_clipboard();
+    if (copied === 0) {
       return;
     }
-    localClipboardText = JSON.stringify({ source: clipboardSource, version: clipboardVersion, shapes });
+    localClipboardHasInternal = true;
+    if (copied > maxSystemClipboardItems) {
+      localClipboardText = "";
+      return;
+    }
+    const shapes = querySelectedShapes();
+    if (shapes.length === 0 || shapes.length > maxSystemClipboardItems) {
+      localClipboardText = "";
+      return;
+    }
+    localClipboardText = JSON.stringify({
+      source: clipboardSource,
+      version: clipboardVersion,
+      shapes,
+    });
     try {
       await navigator.clipboard?.writeText(localClipboardText);
     } catch {
       // Local fallback still enables copy/paste within this tab.
     }
   };
-
   const pasteClipboard = async () => {
+    if (
+      localClipboardHasInternal &&
+      wasm.blitz_internal_clipboard_count() > 0
+    ) {
+      const bounds = new Float32Array(
+        wasm.memory.buffer,
+        wasm.blitz_internal_clipboard_bounds_ptr(),
+        4,
+      );
+      const target = cursorWorldPoint();
+      sceneHistory.transact(() => {
+        wasm.blitz_paste_internal_clipboard(
+          target.x - (bounds[0] + bounds[2] * 0.5),
+          target.y - (bounds[1] + bounds[3] * 0.5),
+        );
+      });
+      updateSelectionState();
+      updateEmptyState();
+      return;
+    }
     let text = localClipboardText;
     try {
       text = (await navigator.clipboard?.readText()) || text;
@@ -1473,19 +1722,29 @@ async function boot() {
     }
     const bounds = clipboardBounds(payload.shapes);
     const target = cursorWorldPoint();
-    insertClipboardShapes(payload.shapes, target.x - (bounds.x + bounds.width * 0.5), target.y - (bounds.y + bounds.height * 0.5));
+    insertClipboardShapes(
+      payload.shapes,
+      target.x - (bounds.x + bounds.width * 0.5),
+      target.y - (bounds.y + bounds.height * 0.5),
+    );
   };
-
   const duplicateSelection = () => {
     const shapes = querySelectedShapes();
     if (shapes.length === 0) {
       return;
     }
     const bounds = clipboardBounds(shapes);
-    const uniforms = new Float32Array(wasm.memory.buffer, uniformPtr, wasm.blitz_uniform_f32_count());
-    insertClipboardShapes(shapes, bounds.width + 32 / (uniforms[4] || 1), 0);
+    const uniforms = new Float32Array(
+      wasm.memory.buffer,
+      uniformPtr,
+      wasm.blitz_uniform_f32_count(),
+    );
+    sceneHistory.transact(() => {
+      wasm.blitz_duplicate_selected(bounds.width + 32 / (uniforms[4] || 1), 0);
+    });
+    updateSelectionState();
+    updateEmptyState();
   };
-
   let stopDragging = () => {};
   const sceneHistory = createSceneHistory(wasm, {
     onApplied() {
@@ -1494,16 +1753,23 @@ async function boot() {
       updateSelectionState();
       updateEmptyState();
     },
-    onError: showFallback,
+    onChanged() {
+      updateHistoryControls();
+    },
+    onError: ui.showFallback,
   });
-  stopDragging = setupCanvasInteractions(canvas, wasm, {
+  updateHistoryControls = () => {
+    ui.undoButton.disabled = !sceneHistory.canUndo();
+    ui.redoButton.disabled = !sceneHistory.canRedo();
+  };
+  updateHistoryControls();
+  stopDragging = setupCanvasInteractions(ui.canvas, wasm, {
     beginEdit: sceneHistory.begin,
     beginTextEdit,
     cancelEdit: sceneHistory.cancel,
     commitEdit: sceneHistory.commit,
     onSelectionChanged: updateSelectionState,
   }).stopDragging;
-
   const deleteSelection = () => {
     if (wasm.blitz_has_selection() === 0) {
       return;
@@ -1512,7 +1778,6 @@ async function boot() {
     sceneHistory.transact(wasm.blitz_delete_selected);
     updateSelectionState();
   };
-
   const mcpAdapter = createCanvasMcpAdapter(wasm, {
     beginHistory: sceneHistory.begin,
     commitHistory: sceneHistory.commit,
@@ -1522,23 +1787,23 @@ async function boot() {
   const sceneFileStorage = setupSceneFileStorage(
     wasm,
     {
-      openMenu: openSceneMenu,
-      saveMenu: saveSceneMenu,
-      saveIndicator: saveSceneIndicator,
-      newFileButton: newSceneFileButton,
-      chooseFileButton: chooseSceneFileButton,
-      saveButton: saveSceneButton,
-      saveAsButton: saveSceneAsButton,
-      saveCurrentViewpointInput,
+      openMenu: ui.openSceneMenu,
+      saveMenu: ui.saveSceneMenu,
+      saveIndicator: ui.saveSceneIndicator,
+      newFileButton: ui.newSceneFileButton,
+      chooseFileButton: ui.chooseSceneFileButton,
+      saveButton: ui.saveSceneButton,
+      saveAsButton: ui.saveSceneAsButton,
+      saveCurrentViewpointInput: ui.saveCurrentViewpointInput,
       recentTargets: [
         {
-          list: recentScenes,
-          visibilityElements: [recentScenesDivider],
+          list: ui.recentScenes,
+          visibilityElements: [ui.recentScenesDivider],
           menuItems: true,
         },
         {
-          list: emptyRecentScenes,
-          visibilityElements: [emptyRecentSection],
+          list: ui.emptyRecentScenes,
+          visibilityElements: [ui.emptyRecentSection],
         },
       ],
     },
@@ -1550,47 +1815,72 @@ async function boot() {
         updateSelectionState();
         updateEmptyState();
       },
-      onError: showFallback,
+      onError: ui.showFallback,
     },
   );
-
+  const droppedBlitzFile = (event: DragEvent) => {
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    return files.find(
+      (file) =>
+        file.name.toLowerCase().endsWith(".blitz") ||
+        file.type === "application/octet-stream",
+    );
+  };
+  window.addEventListener("dragover", (event) => {
+    if (!droppedBlitzFile(event)) {
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "copy";
+    }
+  });
+  window.addEventListener("drop", (event) => {
+    const file = droppedBlitzFile(event);
+    if (!file) {
+      return;
+    }
+    event.preventDefault();
+    stopDragging();
+    sceneFileStorage.loadFile(file);
+  });
   setupMcpBridge(
     {
-      dialog: mcpSettingsDialog,
-      openButton: openMcpSettingsButton,
-      closeButton: closeMcpSettingsButton,
-      form: mcpSettingsForm,
-      urlInput: mcpBridgeUrlInput,
-      tokenInput: mcpBridgeTokenInput,
-      disconnectButton: disconnectMcpBridgeButton,
-      status: mcpBridgeStatus,
+      dialog: ui.mcpSettingsDialog,
+      openButton: ui.openMcpSettingsButton,
+      closeButton: ui.closeMcpSettingsButton,
+      form: ui.mcpSettingsForm,
+      urlInput: ui.mcpBridgeUrlInput,
+      tokenInput: ui.mcpBridgeTokenInput,
+      disconnectButton: ui.disconnectMcpBridgeButton,
+      status: ui.mcpBridgeStatus,
     },
     mcpAdapter,
   );
-
   const runSceneAction = (action: () => void) => {
     stopDragging();
     sceneHistory.transact(action);
     updateSelectionState();
   };
-
   setupUiActions(
     {
-      addCircleButton,
-      addRectButton,
-      addTextButton,
-      addTriangleButton,
-      bringToFrontButton,
-      deleteButton,
-      emptyDemoTemplateButton,
-      emptyOpenFileButton,
-      sendToBackButton,
-      shapeMenu,
-      stressTestButton,
-      toggleStatsButton,
+      addCircleButton: ui.addCircleButton,
+      addFrameButton: ui.addFrameButton,
+      addRectButton: ui.addRectButton,
+      addTextButton: ui.addTextButton,
+      addTriangleButton: ui.addTriangleButton,
+      bringToFrontButton: ui.bringToFrontButton,
+      deleteButton: ui.deleteButton,
+      emptyDemoTemplateButton: ui.emptyDemoTemplateButton,
+      emptyOpenFileButton: ui.emptyOpenFileButton,
+      sendToBackButton: ui.sendToBackButton,
+      shapeMenu: ui.shapeMenu,
+      stressTestButton: ui.stressTestButton,
+      toggleStatsButton: ui.toggleStatsButton,
     },
     {
       addCircle: () => runSceneAction(wasm.blitz_add_circle),
+      addFrame: () => runSceneAction(wasm.blitz_add_frame),
       addRect: () => runSceneAction(wasm.blitz_add_rect),
       addText: () => runSceneAction(wasm.blitz_add_text),
       addTriangle: () => runSceneAction(wasm.blitz_add_triangle),
@@ -1609,27 +1899,30 @@ async function boot() {
       stressTest: () => runSceneAction(wasm.blitz_stress_test),
       toggleStats() {
         statsVisible = !statsVisible;
-        statsPanel.hidden = !statsVisible;
-        toggleStatsButton.setAttribute("aria-pressed", statsVisible ? "true" : "false");
+        ui.statsPanel.hidden = !statsVisible;
+        ui.toggleStatsButton.setAttribute(
+          "aria-pressed",
+          statsVisible ? "true" : "false",
+        );
         if (statsVisible) {
           updateStats();
         }
       },
     },
   );
-
   setupStyleControls(
     {
-      containerInput: selectedContainerInput,
-      fillInput: selectedFillInput,
-      fillOpacityInput: selectedFillOpacityInput,
-      strokeInput: selectedStrokeInput,
-      strokeOpacityInput: selectedStrokeOpacityInput,
-      strokeWidthInput: selectedStrokeWidthInput,
-      textAutoWidthButton: selectedTextAutoWidthButton,
-      textColorInput: selectedTextColorInput,
-      textFontSizeInput: selectedTextFontSizeInput,
-      textOpacityInput: selectedTextOpacityInput,
+      containerInput: ui.selectedContainerInput,
+      frameTitleInput: ui.selectedFrameTitleInput,
+      fillInput: ui.selectedFillInput,
+      fillOpacityInput: ui.selectedFillOpacityInput,
+      strokeInput: ui.selectedStrokeInput,
+      strokeOpacityInput: ui.selectedStrokeOpacityInput,
+      strokeWidthInput: ui.selectedStrokeWidthInput,
+      textAutoWidthButton: ui.selectedTextAutoWidthButton,
+      textColorInput: ui.selectedTextColorInput,
+      textFontSizeInput: ui.selectedTextFontSizeInput,
+      textOpacityInput: ui.selectedTextOpacityInput,
     },
     {
       beginTransaction: () => {
@@ -1662,6 +1955,20 @@ async function boot() {
         });
         updateStyleIsland();
       },
+      setFrameTitle(title) {
+        const textLength = writeTextInput(title);
+        if (textLength < 0) {
+          ui.showFallback(
+            `Frame title is too long. Maximum UTF-8 size is ${wasm.blitz_text_input_capacity() - 1} bytes.`,
+          );
+          updateStyleIsland();
+          return;
+        }
+        sceneHistory.transact(() => {
+          wasm.blitz_set_selected_frame_title(textLength);
+        });
+        updateStyleIsland();
+      },
       setTextColor(red, green, blue) {
         wasm.blitz_set_selected_text_color(red, green, blue);
         updateStyleIsland();
@@ -1684,7 +1991,20 @@ async function boot() {
       },
     },
   );
-
+  const undoHistory = () => {
+    if (sceneHistory.undo()) {
+      updateSelectionState();
+      updateEmptyState();
+    }
+  };
+  const redoHistory = () => {
+    if (sceneHistory.redo()) {
+      updateSelectionState();
+      updateEmptyState();
+    }
+  };
+  ui.undoButton.addEventListener("click", undoHistory);
+  ui.redoButton.addEventListener("click", redoHistory);
   setupKeyboardShortcuts({
     beginTextEdit,
     copySelection,
@@ -1692,37 +2012,24 @@ async function boot() {
     duplicateSelection,
     openFile: sceneFileStorage.openFile,
     pasteClipboard,
-    redo() {
-      if (sceneHistory.redo()) {
-        updateSelectionState();
-        updateEmptyState();
-      }
-    },
+    redo: redoHistory,
     saveFile: sceneFileStorage.saveFile,
     selectAll() {
       wasm.blitz_select_all();
       updateSelectionState();
     },
     stopDragging,
-    undo() {
-      if (sceneHistory.undo()) {
-        updateSelectionState();
-        updateEmptyState();
-      }
-    },
+    undo: undoHistory,
   });
-
   const render = () => {
     resize();
     sceneFileStorage.syncDirtyState();
     updateEmptyState();
-
     const now = performance.now();
     if (lastFrameStamp) {
       frameMs = frameMs * 0.9 + (now - lastFrameStamp) * 0.1;
     }
     lastFrameStamp = now;
-
     // Call the trigger pointer first: it runs extract_static_shapes() (guarded
     // by the dirty flag) so the version below reflects the latest build.
     const shapeCommandPtr = wasm.blitz_shape_command_ptr();
@@ -1740,33 +2047,48 @@ async function boot() {
         device.queue.writeBuffer(
           shapeCommandStorageBuffer,
           0,
-          new Uint32Array(wasm.memory.buffer, shapeCommandPtr, shapeCommandCount * shapeCommandU32Count),
+          new Uint32Array(
+            wasm.memory.buffer,
+            shapeCommandPtr,
+            shapeCommandCount * shapeCommandU32Count,
+          ),
         );
       }
       if (rectDrawCount > 0) {
         device.queue.writeBuffer(
           rectStorageBuffer,
           0,
-          new Float32Array(wasm.memory.buffer, rectDrawPtr, rectDrawCount * rectDrawF32Count),
+          new Float32Array(
+            wasm.memory.buffer,
+            rectDrawPtr,
+            rectDrawCount * rectDrawF32Count,
+          ),
         );
       }
       if (triangleDrawCount > 0) {
         device.queue.writeBuffer(
           triangleStorageBuffer,
           0,
-          new Float32Array(wasm.memory.buffer, triangleDrawPtr, triangleDrawCount * triangleDrawF32Count),
+          new Float32Array(
+            wasm.memory.buffer,
+            triangleDrawPtr,
+            triangleDrawCount * triangleDrawF32Count,
+          ),
         );
       }
       if (ovalDrawCount > 0) {
         device.queue.writeBuffer(
           ovalStorageBuffer,
           0,
-          new Float32Array(wasm.memory.buffer, ovalDrawPtr, ovalDrawCount * ovalDrawF32Count),
+          new Float32Array(
+            wasm.memory.buffer,
+            ovalDrawPtr,
+            ovalDrawCount * ovalDrawF32Count,
+          ),
         );
       }
       lastUploadedShapeCommandVersion = shapeCommandVersion;
     }
-
     const dynCommandPtr = wasm.blitz_dyn_command_ptr();
     const dynVersion = wasm.blitz_dyn_version();
     if (dynVersion !== lastUploadedDynVersion) {
@@ -1780,40 +2102,53 @@ async function boot() {
         device.queue.writeBuffer(
           dynCommandStorageBuffer,
           0,
-          new Uint32Array(wasm.memory.buffer, dynCommandPtr, dynCommandCount * shapeCommandU32Count),
+          new Uint32Array(
+            wasm.memory.buffer,
+            dynCommandPtr,
+            dynCommandCount * shapeCommandU32Count,
+          ),
         );
       }
       if (dynRectCount > 0) {
         device.queue.writeBuffer(
           dynRectStorageBuffer,
           0,
-          new Float32Array(wasm.memory.buffer, dynRectPtr, dynRectCount * rectDrawF32Count),
+          new Float32Array(
+            wasm.memory.buffer,
+            dynRectPtr,
+            dynRectCount * rectDrawF32Count,
+          ),
         );
       }
       if (textDrawCount > 0) {
         device.queue.writeBuffer(
           textStorageBuffer,
           0,
-          new Float32Array(wasm.memory.buffer, textDrawPtr, textDrawCount * textDrawF32Count),
+          new Float32Array(
+            wasm.memory.buffer,
+            textDrawPtr,
+            textDrawCount * textDrawF32Count,
+          ),
         );
       }
       lastUploadedDynVersion = dynVersion;
     }
-
-    const uniforms = new Float32Array(wasm.memory.buffer, uniformPtr, wasm.blitz_uniform_f32_count());
+    const uniforms = new Float32Array(
+      wasm.memory.buffer,
+      uniformPtr,
+      wasm.blitz_uniform_f32_count(),
+    );
     device.queue.writeBuffer(uniformBuffer, 0, uniforms);
     positionTextEditor();
-
     const zoomPercent = Math.round(uniforms[4] * 100);
     if (zoomPercent !== lastZoomPercent) {
       lastZoomPercent = zoomPercent;
-      zoomIndicator.textContent = `${zoomPercent}%`;
+      ui.zoomIndicator.textContent = `${zoomPercent}%`;
     }
-
     device.queue.writeBuffer(drawArgsBuffer, 0, drawArgsReset);
-
-    const encoder = device.createCommandEncoder({ label: "Blitz Render Encoder" });
-
+    const encoder = device.createCommandEncoder({
+      label: "Blitz Render Encoder",
+    });
     if (currentShapeCommandCount > 0) {
       const cullPass = encoder.beginComputePass({ label: "Blitz Cull Pass" });
       cullPass.setPipeline(cullPipeline);
@@ -1821,7 +2156,6 @@ async function boot() {
       cullPass.dispatchWorkgroups(Math.ceil(currentShapeCommandCount / 64));
       cullPass.end();
     }
-
     const pass = encoder.beginRenderPass({
       label: "Blitz Render Pass",
       colorAttachments: [
@@ -1849,21 +2183,21 @@ async function boot() {
       pass.draw(6, currentDynCommandCount);
     }
     pass.end();
-
     // When stats are open, copy the post-cull instance count out for readback.
-    const sampleVisible = statsVisible && !readbackPending && currentShapeCommandCount > 0;
+    const sampleVisible =
+      statsVisible && !readbackPending && currentShapeCommandCount > 0;
     if (sampleVisible) {
       encoder.copyBufferToBuffer(drawArgsBuffer, 0, drawArgsReadback, 0, 16);
     }
-
     device.queue.submit([encoder.finish()]);
-
     if (sampleVisible) {
       readbackPending = true;
       drawArgsReadback
         .mapAsync(GPUMapMode.READ)
         .then(() => {
-          visibleGeometryShapeCount = new Uint32Array(drawArgsReadback.getMappedRange())[1];
+          visibleGeometryShapeCount = new Uint32Array(
+            drawArgsReadback.getMappedRange(),
+          )[1];
           drawArgsReadback.unmap();
           readbackPending = false;
         })
@@ -1871,15 +2205,12 @@ async function boot() {
           readbackPending = false;
         });
     }
-
     if (statsVisible && now - lastStatsAt > 200) {
       lastStatsAt = now;
       updateStats();
     }
-
     requestAnimationFrame(render);
   };
-
   window.addEventListener("resize", resize);
   resize();
   sceneHistory.reset();
@@ -1888,8 +2219,7 @@ async function boot() {
   updateEmptyState();
   requestAnimationFrame(render);
 }
-
 boot().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  showFallback(message);
+  ui.showFallback(message);
 });

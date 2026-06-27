@@ -50,6 +50,7 @@ type SceneFileOptions = {
 };
 
 export type SceneFileController = {
+  loadFile(file: File): void;
   markClean(): void;
   openFile(): void;
   saveFile(): void;
@@ -353,6 +354,19 @@ export function setupSceneFileStorage(
         return;
       }
       deserializeScene(wasm, new Uint8Array(await file.arrayBuffer()));
+      currentHandle = undefined;
+      options.onLoaded();
+      markClean();
+    });
+  };
+
+  const loadFile = (file: File) => {
+    if (!canReplaceScene()) {
+      return;
+    }
+    void run(async () => {
+      deserializeScene(wasm, new Uint8Array(await file.arrayBuffer()));
+      currentHandle = undefined;
       options.onLoaded();
       markClean();
     });
@@ -413,5 +427,5 @@ export function setupSceneFileStorage(
     event.returnValue = "";
   });
 
-  return { markClean, openFile, saveFile, showRecentFiles, syncDirtyState };
+  return { loadFile, markClean, openFile, saveFile, showRecentFiles, syncDirtyState };
 }

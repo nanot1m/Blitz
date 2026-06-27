@@ -7,6 +7,8 @@ import {
   createIcons,
   FolderOpen,
   LayoutGrid,
+  PanelTop,
+  Redo2,
   Save,
   SendToBack,
   Settings,
@@ -15,6 +17,7 @@ import {
   Trash2,
   Triangle,
   Type as TypeIcon,
+  Undo2,
 } from "lucide";
 
 function requireElement<T extends Element>(selector: string): T {
@@ -35,6 +38,8 @@ export function createBlitzUi() {
       Ellipsis,
       FolderOpen,
       LayoutGrid,
+      PanelTop,
+      Redo2,
       Save,
       SendToBack,
       Settings,
@@ -43,6 +48,7 @@ export function createBlitzUi() {
       Trash2,
       Triangle,
       Type: TypeIcon,
+      Undo2,
     },
   });
 
@@ -122,12 +128,15 @@ export function createBlitzUi() {
     selectedStrokeOpacityInput: requireElement<HTMLInputElement>("#selected-stroke-opacity"),
     selectedStrokeWidthInput: requireElement<HTMLInputElement>("#selected-stroke-width"),
     selectedMixedDivider: requireElement<HTMLElement>("#selected-mixed-divider"),
+    selectedFrameControls: requireElement<HTMLElement>("#selected-frame-controls"),
+    selectedFrameTitleInput: requireElement<HTMLInputElement>("#selected-frame-title"),
     selectedTextControls: requireElement<HTMLElement>("#selected-text-controls"),
     selectedTextColorInput: requireElement<HTMLInputElement>("#selected-text-color"),
     selectedTextOpacityInput: requireElement<HTMLInputElement>("#selected-text-opacity"),
     selectedTextFontSizeInput: requireElement<HTMLInputElement>("#selected-text-font-size"),
     selectedTextAutoWidthButton: requireElement<HTMLButtonElement>("#selected-text-auto-width"),
     addRectButton: requireElement<HTMLButtonElement>("#add-rect"),
+    addFrameButton: requireElement<HTMLButtonElement>("#add-frame"),
     addCircleButton: requireElement<HTMLButtonElement>("#add-circle"),
     addTriangleButton: requireElement<HTMLButtonElement>("#add-triangle"),
     addTextButton: requireElement<HTMLButtonElement>("#add-text"),
@@ -135,6 +144,8 @@ export function createBlitzUi() {
     sendToBackButton: requireElement<HTMLButtonElement>("#send-to-back"),
     bringToFrontButton: requireElement<HTMLButtonElement>("#bring-to-front"),
     deleteButton: requireElement<HTMLButtonElement>("#delete-selected"),
+    undoButton: requireElement<HTMLButtonElement>("#undo-action"),
+    redoButton: requireElement<HTMLButtonElement>("#redo-action"),
     zoomIndicator: requireElement<HTMLDivElement>("#zoom-indicator"),
     toggleStatsButton: requireElement<HTMLButtonElement>("#toggle-stats"),
     toggleDebuggerButton: requireElement<HTMLButtonElement>("#toggle-debugger"),

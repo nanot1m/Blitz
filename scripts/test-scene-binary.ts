@@ -18,6 +18,17 @@ const objectIdEquals = (left: number[], right: number[]) =>
   left.every((word, index) => word === right[index]);
 
 const readLastCreatedObjectId = () => readObjectId(wasm.blitz_last_created_object_id_ptr());
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+const writeTextInput = (value: string) => {
+  const bytes = textEncoder.encode(value);
+  new Uint8Array(wasm.memory.buffer, wasm.blitz_text_input_ptr(), bytes.byteLength).set(bytes);
+  return bytes.byteLength;
+};
+
+const readText = (ptr: number, length: number) =>
+  textDecoder.decode(new Uint8Array(wasm.memory.buffer, ptr, length));
 
 const querySceneItemByObjectId = (objectId: number[]) => {
   wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 100);
@@ -29,6 +40,7 @@ const querySceneItemByObjectId = (objectId: number[]) => {
     const offset = ptr + index * itemBytes;
     if (objectIdEquals(readObjectId(offset), objectId)) {
       return {
+        kind: view.getUint32(offset + 16, true),
         order: view.getUint32(offset + 20, true),
         x: view.getFloat32(offset + 40, true),
         y: view.getFloat32(offset + 44, true),
@@ -38,6 +50,28 @@ const querySceneItemByObjectId = (objectId: number[]) => {
     }
   }
   throw new Error(`Object ${objectId.join(":")} was not found in the scene query.`);
+};
+
+const querySceneItems = () => {
+  wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 100);
+  const ptr = wasm.blitz_scene_query_ptr();
+  const itemBytes = wasm.blitz_scene_query_item_bytes();
+  const count = wasm.blitz_scene_query_count();
+  const view = new DataView(wasm.memory.buffer);
+  return Array.from({ length: count }, (_value, index) => {
+    const offset = ptr + index * itemBytes;
+    return {
+      objectId: readObjectId(offset),
+      kind: view.getUint32(offset + 16, true),
+      order: view.getUint32(offset + 20, true),
+      selected: view.getUint32(offset + 24, true) !== 0,
+      selectedSubtree: view.getUint32(offset + 132, true) !== 0,
+      x: view.getFloat32(offset + 40, true),
+      y: view.getFloat32(offset + 44, true),
+      width: view.getFloat32(offset + 48, true),
+      height: view.getFloat32(offset + 52, true),
+    };
+  });
 };
 
 const queriedObjectIdAt = (index: number) => {
@@ -55,10 +89,10 @@ const expectNear = (actual: number, expected: number, label: string) => {
   }
 };
 
-const updateRectPosition = (objectId: number[], x: number, y: number) =>
+const updateRectPosition = (objectId: number[], x: number, y: number, kind = 0) =>
   wasm.blitz_update_object(
     ...objectId,
-    0,
+    kind,
     1 | 2,
     x,
     y,
@@ -175,6 +209,77 @@ if (Math.abs(resizedItem.getFloat32(48, true) - 250) > 0.001) {
 wasm.blitz_clear_scene();
 wasm.blitz_resize(1000, 1000);
 wasm.blitz_set_camera(0, 0, 1);
+let frameTitleLength = writeTextInput("Roadmap");
+wasm.blitz_create_frame(
+  -120,
+  -80,
+  240,
+  160,
+  1,
+  1,
+  1,
+  1,
+  0.1,
+  0.2,
+  0.3,
+  1,
+  2,
+  0.08,
+  0.1,
+  0.13,
+  1,
+  22,
+  frameTitleLength,
+);
+if (wasm.blitz_selected_style_kind() !== 3) {
+  throw new Error("A selected frame did not expose both geometric and title text styles.");
+}
+if (wasm.blitz_selected_container_state() !== 2) {
+  throw new Error("A frame should always be tagged as a container.");
+}
+if (wasm.blitz_set_selected_container(0) !== 0 || wasm.blitz_selected_container_state() !== 2) {
+  throw new Error("A frame allowed its required container component to be removed.");
+}
+wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
+const frameItem = new DataView(
+  wasm.memory.buffer,
+  wasm.blitz_scene_query_ptr(),
+  wasm.blitz_scene_query_item_bytes(),
+);
+if (frameItem.getUint32(16, true) !== 4) {
+  throw new Error("A frame was not exposed as the frame shape kind.");
+}
+if (
+  readText(frameItem.getUint32(28, true), frameItem.getUint32(32, true)) !==
+  "Roadmap"
+) {
+  throw new Error("A frame title was not exposed in scene query results.");
+}
+if (Math.abs(frameItem.getFloat32(92, true) - 22) > 0.001) {
+  throw new Error("A frame title font size was not exposed in scene query results.");
+}
+frameTitleLength = writeTextInput("Updated");
+wasm.blitz_set_selected_frame_title(frameTitleLength);
+const frameTitlePtr = wasm.blitz_selected_frame_title_ptr();
+if (
+  readText(frameTitlePtr, wasm.blitz_selected_frame_title_length()) !==
+  "Updated"
+) {
+  throw new Error("Frame title updates were not written to the selected frame.");
+}
+wasm.blitz_set_selected_text_font_size(30);
+const frameStyle = new Float32Array(
+  wasm.memory.buffer,
+  wasm.blitz_selected_style_ptr(),
+  wasm.blitz_selected_style_f32_count(),
+);
+if (Math.abs(frameStyle[14] - 30) > 0.001) {
+  throw new Error("Frame title font size updates were not written to the frame.");
+}
+
+wasm.blitz_clear_scene();
+wasm.blitz_resize(1000, 1000);
+wasm.blitz_set_camera(0, 0, 1);
 wasm.blitz_create_rect(0, 0, 200, 200, 0.8, 0.8, 1, 1, 0, 0, 0, 1, 1);
 const containerId = readLastCreatedObjectId();
 if (wasm.blitz_set_container(...containerId, 1) !== 1) {
@@ -228,6 +333,131 @@ expectNear(childItem.x, 375, "Detached child stable x");
 expectNear(childItem.y, 375, "Detached child stable y");
 
 wasm.blitz_clear_scene();
+wasm.blitz_resize(1000, 1000);
+wasm.blitz_set_camera(0, 0, 1);
+wasm.blitz_create_rect(0, 0, 200, 200, 0.8, 0.8, 1, 1, 0, 0, 0, 1, 1);
+const multiDropContainerId = readLastCreatedObjectId();
+if (wasm.blitz_set_container(...multiDropContainerId, 1) !== 1) {
+  throw new Error("Failed to tag the multi-drop target as a container.");
+}
+wasm.blitz_create_rect(300, 0, 50, 50, 1, 0.8, 0.8, 1, 0, 0, 0, 1, 1);
+const multiDropFirstId = readLastCreatedObjectId();
+wasm.blitz_create_rect(360, 0, 50, 50, 1, 0.9, 0.8, 1, 0, 0, 0, 1, 1);
+const multiDropSecondId = readLastCreatedObjectId();
+wasm.blitz_select_object(
+  multiDropFirstId[0],
+  multiDropFirstId[1],
+  multiDropFirstId[2],
+  multiDropFirstId[3],
+  0,
+);
+wasm.blitz_select_object(
+  multiDropSecondId[0],
+  multiDropSecondId[1],
+  multiDropSecondId[2],
+  multiDropSecondId[3],
+  1,
+);
+wasm.blitz_pointer_down(825, 525, 0);
+wasm.blitz_pointer_move(550, 550);
+wasm.blitz_pointer_up();
+let multiDropFirst = querySceneItemByObjectId(multiDropFirstId);
+let multiDropSecond = querySceneItemByObjectId(multiDropSecondId);
+expectNear(multiDropFirst.x, 25, "Multi-drop first x");
+expectNear(multiDropFirst.y, 25, "Multi-drop first y");
+expectNear(multiDropSecond.x, 85, "Multi-drop second x");
+expectNear(multiDropSecond.y, 25, "Multi-drop second y");
+if (updateRectPosition(multiDropContainerId, 20, 30) !== 0) {
+  throw new Error("Failed to move the multi-drop container.");
+}
+multiDropFirst = querySceneItemByObjectId(multiDropFirstId);
+multiDropSecond = querySceneItemByObjectId(multiDropSecondId);
+expectNear(multiDropFirst.x, 45, "Multi-drop attached first x");
+expectNear(multiDropFirst.y, 55, "Multi-drop attached first y");
+expectNear(multiDropSecond.x, 105, "Multi-drop attached second x");
+expectNear(multiDropSecond.y, 55, "Multi-drop attached second y");
+
+wasm.blitz_clear_scene();
+wasm.blitz_create_rect(0, 0, 120, 100, 0.9, 0.9, 1, 1, 0, 0, 0, 1, 1);
+const duplicateContainerId = readLastCreatedObjectId();
+if (wasm.blitz_set_container(...duplicateContainerId, 1) !== 1) {
+  throw new Error("Failed to tag duplicate source as a container.");
+}
+wasm.blitz_create_rect(20, 20, 30, 30, 1, 0.8, 0.8, 1, 0, 0, 0, 1, 1);
+const duplicateChildId = readLastCreatedObjectId();
+if (wasm.blitz_set_relative_transform(...duplicateChildId, ...duplicateContainerId, 20, 20) !== 1) {
+  throw new Error("Failed to attach duplicate source child.");
+}
+wasm.blitz_select_object(
+  duplicateContainerId[0],
+  duplicateContainerId[1],
+  duplicateContainerId[2],
+  duplicateContainerId[3],
+  0,
+);
+if (wasm.blitz_duplicate_selected(200, 0) !== 2) {
+  throw new Error("Duplicating a selected container did not duplicate its child.");
+}
+const duplicateItems = querySceneItems();
+const duplicatedContainer = duplicateItems.find(
+  (item) => item.selected && Math.abs(item.x - 200) < 0.001 && Math.abs(item.y) < 0.001,
+);
+const duplicatedChild = duplicateItems.find(
+  (item) => item.selected && Math.abs(item.x - 220) < 0.001 && Math.abs(item.y - 20) < 0.001,
+);
+if (!duplicatedContainer || !duplicatedChild) {
+  throw new Error("Duplicated container subtree was not selected at the expected positions.");
+}
+if (updateRectPosition(duplicatedContainer.objectId, 240, 10) !== 0) {
+  throw new Error("Failed to move duplicated container.");
+}
+const movedDuplicatedChild = querySceneItemByObjectId(duplicatedChild.objectId);
+expectNear(movedDuplicatedChild.x, 260, "Duplicated child follows x");
+expectNear(movedDuplicatedChild.y, 30, "Duplicated child follows y");
+
+wasm.blitz_clear_scene();
+wasm.blitz_create_rect(0, 0, 300, 300, 0.95, 0.95, 1, 1, 0, 0, 0, 1, 1);
+const toggleRootId = readLastCreatedObjectId();
+if (wasm.blitz_set_container(...toggleRootId, 1) !== 1) {
+  throw new Error("Failed to tag the toggle root as a container.");
+}
+wasm.blitz_create_rect(50, 50, 100, 100, 1, 1, 1, 1, 0, 0, 0, 1, 1);
+const toggledContainerId = readLastCreatedObjectId();
+wasm.blitz_create_rect(70, 70, 20, 20, 1, 0.8, 0.8, 1, 0, 0, 0, 1, 1);
+const adoptedId = readLastCreatedObjectId();
+wasm.blitz_create_rect(130, 130, 60, 60, 0.8, 1, 0.8, 1, 0, 0, 0, 1, 1);
+const partiallyInsideId = readLastCreatedObjectId();
+if (wasm.blitz_set_container(...toggledContainerId, 1) !== 1) {
+  throw new Error("Enabling a container did not report a change.");
+}
+let adoptedItem = querySceneItemByObjectId(adoptedId);
+let partiallyInsideItem = querySceneItemByObjectId(partiallyInsideId);
+if (updateRectPosition(toggledContainerId, 80, 90) !== 0) {
+  throw new Error("Failed to move a toggled container.");
+}
+adoptedItem = querySceneItemByObjectId(adoptedId);
+partiallyInsideItem = querySceneItemByObjectId(partiallyInsideId);
+expectNear(adoptedItem.x, 100, "Toggle-adopted child x");
+expectNear(adoptedItem.y, 110, "Toggle-adopted child y");
+expectNear(partiallyInsideItem.x, 130, "Partially contained item stable x");
+expectNear(partiallyInsideItem.y, 130, "Partially contained item stable y");
+if (wasm.blitz_set_container(...toggledContainerId, 0) !== 1) {
+  throw new Error("Disabling a container did not report a change.");
+}
+if (updateRectPosition(toggledContainerId, 120, 130) !== 0) {
+  throw new Error("Failed to move a disabled former container.");
+}
+adoptedItem = querySceneItemByObjectId(adoptedId);
+expectNear(adoptedItem.x, 100, "Toggle-detached child x");
+expectNear(adoptedItem.y, 110, "Toggle-detached child y");
+if (updateRectPosition(toggleRootId, 10, 15) !== 0) {
+  throw new Error("Failed to move the toggle root container.");
+}
+adoptedItem = querySceneItemByObjectId(adoptedId);
+expectNear(adoptedItem.x, 110, "Toggle-detached child underlying root x");
+expectNear(adoptedItem.y, 125, "Toggle-detached child underlying root y");
+
+wasm.blitz_clear_scene();
 const bulkContainerIds: number[][] = [];
 const bulkChildIds: number[][] = [];
 for (let index = 0; index < 40; index += 1) {
@@ -267,7 +497,14 @@ const demoSlideId = queriedObjectIdAt(0);
 const demoChildId = queriedObjectIdAt(1);
 const demoSlide = querySceneItemByObjectId(demoSlideId);
 const demoChild = querySceneItemByObjectId(demoChildId);
-if (updateRectPosition(demoSlideId, demoSlide.x + 25, demoSlide.y + 35) !== 0) {
+if (demoSlide.kind !== 4) {
+  throw new Error("The demo slide root should be a frame.");
+}
+wasm.blitz_select_object(demoChildId[0], demoChildId[1], demoChildId[2], demoChildId[3], 0);
+if (wasm.blitz_selected_container_state() !== 2) {
+  throw new Error("Demo slide inner rectangles should be containers.");
+}
+if (updateRectPosition(demoSlideId, demoSlide.x + 25, demoSlide.y + 35, demoSlide.kind) !== 0) {
   throw new Error("Failed to move the demo slide container.");
 }
 const movedDemoChild = querySceneItemByObjectId(demoChildId);
@@ -284,7 +521,7 @@ wasm.blitz_create_rect(10, 20, 200, 100, 0.2, 0.4, 0.8, 0.5, 0.1, 0.2, 0.3, 1, 4
 wasm.blitz_create_circle(400, 220, 64, 0.2, 0.8, 0.5, 1, 0.1, 0.3, 0.2, 1, 2);
 wasm.blitz_create_triangle(-80, 50, 120, 90, 1, 0.8, 0.4, 1, 0.8, 0.2, 0.1, 1, 3);
 
-const text = new TextEncoder().encode("Binary scene ✓");
+const text = textEncoder.encode("Binary scene ✓");
 new Uint8Array(wasm.memory.buffer, wasm.blitz_text_input_ptr(), text.byteLength).set(text);
 wasm.blitz_create_text(
   30,
@@ -300,6 +537,29 @@ wasm.blitz_create_text(
   3,
   1,
 );
+const frameRoundTripTitleLength = writeTextInput("Saved frame");
+wasm.blitz_create_frame(
+  -260,
+  -160,
+  180,
+  120,
+  1,
+  1,
+  1,
+  1,
+  0.25,
+  0.3,
+  0.4,
+  1,
+  1.5,
+  0.4,
+  0.2,
+  0.8,
+  0.9,
+  19,
+  frameRoundTripTitleLength,
+);
+const frameRoundTripId = readLastCreatedObjectId();
 if (wasm.blitz_scene_revision() === emptyRevision) {
   throw new Error("Scene mutations did not advance the revision.");
 }
@@ -423,8 +683,42 @@ if (
 }
 
 wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 10);
-if (wasm.blitz_scene_query_total() !== 4) {
-  throw new Error(`Expected four restored objects, received ${wasm.blitz_scene_query_total()}.`);
+if (wasm.blitz_scene_query_total() !== 5) {
+  throw new Error(`Expected five restored objects, received ${wasm.blitz_scene_query_total()}.`);
+}
+const restoredFrame = querySceneItemByObjectId(frameRoundTripId);
+wasm.blitz_select_object(
+  frameRoundTripId[0],
+  frameRoundTripId[1],
+  frameRoundTripId[2],
+  frameRoundTripId[3],
+  0,
+);
+if (wasm.blitz_selected_container_state() !== 2) {
+  throw new Error("A restored frame did not keep its required container component.");
+}
+const restoredFrameTitlePtr = wasm.blitz_selected_frame_title_ptr();
+if (
+  readText(restoredFrameTitlePtr, wasm.blitz_selected_frame_title_length()) !==
+  "Saved frame"
+) {
+  throw new Error("A restored frame did not keep its title.");
+}
+const restoredFrameStyle = new Float32Array(
+  wasm.memory.buffer,
+  wasm.blitz_selected_style_ptr(),
+  wasm.blitz_selected_style_f32_count(),
+);
+if (
+  Math.abs(restoredFrame.width - 180) > 0.001 ||
+  Math.abs(restoredFrame.height - 120) > 0.001 ||
+  Math.abs(restoredFrameStyle[14] - 19) > 0.001 ||
+  Math.abs(restoredFrameStyle[9] - 0.7) > 0.001 ||
+  Math.abs(restoredFrameStyle[10] - 0.6) > 0.001 ||
+  Math.abs(restoredFrameStyle[11] - 0.5) > 0.001 ||
+  Math.abs(restoredFrameStyle[12] - 0.45) > 0.001
+) {
+  throw new Error("A restored frame did not keep its bounds or title style.");
 }
 
 const liveBeforeInvalidFile = wasm.blitz_entity_count();

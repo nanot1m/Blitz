@@ -71,7 +71,7 @@ type Bounds = {
 
 type SceneObject = Bounds & {
   id: string;
-  type: "rect" | "triangle" | "circle" | "text";
+  type: "rect" | "frame" | "triangle" | "circle" | "text";
   order: number;
   selected: boolean;
   backgroundColor?: string;
@@ -82,6 +82,7 @@ type SceneObject = Bounds & {
   radius?: number;
   text?: string;
   fontSize?: number;
+  titleColor?: string;
   maxWidth?: number;
   lineHeight?: number;
   maxLines?: number;
@@ -459,7 +460,7 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
     const base = wasm.blitz_scene_query_ptr();
     const view = new DataView(wasm.memory.buffer);
     const objects: SceneObject[] = [];
-    const kinds = ["rect", "triangle", "circle", "text"] as const;
+    const kinds = ["rect", "triangle", "circle", "text", "frame"] as const;
 
     for (let index = 0; index < count; index += 1) {
       const offset = base + index * itemBytes;
@@ -490,13 +491,23 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
         view.getFloat32(offset + 64, true),
         view.getFloat32(offset + 68, true),
       );
-      if (type === "text") {
+      if (type === "text" || type === "frame") {
         const textPtr = view.getUint32(offset + 28, true);
         const textLength = view.getUint32(offset + 32, true);
         object.text = textDecoder.decode(
           new Uint8Array(wasm.memory.buffer, textPtr, textLength),
         );
         object.fontSize = view.getFloat32(offset + 92, true);
+      }
+      if (type === "frame") {
+        object.titleColor = colorToHex(
+          view.getFloat32(offset + 96, true),
+          view.getFloat32(offset + 100, true),
+          view.getFloat32(offset + 104, true),
+          view.getFloat32(offset + 108, true),
+        );
+      }
+      if (type === "text") {
         const maxWidth = view.getFloat32(offset + 96, true);
         object.maxWidth = maxWidth > 0 ? maxWidth : undefined;
         object.lineHeight = view.getFloat32(offset + 100, true);

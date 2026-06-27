@@ -63,6 +63,9 @@
           <button id="add-rect" type="button" aria-label="Add rectangle" title="Add rectangle">
             <i data-lucide="square" aria-hidden="true"></i>
           </button>
+          <button id="add-frame" type="button" aria-label="Add frame" title="Add frame">
+            <i data-lucide="panel-top" aria-hidden="true"></i>
+          </button>
           <button id="add-circle" type="button" aria-label="Add circle" title="Add circle">
             <i data-lucide="circle" aria-hidden="true"></i>
           </button>
@@ -106,88 +109,97 @@
         </div>
       </details>
     </div>
-    <aside id="style-island" aria-label="Shape properties" hidden>
-      <div class="style-panel-heading">Properties</div>
-      <div id="selected-entity-controls" class="selected-style-group">
-        <label class="style-control style-checkbox-control">
-          <span>Container</span>
-          <input id="selected-container" type="checkbox" aria-label="Mark selected as container" />
-        </label>
-      </div>
-      <span class="style-divider" aria-hidden="true"></span>
-      <div id="selected-geometry-controls" class="selected-style-group">
-        <label class="style-control">
-          <span>Fill</span>
-          <input id="selected-fill" type="color" aria-label="Fill color" />
-          <input
-            id="selected-fill-opacity"
-            class="style-opacity"
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            aria-label="Fill opacity"
-          />
-        </label>
+    <div id="side-panel-stack" aria-label="Canvas side panels">
+      <div id="stats-panel" role="status" aria-label="Stats for nerds" hidden><div id="stats-body"></div></div>
+      <aside id="style-island" aria-label="Shape properties" hidden>
+        <div class="style-panel-heading">Properties</div>
+        <div id="selected-entity-controls" class="selected-style-group">
+          <label class="style-control style-checkbox-control">
+            <span>Container</span>
+            <input id="selected-container" type="checkbox" aria-label="Mark selected as container" />
+          </label>
+        </div>
         <span class="style-divider" aria-hidden="true"></span>
-        <div class="selected-stroke-controls">
+        <div id="selected-geometry-controls" class="selected-style-group">
           <label class="style-control">
-            <span>Stroke</span>
-            <input id="selected-stroke" type="color" aria-label="Stroke color" />
+            <span>Fill</span>
+            <input id="selected-fill" type="color" aria-label="Fill color" />
             <input
-              id="selected-stroke-opacity"
+              id="selected-fill-opacity"
               class="style-opacity"
               type="range"
               min="0"
               max="1"
               step="0.01"
-              aria-label="Stroke opacity"
+              aria-label="Fill opacity"
+            />
+          </label>
+          <span class="style-divider" aria-hidden="true"></span>
+          <div class="selected-stroke-controls">
+            <label class="style-control">
+              <span>Stroke</span>
+              <input id="selected-stroke" type="color" aria-label="Stroke color" />
+              <input
+                id="selected-stroke-opacity"
+                class="style-opacity"
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                aria-label="Stroke opacity"
+              />
+            </label>
+            <label class="style-control style-width-control">
+              <span>Width</span>
+              <input
+                id="selected-stroke-width"
+                type="number"
+                min="0"
+                max="64"
+                step="0.5"
+                aria-label="Stroke width"
+              />
+            </label>
+          </div>
+        </div>
+        <span id="selected-mixed-divider" class="style-divider" aria-hidden="true" hidden></span>
+        <div id="selected-frame-controls" class="selected-style-group" hidden>
+          <label class="style-control style-title-control">
+            <span>Title</span>
+            <input id="selected-frame-title" type="text" aria-label="Frame title" />
+          </label>
+        </div>
+        <div id="selected-text-controls" class="selected-style-group" hidden>
+          <label class="style-control">
+            <span>Text</span>
+            <input id="selected-text-color" type="color" aria-label="Text color" />
+            <input
+              id="selected-text-opacity"
+              class="style-opacity"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              aria-label="Text opacity"
             />
           </label>
           <label class="style-control style-width-control">
-            <span>Width</span>
+            <span>Size</span>
             <input
-              id="selected-stroke-width"
+              id="selected-text-font-size"
               type="number"
-              min="0"
-              max="64"
-              step="0.5"
-              aria-label="Stroke width"
+              min="4"
+              max="512"
+              step="1"
+              aria-label="Text font size"
             />
           </label>
+          <button id="selected-text-auto-width" class="style-compact-button" type="button">
+            Auto width
+          </button>
         </div>
-      </div>
-      <span id="selected-mixed-divider" class="style-divider" aria-hidden="true" hidden></span>
-      <div id="selected-text-controls" class="selected-style-group" hidden>
-        <label class="style-control">
-          <span>Text</span>
-          <input id="selected-text-color" type="color" aria-label="Text color" />
-          <input
-            id="selected-text-opacity"
-            class="style-opacity"
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            aria-label="Text opacity"
-          />
-        </label>
-        <label class="style-control style-width-control">
-          <span>Size</span>
-          <input
-            id="selected-text-font-size"
-            type="number"
-            min="4"
-            max="512"
-            step="1"
-            aria-label="Text font size"
-          />
-        </label>
-        <button id="selected-text-auto-width" class="style-compact-button" type="button">
-          Auto width
-        </button>
-      </div>
-    </aside>
+      </aside>
+    </div>
     <aside id="debugger-island" aria-label="Selected entity components" hidden>
       <div class="debugger-heading">
         <span>Selected entity</span>
@@ -223,8 +235,15 @@
       </div>
     </section>
     <div id="fallback" role="status"></div>
+    <div id="history-controls" aria-label="History controls">
+      <button id="undo-action" type="button" aria-label="Undo" title="Undo" disabled>
+        <i data-lucide="undo-2" aria-hidden="true"></i>
+      </button>
+      <button id="redo-action" type="button" aria-label="Redo" title="Redo" disabled>
+        <i data-lucide="redo-2" aria-hidden="true"></i>
+      </button>
+    </div>
     <div id="zoom-indicator" role="status" aria-label="Zoom level"></div>
-    <div id="stats-panel" role="status" aria-label="Stats for nerds" hidden><div id="stats-body"></div></div>
     <dialog id="mcp-settings-dialog" aria-labelledby="mcp-settings-title">
       <form id="mcp-settings-form">
         <div class="dialog-heading">

@@ -18,6 +18,7 @@ type SceneHistoryOptions = {
   maxEntries?: number;
   maxBytes?: number;
   onApplied(): void;
+  onChanged?(): void;
   onError(message: string): void;
 };
 
@@ -84,6 +85,7 @@ export function createSceneHistory(
     totalBytes += bytes.byteLength;
     cursor = states.length - 1;
     trim();
+    options.onChanged?.();
   };
 
   const reset = () => {
@@ -169,6 +171,7 @@ export function createSceneHistory(
       return false;
     }
     cursor -= 1;
+    options.onChanged?.();
     return true;
   };
 
@@ -181,6 +184,7 @@ export function createSceneHistory(
       return false;
     }
     cursor += 1;
+    options.onChanged?.();
     return true;
   };
 
@@ -197,6 +201,8 @@ export function createSceneHistory(
   return {
     begin,
     cancel,
+    canRedo: () => cursor >= 0 && cursor < states.length - 1,
+    canUndo: () => cursor > 0,
     commit,
     redo,
     reset,

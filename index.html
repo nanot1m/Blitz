@@ -11,6 +11,7 @@
   </head>
   <body>
     <canvas id="blitz-canvas" aria-label="Blitz WebGPU canvas"></canvas>
+    <textarea id="text-editor" aria-label="Edit selected text" hidden></textarea>
     <div id="tool-island" role="toolbar" aria-label="Canvas tools">
       <details id="file-menu">
         <summary aria-label="Scene file" title="Scene file">
@@ -161,6 +162,17 @@
             max="1"
             step="0.01"
             aria-label="Text opacity"
+          />
+        </label>
+        <label class="style-control style-width-control">
+          <span>Size</span>
+          <input
+            id="selected-text-font-size"
+            type="number"
+            min="4"
+            max="512"
+            step="1"
+            aria-label="Text font size"
           />
         </label>
         <button id="selected-text-auto-width" class="style-compact-button" type="button">

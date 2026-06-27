@@ -216,7 +216,7 @@ static SceneItem scene_query_items[BLITZ_MAX_SCENE_QUERY_ITEMS];
 static u32 scene_query_count;
 static u32 scene_query_total;
 static unsigned char scene_file_buffer[BLITZ_SCENE_FILE_BUFFER_BYTES];
-static float selected_style[14];
+static float selected_style[15];
 static SceneItem selected_debug_item;
 static u32 selected_debug_mask;
 static World world;
@@ -244,6 +244,7 @@ static u32 drag_active;
 static u32 resize_active;
 static u32 resize_entity;
 static u32 resize_handle;
+static u32 hidden_text_entity;
 static Vec2 resize_start_position;
 static Vec2 resize_start_size;
 // Selection state captured when a marquee starts, so each marquee move can
@@ -1112,6 +1113,9 @@ u32 blitz_font_glyph_codepoint(u32 index) {
 }
 
 static void push_text_draws(u32 entity, u32 order) {
+  if (entity == hidden_text_entity) {
+    return;
+  }
   TextView view = world.text_views[entity];
   Vec2 position = world.positions[entity];
   layout_text(view.text, view.font_size, view.max_width, view.line_height,
@@ -1246,6 +1250,9 @@ static void extract_dynamic(void) {
     if (!(world.masks[entity] & BLITZ_COMPONENT_TEXT_VIEW)) {
       continue;
     }
+    if (entity == hidden_text_entity) {
+      continue;
+    }
     if (text_visible_in_view(entity, scale, view_min_x, view_min_y, view_max_x,
                              view_max_y)) {
       visible_text_shape_count += 1u;
@@ -1264,6 +1271,9 @@ static void extract_dynamic(void) {
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
     u32 entity = world.draw_order[i];
     if (!world.selected[entity]) {
+      continue;
+    }
+    if (entity == hidden_text_entity) {
       continue;
     }
     // Only draw outlines for selected shapes that are actually visible, so
@@ -1778,6 +1788,7 @@ void blitz_init(void) {
   resize_active = 0u;
   resize_entity = BLITZ_INVALID_INDEX;
   resize_handle = 0u;
+  hidden_text_entity = BLITZ_INVALID_INDEX;
   resize_start_position.x = 0.0f;
   resize_start_position.y = 0.0f;
   resize_start_size.x = 0.0f;
@@ -2131,6 +2142,7 @@ static void clear_scene_state(void) {
   drag_offset.y = 0.0f;
   resize_active = 0u;
   resize_entity = BLITZ_INVALID_INDEX;
+  hidden_text_entity = BLITZ_INVALID_INDEX;
   uniforms.interaction[0] = 0.0f;
   uniforms.interaction[1] = 0.0f;
   marquee_active = 0u;
@@ -3032,6 +3044,7 @@ u32 blitz_selected_style_ptr(void) {
   Color text_color = {0.0f, 0.0f, 0.0f, 1.0f};
   float stroke_width = 0.0f;
   float text_max_width = 0.0f;
+  float text_font_size = 0.0f;
   u32 found_geometry = 0u;
   u32 found_text = 0u;
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
@@ -3064,6 +3077,7 @@ u32 blitz_selected_style_ptr(void) {
       found_text = 1u;
       text_color = world.text_views[entity].color;
       text_max_width = world.text_views[entity].max_width;
+      text_font_size = world.text_views[entity].font_size;
     }
     if (found_geometry && found_text) {
       break;
@@ -3083,12 +3097,13 @@ u32 blitz_selected_style_ptr(void) {
   selected_style[11] = text_color.b;
   selected_style[12] = text_color.a;
   selected_style[13] = text_max_width;
+  selected_style[14] = text_font_size;
   return (u32)&selected_style[0];
 }
 
 EXPORT("blitz_selected_style_f32_count")
 u32 blitz_selected_style_f32_count(void) {
-  return 14u;
+  return 15u;
 }
 
 EXPORT("blitz_set_selected_fill")
@@ -3279,6 +3294,49 @@ void blitz_set_selected_text_opacity(float opacity) {
   } else {
     if (history_owned) history_cancel();
   }
+}
+
+EXPORT("blitz_set_selected_text_font_size")
+void blitz_set_selected_text_font_size(float font_size) {
+  u32 history_owned = !history_transaction_active;
+  history_record_selected_before();
+  font_size = clampf(font_size, 4.0f, 512.0f);
+  u32 changed = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity] ||
+        !(world.masks[entity] & BLITZ_COMPONENT_TEXT_VIEW)) {
+      continue;
+    }
+    TextView *view = &world.text_views[entity];
+    float padding = view->origin_x;
+    layout_text(view->text, font_size, view->max_width, view->line_height,
+                view->max_lines);
+    if (text_layout_overflow) {
+      continue;
+    }
+    view->font_size = font_size;
+    view->baseline_offset = padding + BLITZ_FONT_ASCENDER * font_size;
+    world.sizes[entity].x =
+        (view->max_width > 0.0f ? view->max_width : text_layout_width) +
+        padding * 2.0f;
+    world.sizes[entity].y = text_layout_height + padding * 2.0f;
+    changed = 1u;
+  }
+  if (changed) {
+    mark_render_list_dirty();
+    if (history_owned) history_commit();
+  } else {
+    if (history_owned) history_cancel();
+  }
+}
+
+EXPORT("blitz_set_hidden_text_entity")
+void blitz_set_hidden_text_entity(u32 entity) {
+  if (hidden_text_entity == entity) {
+    return;
+  }
+  hidden_text_entity = entity;
+  mark_dynamic_dirty();
 }
 
 EXPORT("blitz_reset_selected_text_width")

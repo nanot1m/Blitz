@@ -82,6 +82,8 @@ const wasmExports = [
   "blitz_set_selected_stroke_width",
   "blitz_set_selected_text_color",
   "blitz_set_selected_text_opacity",
+  "blitz_set_selected_text_font_size",
+  "blitz_set_hidden_text_entity",
   "blitz_reset_selected_text_width",
   "blitz_select_all",
   "blitz_bring_to_front",

@@ -12,6 +12,7 @@ type CanvasInteractionWasm = {
 
 type CanvasInteractionOptions = {
   beginEdit(): void;
+  beginTextEdit(): void;
   cancelEdit(): void;
   commitEdit(): void;
   onSelectionChanged(): void;
@@ -22,6 +23,7 @@ export type CanvasInteractionController = {
 };
 
 type KeyboardShortcutOptions = {
+  beginTextEdit(): void;
   copySelection(): void | Promise<void>;
   deleteSelection(): void;
   duplicateSelection(): void;
@@ -71,6 +73,7 @@ type StyleControlElements = {
   strokeWidthInput: HTMLInputElement;
   textAutoWidthButton: HTMLButtonElement;
   textColorInput: HTMLInputElement;
+  textFontSizeInput: HTMLInputElement;
   textOpacityInput: HTMLInputElement;
 };
 
@@ -83,6 +86,7 @@ type StyleActions = {
   setStrokeOpacity(opacity: number): void;
   setStrokeWidth(width: number): void;
   setTextColor(red: number, green: number, blue: number): void;
+  setTextFontSize(fontSize: number): void;
   setTextOpacity(opacity: number): void;
   resetTextWidth(): void;
 };
@@ -545,6 +549,11 @@ export function setupCanvasInteractions(
       event.preventDefault();
     }
   });
+  canvas.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    stopDragging();
+    options.beginTextEdit();
+  });
   canvas.addEventListener("contextmenu", (event) => event.preventDefault());
   canvas.addEventListener(
     "wheel",
@@ -643,6 +652,11 @@ export function setupKeyboardShortcuts(options: KeyboardShortcutOptions): void {
     if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
       options.deleteSelection();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      options.beginTextEdit();
     }
   });
 }
@@ -723,6 +737,12 @@ export function setupStyleControls(
   }, actions));
   elements.textOpacityInput.addEventListener("input", makeTransactionable(() => {
     actions.setTextOpacity(Number(elements.textOpacityInput.value));
+  }, actions));
+  elements.textFontSizeInput.addEventListener("input", makeTransactionable(() => {
+    const fontSize = Number(elements.textFontSizeInput.value);
+    if (Number.isFinite(fontSize)) {
+      actions.setTextFontSize(fontSize);
+    }
   }, actions));
   elements.textAutoWidthButton.addEventListener("click", () => {
     actions.resetTextWidth();

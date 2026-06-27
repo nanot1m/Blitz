@@ -165,6 +165,8 @@ type BlitzExports = {
   blitz_set_selected_stroke_width(width: number): void;
   blitz_set_selected_text_color(red: number, green: number, blue: number): void;
   blitz_set_selected_text_opacity(opacity: number): void;
+  blitz_set_selected_text_font_size(fontSize: number): void;
+  blitz_set_hidden_text_entity(entity: number): void;
   blitz_reset_selected_text_width(): void;
   blitz_select_all(): void;
   blitz_bring_to_front(): void;
@@ -203,8 +205,16 @@ type BlitzExports = {
   blitz_render_max_text_draws(): number;
 };
 
+const blitzShapeText = 3;
+const blitzUpdateText = 128;
+const blitzInvalidIndex = 0xffffffff;
+const textPaddingWorld = 4;
+const textEditorBorderPx = 1;
+const textCaretViewportMargin = 36;
+
 const {
   canvas,
+  textEditor,
   shapeMenu,
   openSceneMenu,
   saveSceneMenu,
@@ -235,6 +245,7 @@ const {
   selectedTextControls,
   selectedTextColorInput,
   selectedTextOpacityInput,
+  selectedTextFontSizeInput,
   selectedTextAutoWidthButton,
   addRectButton,
   addCircleButton,
@@ -706,6 +717,7 @@ async function boot() {
       selectedTextColorInput.value = colorHex(style[9], style[10], style[11]);
       selectedTextOpacityInput.value = String(style[12]);
       selectedTextAutoWidthButton.disabled = !(style[13] > 0);
+      selectedTextFontSizeInput.value = String(Number(style[14].toFixed(1)));
     }
   };
 
@@ -1007,6 +1019,342 @@ async function boot() {
     return encoded.byteLength;
   };
 
+  type TextEditSession = {
+    objectId: ObjectIdWords;
+    entity: number;
+    text: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    color: [number, number, number, number];
+    fontSize: number;
+    maxWidth: number;
+    lineHeight: number;
+    maxLines: number;
+    align: number;
+  };
+
+  let textEditSession: TextEditSession | null = null;
+  let closingTextEditor = false;
+  const textCaretMirror = document.createElement("div");
+  const textCaretMarker = document.createElement("span");
+  textCaretMirror.setAttribute("aria-hidden", "true");
+  textCaretMirror.style.position = "fixed";
+  textCaretMirror.style.left = "-10000px";
+  textCaretMirror.style.top = "0";
+  textCaretMirror.style.visibility = "hidden";
+  textCaretMirror.style.pointerEvents = "none";
+  textCaretMirror.style.whiteSpace = "pre-wrap";
+  textCaretMirror.style.overflowWrap = "break-word";
+  textCaretMirror.style.wordBreak = "normal";
+  textCaretMirror.style.boxSizing = "content-box";
+  textCaretMirror.append(textCaretMarker);
+  document.body.append(textCaretMirror);
+
+  const selectedTextEditSession = (): TextEditSession | null => {
+    const ptr = wasm.blitz_selected_debug_ptr();
+    if (ptr === 0) {
+      return null;
+    }
+    const view = new DataView(wasm.memory.buffer);
+    if (view.getUint32(ptr + 16, true) !== blitzShapeText) {
+      return null;
+    }
+    const textPtr = view.getUint32(ptr + 28, true);
+    const textLength = view.getUint32(ptr + 32, true);
+    return {
+      objectId: [
+        view.getUint32(ptr, true),
+        view.getUint32(ptr + 4, true),
+        view.getUint32(ptr + 8, true),
+        view.getUint32(ptr + 12, true),
+      ],
+      entity: view.getUint32(ptr + 36, true),
+      text: clipboardTextDecoder.decode(new Uint8Array(wasm.memory.buffer, textPtr, textLength)),
+      x: view.getFloat32(ptr + 40, true),
+      y: view.getFloat32(ptr + 44, true),
+      width: view.getFloat32(ptr + 48, true),
+      height: view.getFloat32(ptr + 52, true),
+      color: [
+        view.getFloat32(ptr + 56, true),
+        view.getFloat32(ptr + 60, true),
+        view.getFloat32(ptr + 64, true),
+        view.getFloat32(ptr + 68, true),
+      ],
+      fontSize: view.getFloat32(ptr + 92, true),
+      maxWidth: view.getFloat32(ptr + 96, true),
+      lineHeight: view.getFloat32(ptr + 100, true),
+      maxLines: Math.round(view.getFloat32(ptr + 104, true)),
+      align: Math.round(view.getFloat32(ptr + 108, true)),
+    };
+  };
+
+  const textEditorScale = () => {
+    const uniforms = new Float32Array(wasm.memory.buffer, uniformPtr, wasm.blitz_uniform_f32_count());
+    const dpr = window.devicePixelRatio || 1;
+    return {
+      cameraX: uniforms[2],
+      cameraY: uniforms[3],
+      viewportWidth: uniforms[0],
+      viewportHeight: uniforms[1],
+      zoom: uniforms[4] || 1,
+      dpr,
+    };
+  };
+
+  const positionTextEditor = () => {
+    if (!textEditSession) {
+      return;
+    }
+    const scale = textEditorScale();
+    const rect = canvas.getBoundingClientRect();
+    const screenX =
+      rect.left +
+      ((textEditSession.x - scale.cameraX) * scale.zoom + scale.viewportWidth * 0.5) /
+        scale.dpr;
+    const screenY =
+      rect.top +
+      ((textEditSession.y - scale.cameraY) * scale.zoom + scale.viewportHeight * 0.5) /
+        scale.dpr;
+    const padding = Math.max(0, (textPaddingWorld * scale.zoom) / scale.dpr);
+    let contentWidth = Math.max(
+      1,
+      ((textEditSession.width - textPaddingWorld * 2) * scale.zoom) / scale.dpr,
+    );
+    let contentHeight = Math.max(
+      1,
+      ((textEditSession.height - textPaddingWorld * 2) * scale.zoom) / scale.dpr,
+    );
+    textEditor.style.left = `${screenX - textEditorBorderPx}px`;
+    textEditor.style.top = `${screenY - textEditorBorderPx}px`;
+    textEditor.style.width = `${contentWidth}px`;
+    textEditor.style.height = `${contentHeight}px`;
+    textEditor.style.padding = `${padding}px`;
+    textEditor.style.fontSize = `${Math.max(1, (textEditSession.fontSize * scale.zoom) / scale.dpr)}px`;
+    textEditor.style.lineHeight = String(textEditSession.lineHeight);
+    textEditor.style.textAlign = ["left", "center", "right"][textEditSession.align] ?? "left";
+    textEditor.style.color = `rgba(${Math.round(textEditSession.color[0] * 255)}, ${Math.round(
+      textEditSession.color[1] * 255,
+    )}, ${Math.round(textEditSession.color[2] * 255)}, ${textEditSession.color[3]})`;
+    const scrollContentWidth = Math.max(1, textEditor.scrollWidth - padding * 2);
+    const scrollContentHeight = Math.max(1, textEditor.scrollHeight - padding * 2);
+    if (textEditSession.maxWidth <= 0 && scrollContentWidth > contentWidth) {
+      contentWidth = scrollContentWidth;
+      textEditor.style.width = `${contentWidth}px`;
+    }
+    if (scrollContentHeight > contentHeight) {
+      contentHeight = scrollContentHeight;
+      textEditor.style.height = `${contentHeight}px`;
+    }
+  };
+
+  const copyTextEditorMirrorStyle = () => {
+    const style = getComputedStyle(textEditor);
+    const editorRect = textEditor.getBoundingClientRect();
+    textCaretMirror.style.left = `${editorRect.left}px`;
+    textCaretMirror.style.top = `${editorRect.top}px`;
+    textCaretMirror.style.width = textEditor.style.width;
+    textCaretMirror.style.minHeight = textEditor.style.height;
+    textCaretMirror.style.padding = textEditor.style.padding;
+    textCaretMirror.style.border = textEditor.style.border;
+    textCaretMirror.style.fontFamily = style.fontFamily;
+    textCaretMirror.style.fontFeatureSettings = style.fontFeatureSettings;
+    textCaretMirror.style.fontKerning = style.fontKerning;
+    textCaretMirror.style.fontSize = style.fontSize;
+    textCaretMirror.style.fontVariantLigatures = style.fontVariantLigatures;
+    textCaretMirror.style.letterSpacing = style.letterSpacing;
+    textCaretMirror.style.lineHeight = style.lineHeight;
+    textCaretMirror.style.textAlign = style.textAlign;
+    textCaretMirror.style.textTransform = style.textTransform;
+    textCaretMirror.style.wordSpacing = style.wordSpacing;
+  };
+
+  const ensureTextCaretVisible = () => {
+    if (!textEditSession || textEditor.hidden) {
+      return;
+    }
+    copyTextEditorMirrorStyle();
+    const caretIndex = textEditor.selectionEnd ?? textEditor.value.length;
+    const before = textEditor.value.slice(0, caretIndex);
+    textCaretMirror.textContent = before.length > 0 ? before : "\u200b";
+    textCaretMarker.textContent = "\u200b";
+    textCaretMirror.append(textCaretMarker);
+    const markerRect = textCaretMarker.getBoundingClientRect();
+    const editorRect = textEditor.getBoundingClientRect();
+    const lineHeight = Number.parseFloat(getComputedStyle(textEditor).lineHeight) || 16;
+    const caretRect = {
+      left: Number.isFinite(markerRect.left) ? markerRect.left : editorRect.left,
+      right: Number.isFinite(markerRect.left) ? markerRect.left : editorRect.left,
+      top: Number.isFinite(markerRect.top) ? markerRect.top : editorRect.top,
+      bottom: (Number.isFinite(markerRect.top) ? markerRect.top : editorRect.top) + lineHeight,
+    };
+    let panX = 0;
+    let panY = 0;
+    if (caretRect.left < textCaretViewportMargin) {
+      panX = textCaretViewportMargin - caretRect.left;
+    } else if (caretRect.right > window.innerWidth - textCaretViewportMargin) {
+      panX = window.innerWidth - textCaretViewportMargin - caretRect.right;
+    }
+    if (caretRect.top < textCaretViewportMargin) {
+      panY = textCaretViewportMargin - caretRect.top;
+    } else if (caretRect.bottom > window.innerHeight - textCaretViewportMargin) {
+      panY = window.innerHeight - textCaretViewportMargin - caretRect.bottom;
+    }
+    if (panX !== 0 || panY !== 0) {
+      const dpr = window.devicePixelRatio || 1;
+      wasm.blitz_pan(panX * dpr, panY * dpr);
+      positionTextEditor();
+    }
+  };
+
+  const scheduleTextCaretVisibility = () => {
+    requestAnimationFrame(ensureTextCaretVisible);
+  };
+
+  const resizeTextEditorToValue = () => {
+    if (!textEditSession) {
+      return;
+    }
+    const textLength = writeTextInput(textEditor.value);
+    if (textLength < 0) {
+      return;
+    }
+    wasm.blitz_layout_text(
+      textLength,
+      textEditSession.fontSize,
+      textEditSession.maxWidth,
+      textEditSession.lineHeight,
+      textEditSession.maxLines,
+    );
+    const padding = textPaddingWorld;
+    const contentWidth =
+      textEditSession.maxWidth > 0 ? textEditSession.maxWidth : wasm.blitz_text_layout_width();
+    textEditSession.width = Math.max(1, contentWidth) + padding * 2;
+    textEditSession.height = Math.max(1, wasm.blitz_text_layout_height()) + padding * 2;
+    positionTextEditor();
+    scheduleTextCaretVisibility();
+  };
+
+  const closeTextEditor = () => {
+    closingTextEditor = true;
+    wasm.blitz_set_hidden_text_entity(blitzInvalidIndex);
+    textEditor.hidden = true;
+    textEditor.value = "";
+    textEditSession = null;
+    closingTextEditor = false;
+  };
+
+  const cancelTextEdit = () => {
+    closeTextEditor();
+    canvas.focus();
+  };
+
+  const commitTextEdit = () => {
+    const session = textEditSession;
+    if (!session) {
+      return;
+    }
+    const nextText = textEditor.value;
+    if (nextText === session.text) {
+      closeTextEditor();
+      canvas.focus();
+      return;
+    }
+    const textLength = writeTextInput(nextText);
+    if (textLength < 0) {
+      showFallback(`Text is too long. Maximum UTF-8 size is ${wasm.blitz_text_input_capacity() - 1} bytes.`);
+      return;
+    }
+    let updateResult = 0;
+    sceneHistory.transact(() => {
+      updateResult = wasm.blitz_update_object(
+        session.objectId[0],
+        session.objectId[1],
+        session.objectId[2],
+        session.objectId[3],
+        blitzShapeText,
+        blitzUpdateText,
+        session.x,
+        session.y,
+        session.width,
+        session.height,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        session.fontSize,
+        session.color[0],
+        session.color[1],
+        session.color[2],
+        session.color[3],
+        textLength,
+        session.maxWidth,
+        session.lineHeight,
+        session.maxLines,
+        session.align,
+      );
+    });
+    if (updateResult !== 0) {
+      showFallback(`Text edit could not be applied (error ${updateResult}).`);
+      return;
+    }
+    closeTextEditor();
+    canvas.focus();
+    updateSelectionState();
+  };
+
+  const beginTextEdit = () => {
+    const session = selectedTextEditSession();
+    if (!session) {
+      return;
+    }
+    textEditSession = session;
+    wasm.blitz_set_hidden_text_entity(session.entity);
+    textEditor.value = session.text;
+    textEditor.hidden = false;
+    resizeTextEditorToValue();
+    textEditor.focus();
+    textEditor.select();
+    scheduleTextCaretVisibility();
+  };
+
+  textEditor.addEventListener("input", resizeTextEditorToValue);
+  textEditor.addEventListener("click", scheduleTextCaretVisibility);
+  textEditor.addEventListener("keyup", scheduleTextCaretVisibility);
+  textEditor.addEventListener("select", scheduleTextCaretVisibility);
+  textEditor.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelTextEdit();
+      return;
+    }
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      commitTextEdit();
+    }
+  });
+  textEditor.addEventListener("blur", () => {
+    if (!closingTextEditor && textEditSession) {
+      commitTextEdit();
+    }
+  });
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (!textEditSession || event.target === textEditor) {
+        return;
+      }
+      commitTextEdit();
+    },
+    { capture: true },
+  );
+
   const createClipboardShape = (shape: ClipboardShape, offsetX: number, offsetY: number): ObjectIdWords | null => {
     const x = shape.x + offsetX;
     const y = shape.y + offsetY;
@@ -1129,6 +1477,7 @@ async function boot() {
   let stopDragging = () => {};
   const sceneHistory = createSceneHistory(wasm, {
     onApplied() {
+      closeTextEditor();
       stopDragging();
       updateSelectionState();
       updateEmptyState();
@@ -1137,6 +1486,7 @@ async function boot() {
   });
   stopDragging = setupCanvasInteractions(canvas, wasm, {
     beginEdit: sceneHistory.begin,
+    beginTextEdit,
     cancelEdit: sceneHistory.cancel,
     commitEdit: sceneHistory.commit,
     onSelectionChanged: updateSelectionState,
@@ -1265,6 +1615,7 @@ async function boot() {
       strokeWidthInput: selectedStrokeWidthInput,
       textAutoWidthButton: selectedTextAutoWidthButton,
       textColorInput: selectedTextColorInput,
+      textFontSizeInput: selectedTextFontSizeInput,
       textOpacityInput: selectedTextOpacityInput,
     },
     {
@@ -1300,6 +1651,14 @@ async function boot() {
         wasm.blitz_set_selected_text_opacity(opacity);
         updateStyleIsland();
       },
+      setTextFontSize(fontSize) {
+        wasm.blitz_set_selected_text_font_size(fontSize);
+        if (textEditSession) {
+          textEditSession = selectedTextEditSession();
+          resizeTextEditorToValue();
+        }
+        updateStyleIsland();
+      },
       resetTextWidth() {
         sceneHistory.transact(wasm.blitz_reset_selected_text_width);
         updateStyleIsland();
@@ -1308,6 +1667,7 @@ async function boot() {
   );
 
   setupKeyboardShortcuts({
+    beginTextEdit,
     copySelection,
     deleteSelection,
     duplicateSelection,
@@ -1423,6 +1783,7 @@ async function boot() {
 
     const uniforms = new Float32Array(wasm.memory.buffer, uniformPtr, wasm.blitz_uniform_f32_count());
     device.queue.writeBuffer(uniformBuffer, 0, uniforms);
+    positionTextEditor();
 
     const zoomPercent = Math.round(uniforms[4] * 100);
     if (zoomPercent !== lastZoomPercent) {

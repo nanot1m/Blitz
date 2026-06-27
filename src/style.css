@@ -1,3 +1,9 @@
+@font-face {
+  font-family: "BlitzCanvasText";
+  src: url("./assets/OpenSans-Regular.ttf") format("truetype");
+  font-display: block;
+}
+
 :root {
   color-scheme: dark;
   font-family:
@@ -61,7 +67,7 @@ select,
 
 @media (max-width: 720px) {
   input:not([type="checkbox"]):not([type="color"]):not([type="range"]),
-  textarea,
+  textarea:not(#text-editor),
   select {
     font-size: 16px;
   }
@@ -97,6 +103,42 @@ dialog {
 
 #blitz-canvas.is-selecting {
   cursor: crosshair;
+}
+
+#text-editor {
+  position: fixed;
+  z-index: 4;
+  display: block;
+  box-sizing: content-box;
+  min-width: 16px;
+  min-height: 16px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid #2673e8;
+  border-radius: 2px;
+  outline: 0;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 1px rgba(38, 115, 232, 0.18);
+  color: #18202b;
+  font-family: "BlitzCanvasText", sans-serif;
+  font-kerning: none;
+  font-variant-ligatures: none;
+  font-feature-settings:
+    "kern" 0,
+    "liga" 0;
+  letter-spacing: 0;
+  resize: none;
+  tab-size: 4;
+  text-decoration: none;
+  text-indent: 0;
+  text-rendering: geometricPrecision;
+  text-transform: none;
+  white-space: pre-wrap;
+  word-spacing: 0;
+}
+
+#text-editor[hidden] {
+  display: none;
 }
 
 #tool-island {

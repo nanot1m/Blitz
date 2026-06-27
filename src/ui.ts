@@ -92,6 +92,7 @@ export function createBlitzUi() {
 
   return {
     canvas: requireElement<HTMLCanvasElement>("#blitz-canvas"),
+    textEditor: requireElement<HTMLTextAreaElement>("#text-editor"),
     fallback,
     shapeMenu,
     openSceneMenu: requireElement<HTMLDetailsElement>("#open-scene-menu"),
@@ -123,6 +124,7 @@ export function createBlitzUi() {
     selectedTextControls: requireElement<HTMLElement>("#selected-text-controls"),
     selectedTextColorInput: requireElement<HTMLInputElement>("#selected-text-color"),
     selectedTextOpacityInput: requireElement<HTMLInputElement>("#selected-text-opacity"),
+    selectedTextFontSizeInput: requireElement<HTMLInputElement>("#selected-text-font-size"),
     selectedTextAutoWidthButton: requireElement<HTMLButtonElement>("#selected-text-auto-width"),
     addRectButton: requireElement<HTMLButtonElement>("#add-rect"),
     addCircleButton: requireElement<HTMLButtonElement>("#add-circle"),

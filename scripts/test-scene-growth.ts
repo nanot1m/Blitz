@@ -73,9 +73,60 @@ if (wasm.blitz_scene_deserialize(stressBytes) !== 0 || wasm.blitz_entity_count()
   throw new Error(`Stress scene (${stressCount} entities) did not survive a binary round trip.`);
 }
 
+// Dynamic stream growth: many in-view selected rects force the selection-overlay
+// buffers (dyn_commands, dyn_rects) to grow well past their initial capacity.
+wasm.blitz_clear_scene();
+wasm.blitz_resize(1920, 1080);
+wasm.blitz_set_camera(0, 0, 1);
+const OVERLAYS = 4000;
+for (let i = 0; i < OVERLAYS; i += 1) {
+  wasm.blitz_create_rect(-380 + (i % 80) * 9, -280 + Math.floor(i / 80) * 9, 8, 8, 1, 0, 0, 1, 0, 0, 0, 1, 1);
+}
+wasm.blitz_select_all();
+wasm.blitz_shape_command_ptr(); // triggers world_update_for_frame -> extract_dynamic
+if (wasm.blitz_dyn_command_count() <= 256 || wasm.blitz_dyn_rect_count() <= 256) {
+  throw new Error(
+    `Dynamic overlay buffers did not grow past initial capacity (commands=${wasm.blitz_dyn_command_count()}, rects=${wasm.blitz_dyn_rect_count()}).`,
+  );
+}
+// Scene query buffer growth: querying all the in-view objects returns far more
+// than the initial capacity.
+wasm.blitz_query_scene(-1e9, -1e9, 1e9, 1e9, 65536);
+if (wasm.blitz_scene_query_count() <= 256) {
+  throw new Error(`Scene query buffer did not grow past initial capacity (count=${wasm.blitz_scene_query_count()}).`);
+}
+
+// Text pool growth + pointer rebase: create enough text to relocate the pool
+// past its initial capacity, then confirm every string survives a round trip.
+// A mis-rebased pointer would change the serialized text lengths.
+wasm.blitz_clear_scene();
+const textEncoder = new TextEncoder();
+const longText = "Blitz keeps the heap proportional to the scene contents. ".repeat(3);
+const TEXT_ENTITIES = 600;
+for (let i = 0; i < TEXT_ENTITIES; i += 1) {
+  const bytes = textEncoder.encode(`${i} ${longText}`);
+  new Uint8Array(wasm.memory.buffer, wasm.blitz_text_input_ptr(), bytes.byteLength).set(bytes);
+  wasm.blitz_create_text(i * 4, i * 4, 16, 1, 1, 1, 1, bytes.byteLength, 0, 1.2, 1, 0);
+}
+if (wasm.blitz_entity_count() !== TEXT_ENTITIES) {
+  throw new Error(`Expected ${TEXT_ENTITIES} text entities, got ${wasm.blitz_entity_count()}.`);
+}
+const textBytes1 = wasm.blitz_scene_serialize();
+if (wasm.blitz_scene_deserialize(textBytes1) !== 0) {
+  throw new Error("Text-heavy scene failed to deserialize.");
+}
+const textBytes2 = wasm.blitz_scene_serialize();
+if (textBytes1 !== textBytes2 || wasm.blitz_entity_count() !== TEXT_ENTITIES) {
+  throw new Error(
+    `Text pool growth corrupted strings (bytes ${textBytes1} vs ${textBytes2}, count ${wasm.blitz_entity_count()}).`,
+  );
+}
+
 wasm.blitz_clear_scene();
 if (wasm.blitz_entity_count() !== 0) {
   throw new Error("Clearing the scene left entities behind.");
 }
 
-console.log(`Scene growth test passed (${COUNT} grid + ${stressCount} stress entities).`);
+console.log(
+  `Scene growth test passed (${COUNT} grid + ${stressCount} stress + ${OVERLAYS} overlay + ${TEXT_ENTITIES} text entities).`,
+);

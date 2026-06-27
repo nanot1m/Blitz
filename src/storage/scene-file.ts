@@ -11,6 +11,7 @@ type SceneFileWasm = {
   memory: WebAssembly.Memory;
   blitz_scene_file_buffer_ptr(): number;
   blitz_scene_file_buffer_capacity(): number;
+  blitz_scene_file_buffer_reserve(bytes: number): number;
   blitz_clear_scene(): void;
   blitz_set_camera(x: number, y: number, zoom: number): void;
   blitz_capture_start_viewpoint(): void;
@@ -108,7 +109,11 @@ function deserializeScene(wasm: SceneFileWasm, bytes: Uint8Array): void {
   if (bytes.byteLength > capacity) {
     throw new Error(`The scene file exceeds the ${Math.floor(capacity / (1024 * 1024))} MB limit.`);
   }
-  new Uint8Array(wasm.memory.buffer, wasm.blitz_scene_file_buffer_ptr(), bytes.byteLength).set(bytes);
+  const ptr = wasm.blitz_scene_file_buffer_reserve(bytes.byteLength);
+  if (ptr === 0) {
+    throw new Error("The scene buffer could not be allocated.");
+  }
+  new Uint8Array(wasm.memory.buffer, ptr, bytes.byteLength).set(bytes);
   const error = wasm.blitz_scene_deserialize(bytes.byteLength);
   if (error !== 0) {
     throw new Error(deserializeErrors[error] ?? `The scene could not be loaded (error ${error}).`);

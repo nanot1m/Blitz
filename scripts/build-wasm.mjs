@@ -75,6 +75,7 @@ const wasmExports = [
   "blitz_scene_query_total",
   "blitz_scene_file_buffer_ptr",
   "blitz_scene_file_buffer_capacity",
+  "blitz_scene_file_buffer_reserve",
   "blitz_scene_revision",
   "blitz_capture_start_viewpoint",
   "blitz_scene_serialize",

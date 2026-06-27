@@ -194,6 +194,7 @@ type BlitzExports = {
   blitz_scene_query_total(): number;
   blitz_scene_file_buffer_ptr(): number;
   blitz_scene_file_buffer_capacity(): number;
+  blitz_scene_file_buffer_reserve(bytes: number): number;
   blitz_scene_revision(): number;
   blitz_capture_start_viewpoint(): void;
   blitz_scene_serialize(): number;

@@ -2,6 +2,7 @@ type SceneHistoryWasm = {
   memory: WebAssembly.Memory;
   blitz_scene_file_buffer_ptr(): number;
   blitz_scene_file_buffer_capacity(): number;
+  blitz_scene_file_buffer_reserve(bytes: number): number;
   blitz_scene_serialize(): number;
   blitz_scene_deserialize(byteCount: number): number;
   blitz_uniform_ptr(): number;
@@ -144,11 +145,12 @@ export function createSceneHistory(
     }
     applying = true;
     try {
-      new Uint8Array(
-        wasm.memory.buffer,
-        wasm.blitz_scene_file_buffer_ptr(),
-        state.bytes.byteLength,
-      ).set(state.bytes);
+      const ptr = wasm.blitz_scene_file_buffer_reserve(state.bytes.byteLength);
+      if (ptr === 0) {
+        options.onError("History state could not be restored (buffer allocation failed).");
+        return false;
+      }
+      new Uint8Array(wasm.memory.buffer, ptr, state.bytes.byteLength).set(state.bytes);
       const error = wasm.blitz_scene_deserialize(state.bytes.byteLength);
       if (error !== 0) {
         options.onError(`History state could not be restored (error ${error}).`);

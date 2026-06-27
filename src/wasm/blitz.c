@@ -200,47 +200,60 @@ typedef struct SceneItem {
   u32 selected_subtree;
 } SceneItem;
 
+// Per-entity SoA storage. Indexed by entity slot; the arrays are arena-backed
+// pointers that grow in lockstep to entity_count, all accessed as
+// `world.member[entity]`.
 typedef struct World {
   u32 entity_count;
   u32 draw_order_count;
-  u32 draw_order[BLITZ_MAX_ENTITIES];
-  u32 draw_order_scratch[BLITZ_MAX_ENTITIES];
-  u32 selected[BLITZ_MAX_ENTITIES];
-  ObjectId object_ids[BLITZ_MAX_ENTITIES];
-  u32 masks[BLITZ_MAX_ENTITIES];
-  Vec2 positions[BLITZ_MAX_ENTITIES];
-  Vec2 sizes[BLITZ_MAX_ENTITIES];
-  RectView rect_views[BLITZ_MAX_ENTITIES];
-  TriangleView triangle_views[BLITZ_MAX_ENTITIES];
-  OvalView oval_views[BLITZ_MAX_ENTITIES];
-  TextView text_views[BLITZ_MAX_ENTITIES];
-  FrameView frame_views[BLITZ_MAX_ENTITIES];
-  RelativeTransform relative_transforms[BLITZ_MAX_ENTITIES];
-  u32 first_child[BLITZ_MAX_ENTITIES];
-  u32 next_sibling[BLITZ_MAX_ENTITIES];
-  u32 prev_sibling[BLITZ_MAX_ENTITIES];
+  u32 *draw_order;
+  u32 *draw_order_scratch;
+  u32 *selected;
+  ObjectId *object_ids;
+  u32 *masks;
+  Vec2 *positions;
+  Vec2 *sizes;
+  RectView *rect_views;
+  TriangleView *triangle_views;
+  OvalView *oval_views;
+  TextView *text_views;
+  FrameView *frame_views;
+  RelativeTransform *relative_transforms;
+  u32 *first_child;
+  u32 *next_sibling;
+  u32 *prev_sibling;
 } World;
 
 static BlitzUniforms uniforms;
-static ShapeCommand shape_commands[BLITZ_MAX_RECT_DRAWS];
-static RectDraw rect_draws[BLITZ_MAX_RECT_DRAWS];
-static TriangleDraw triangle_draws[BLITZ_MAX_RECT_DRAWS];
-static OvalDraw oval_draws[BLITZ_MAX_RECT_DRAWS];
-static TextDraw text_draws[BLITZ_MAX_TEXT_DRAWS];
-static ShapeCommand dyn_commands[BLITZ_MAX_DYN_COMMANDS];
-static RectDraw dyn_rects[BLITZ_MAX_DYN_RECTS];
+static ShapeCommand *shape_commands;
+static RectDraw *rect_draws;
+static TriangleDraw *triangle_draws;
+static OvalDraw *oval_draws;
+static TextDraw *text_draws;
+static ShapeCommand *dyn_commands;
+static RectDraw *dyn_rects;
+static u32 shape_commands_cap;
+static u32 rect_draws_cap;
+static u32 triangle_draws_cap;
+static u32 oval_draws_cap;
+static u32 text_draws_cap;
+static u32 dyn_commands_cap;
+static u32 dyn_rects_cap;
 static char text_input[BLITZ_TEXT_INPUT_BYTES];
-static char text_pool[BLITZ_TEXT_POOL_BYTES];
+static char *text_pool;
+static u32 text_pool_capacity;
 static TextLayoutLine text_layout_lines[BLITZ_MAX_TEXT_LAYOUT_LINES];
 static u32 text_layout_line_count;
 static float text_layout_width;
 static float text_layout_height;
 static u32 text_layout_overflow;
 static u32 text_pool_used;
-static SceneItem scene_query_items[BLITZ_MAX_SCENE_QUERY_ITEMS];
+static SceneItem *scene_query_items;
+static u32 scene_query_items_cap;
 static u32 scene_query_count;
 static u32 scene_query_total;
-static unsigned char scene_file_buffer[BLITZ_SCENE_FILE_BUFFER_BYTES];
+static unsigned char *scene_file_buffer;
+static u32 scene_file_capacity;
 static float selected_style[15];
 static SceneItem selected_debug_item;
 static u32 selected_debug_mask;
@@ -273,28 +286,462 @@ static u32 resize_active;
 static u32 resize_entity;
 static u32 resize_handle;
 static u32 hidden_text_entity;
-static u32 transform_dirty[BLITZ_MAX_ENTITIES];
-static u32 transform_dirty_entities[BLITZ_MAX_ENTITIES];
+// Per-entity scratch arrays: pointers into the ECS block, bound by
+// ecs_bind_pointers alongside the World components.
+#define BLITZ_ENTITY_ARRAY(name) static u32 *name
+BLITZ_ENTITY_ARRAY(transform_dirty);
+BLITZ_ENTITY_ARRAY(transform_dirty_entities);
 static u32 transform_dirty_count;
-static u32 draw_order_seen[BLITZ_MAX_ENTITIES];
-static u32 draw_order_child_head[BLITZ_MAX_ENTITIES];
-static u32 draw_order_child_tail[BLITZ_MAX_ENTITIES];
-static u32 draw_order_next_child[BLITZ_MAX_ENTITIES];
+BLITZ_ENTITY_ARRAY(draw_order_seen);
+BLITZ_ENTITY_ARRAY(draw_order_child_head);
+BLITZ_ENTITY_ARRAY(draw_order_child_tail);
+BLITZ_ENTITY_ARRAY(draw_order_next_child);
 static u32 draw_order_normalization_deferred;
 static u32 draw_order_normalization_pending;
-static u32 duplicate_entity_map[BLITZ_MAX_ENTITIES];
-static u32 internal_clipboard_sources[BLITZ_MAX_ENTITIES];
+BLITZ_ENTITY_ARRAY(duplicate_entity_map);
+BLITZ_ENTITY_ARRAY(internal_clipboard_sources);
 static u32 internal_clipboard_count;
 static float internal_clipboard_bounds[4];
 static Vec2 resize_start_position;
 static Vec2 resize_start_size;
 // Selection state captured when a marquee starts, so each marquee move can
 // recompute live selection as base ∪ (entities inside the current box).
-static u32 marquee_base_selected[BLITZ_MAX_ENTITIES];
+BLITZ_ENTITY_ARRAY(marquee_base_selected);
 // Reclaimed entity slots (stack) and the count of currently-live entities.
-static u32 free_slots[BLITZ_MAX_ENTITIES];
+BLITZ_ENTITY_ARRAY(free_slots);
 static u32 free_count;
 static u32 live_count;
+
+// General free-list allocator over Wasm linear memory. Every demand buffer (the
+// per-entity SoA block, render draw buffers, the scene file buffer) allocates
+// through it, so multiple regions each grow independently without a fixed
+// max-size reservation. Blocks carry a 16-byte header; freed blocks are reused
+// first-fit before the bump pointer extends memory via memory.grow. Allocation
+// happens at entity-create and extraction time, never per frame on an unchanged
+// scene. Each block has its own address, so callers re-read pointers after a
+// grow; a block is never moved while live.
+extern unsigned char __heap_base;
+
+typedef struct BlockHeader {
+  usize size;
+  struct BlockHeader *next_free;
+} BlockHeader;
+#define BLITZ_HEADER_BYTES 16u
+
+static usize heap_top;
+static BlockHeader *heap_free_list;
+
+static void copy_bytes(unsigned char *dst, const unsigned char *src, usize n) {
+  for (usize i = 0u; i < n; i += 1u) {
+    dst[i] = src[i];
+  }
+}
+
+static usize align16(usize n) { return (n + 15u) & ~((usize)15u); }
+
+static void heap_reset(void) {
+  heap_top = align16((usize)&__heap_base);
+  heap_free_list = 0;
+}
+
+static int heap_ensure(usize end) {
+  usize have = (usize)__builtin_wasm_memory_size(0) * 65536u;
+  if (end > have) {
+    usize pages = (end - have + 65535u) / 65536u;
+    if (__builtin_wasm_memory_grow(0, pages) == (usize)-1) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static void *blitz_alloc(usize size) {
+  size = align16(size);
+  BlockHeader *prev = 0;
+  BlockHeader *block = heap_free_list;
+  while (block) {
+    if (block->size >= size) {
+      if (prev) {
+        prev->next_free = block->next_free;
+      } else {
+        heap_free_list = block->next_free;
+      }
+      return (void *)((unsigned char *)block + BLITZ_HEADER_BYTES);
+    }
+    prev = block;
+    block = block->next_free;
+  }
+  usize header = heap_top;
+  usize data = header + BLITZ_HEADER_BYTES;
+  if (!heap_ensure(data + size)) {
+    return 0;
+  }
+  heap_top = data + size;
+  ((BlockHeader *)header)->size = size;
+  ((BlockHeader *)header)->next_free = 0;
+  return (void *)data;
+}
+
+static void blitz_free(void *ptr) {
+  if (!ptr) {
+    return;
+  }
+  BlockHeader *block =
+      (BlockHeader *)((unsigned char *)ptr - BLITZ_HEADER_BYTES);
+  block->next_free = heap_free_list;
+  heap_free_list = block;
+  // Reclaim any free block sitting at the top of the heap, repeatedly, so the
+  // common free-then-grow-bigger pattern keeps the bump pointer tight.
+  for (;;) {
+    BlockHeader *prev = 0;
+    BlockHeader *cur = heap_free_list;
+    BlockHeader *top = 0;
+    BlockHeader *top_prev = 0;
+    while (cur) {
+      if ((usize)cur + BLITZ_HEADER_BYTES + cur->size == heap_top) {
+        top = cur;
+        top_prev = prev;
+        break;
+      }
+      prev = cur;
+      cur = cur->next_free;
+    }
+    if (!top) {
+      break;
+    }
+    if (top_prev) {
+      top_prev->next_free = top->next_free;
+    } else {
+      heap_free_list = top->next_free;
+    }
+    heap_top = (usize)top;
+  }
+}
+
+// Grow an allocation, preserving the first `keep` bytes. Returns a possibly new
+// address; callers must re-read it.
+static void *blitz_realloc(void *ptr, usize keep, usize new_size) {
+  if (!ptr) {
+    return blitz_alloc(new_size);
+  }
+  BlockHeader *block =
+      (BlockHeader *)((unsigned char *)ptr - BLITZ_HEADER_BYTES);
+  if (block->size >= align16(new_size)) {
+    return ptr;
+  }
+  void *next = blitz_alloc(new_size);
+  if (next) {
+    copy_bytes((unsigned char *)next, (const unsigned char *)ptr, keep);
+    blitz_free(ptr);
+  }
+  return next;
+}
+
+// Reserve a render buffer for `need` elements. Contents are rebuilt every
+// extraction, so growth frees the old block and allocates a fresh one with no
+// copy. Returns the (possibly new) base; *cap is updated, or set to 0 on
+// allocation failure.
+static void *draw_reserve(void *ptr, u32 *cap, u32 need, usize stride) {
+  if (need <= *cap) {
+    return ptr;
+  }
+  u32 new_cap = *cap ? *cap : 256u;
+  while (new_cap < need) {
+    new_cap *= 2u;
+  }
+  blitz_free(ptr);
+  void *next = blitz_alloc((usize)new_cap * stride);
+  *cap = next ? new_cap : 0u;
+  return next;
+}
+
+// Ensure a render buffer can hold index `count` (used mid-extraction as entries
+// are appended), preserving entries already written this pass.
+static void *dyn_grow(void *ptr, u32 *cap, u32 count, usize stride) {
+  if (count < *cap) {
+    return ptr;
+  }
+  u32 new_cap = *cap ? *cap : 256u;
+  while (new_cap <= count) {
+    new_cap *= 2u;
+  }
+  void *next = blitz_realloc(ptr, (usize)count * stride, (usize)new_cap * stride);
+  *cap = next ? new_cap : 0u;
+  return next;
+}
+
+// Ensure the scene file buffer spans `bytes`, preserving `keep` bytes (0 when
+// the buffer is about to be overwritten wholesale).
+static int scene_file_ensure(u32 bytes, u32 keep) {
+  if (bytes <= scene_file_capacity) {
+    return 1;
+  }
+  u32 new_cap = scene_file_capacity ? scene_file_capacity : 65536u;
+  while (new_cap < bytes) {
+    new_cap *= 2u;
+  }
+  void *next = blitz_realloc(scene_file_buffer, keep, new_cap);
+  if (!next) {
+    return 0;
+  }
+  scene_file_buffer = (unsigned char *)next;
+  scene_file_capacity = new_cap;
+  return 1;
+}
+
+// Grow the text pool to hold `extra` more bytes. The pool can relocate, so any
+// stored string pointer that falls within the old pool range is rebased to the
+// new block; pointers outside it (string literals from the demo template) are
+// left untouched. Callers compute fresh pointers from text_pool after this.
+static int text_pool_ensure(u32 extra) {
+  u32 need = text_pool_used + extra;
+  if (need <= text_pool_capacity) {
+    return 1;
+  }
+  u32 new_cap = text_pool_capacity ? text_pool_capacity : 65536u;
+  while (new_cap < need) {
+    new_cap *= 2u;
+  }
+  char *old = text_pool;
+  u32 used = text_pool_used;
+  char *next = (char *)blitz_realloc(text_pool, used, new_cap);
+  if (!next) {
+    return 0;
+  }
+  if (old && next != old) {
+    for (u32 i = 0u; i < world.entity_count; i += 1u) {
+      u32 mask = world.masks[i];
+      if (mask & BLITZ_COMPONENT_TEXT_VIEW) {
+        const char *p = world.text_views[i].text;
+        if (p >= old && p < old + used) {
+          world.text_views[i].text = next + (p - old);
+        }
+      }
+      if (mask & BLITZ_COMPONENT_FRAME_VIEW) {
+        const char *p = world.frame_views[i].title;
+        if (p && p >= old && p < old + used) {
+          world.frame_views[i].title = next + (p - old);
+        }
+      }
+    }
+  }
+  text_pool = next;
+  text_pool_capacity = new_cap;
+  return 1;
+}
+
+static unsigned char *ecs_block;
+static u32 entity_capacity;
+
+// Component byte strides in block-layout order. Must match the World member
+// order and ecs_bind_pointers below.
+static const u32 ecs_strides[] = {
+    sizeof(u32),               // draw_order
+    sizeof(u32),               // draw_order_scratch
+    sizeof(u32),               // selected
+    sizeof(ObjectId),          // object_ids
+    sizeof(u32),               // masks
+    sizeof(Vec2),              // positions
+    sizeof(Vec2),              // sizes
+    sizeof(RectView),          // rect_views
+    sizeof(TriangleView),      // triangle_views
+    sizeof(OvalView),          // oval_views
+    sizeof(TextView),          // text_views
+    sizeof(FrameView),         // frame_views
+    sizeof(RelativeTransform), // relative_transforms
+    sizeof(u32),               // first_child
+    sizeof(u32),               // next_sibling
+    sizeof(u32),               // prev_sibling
+    sizeof(u32),               // transform_dirty
+    sizeof(u32),               // transform_dirty_entities
+    sizeof(u32),               // draw_order_seen
+    sizeof(u32),               // draw_order_child_head
+    sizeof(u32),               // draw_order_child_tail
+    sizeof(u32),               // draw_order_next_child
+    sizeof(u32),               // duplicate_entity_map
+    sizeof(u32),               // internal_clipboard_sources
+    sizeof(u32),               // marquee_base_selected
+    sizeof(u32),               // free_slots
+};
+#define BLITZ_ECS_ARRAYS ((u32)(sizeof(ecs_strides) / sizeof(ecs_strides[0])))
+
+static usize ecs_total_stride(void) {
+  usize total = 0u;
+  for (u32 i = 0u; i < BLITZ_ECS_ARRAYS; i += 1u) {
+    total += ecs_strides[i];
+  }
+  return total;
+}
+
+// Byte offset of component `index` within a block of the given capacity.
+static usize ecs_offset(u32 index, u32 capacity) {
+  usize prefix = 0u;
+  for (u32 i = 0u; i < index; i += 1u) {
+    prefix += ecs_strides[i];
+  }
+  return (usize)capacity * prefix;
+}
+
+static void ecs_bind_pointers(u32 capacity) {
+  world.draw_order = (u32 *)(ecs_block + ecs_offset(0u, capacity));
+  world.draw_order_scratch = (u32 *)(ecs_block + ecs_offset(1u, capacity));
+  world.selected = (u32 *)(ecs_block + ecs_offset(2u, capacity));
+  world.object_ids = (ObjectId *)(ecs_block + ecs_offset(3u, capacity));
+  world.masks = (u32 *)(ecs_block + ecs_offset(4u, capacity));
+  world.positions = (Vec2 *)(ecs_block + ecs_offset(5u, capacity));
+  world.sizes = (Vec2 *)(ecs_block + ecs_offset(6u, capacity));
+  world.rect_views = (RectView *)(ecs_block + ecs_offset(7u, capacity));
+  world.triangle_views = (TriangleView *)(ecs_block + ecs_offset(8u, capacity));
+  world.oval_views = (OvalView *)(ecs_block + ecs_offset(9u, capacity));
+  world.text_views = (TextView *)(ecs_block + ecs_offset(10u, capacity));
+  world.frame_views = (FrameView *)(ecs_block + ecs_offset(11u, capacity));
+  world.relative_transforms =
+      (RelativeTransform *)(ecs_block + ecs_offset(12u, capacity));
+  world.first_child = (u32 *)(ecs_block + ecs_offset(13u, capacity));
+  world.next_sibling = (u32 *)(ecs_block + ecs_offset(14u, capacity));
+  world.prev_sibling = (u32 *)(ecs_block + ecs_offset(15u, capacity));
+  transform_dirty = (u32 *)(ecs_block + ecs_offset(16u, capacity));
+  transform_dirty_entities = (u32 *)(ecs_block + ecs_offset(17u, capacity));
+  draw_order_seen = (u32 *)(ecs_block + ecs_offset(18u, capacity));
+  draw_order_child_head = (u32 *)(ecs_block + ecs_offset(19u, capacity));
+  draw_order_child_tail = (u32 *)(ecs_block + ecs_offset(20u, capacity));
+  draw_order_next_child = (u32 *)(ecs_block + ecs_offset(21u, capacity));
+  duplicate_entity_map = (u32 *)(ecs_block + ecs_offset(22u, capacity));
+  internal_clipboard_sources = (u32 *)(ecs_block + ecs_offset(23u, capacity));
+  marquee_base_selected = (u32 *)(ecs_block + ecs_offset(24u, capacity));
+  free_slots = (u32 *)(ecs_block + ecs_offset(25u, capacity));
+}
+
+// Grow the per-entity block to hold `count` slots. If the block is the last
+// allocation it extends in place (just more pages, no copy, no abandoned
+// block); otherwise it relocates to a fresh block. Either way the sub-arrays
+// are re-strided to the new capacity's offsets — back-to-front in place (new
+// offsets only ever grow), forward when relocating to a distinct block.
+static int ecs_storage_reserve(u32 count) {
+  if (count <= entity_capacity) {
+    return 1;
+  }
+  u32 new_cap = entity_capacity ? entity_capacity : 1024u;
+  while (new_cap < count) {
+    new_cap *= 2u;
+  }
+  usize new_bytes = (usize)new_cap * ecs_total_stride();
+  u32 live = world.entity_count;
+
+  if (ecs_block && entity_capacity) {
+    BlockHeader *header =
+        (BlockHeader *)(ecs_block - BLITZ_HEADER_BYTES);
+    if ((usize)ecs_block + header->size == heap_top) {
+      if (!heap_ensure((usize)ecs_block + align16(new_bytes))) {
+        return 0;
+      }
+      heap_top = (usize)ecs_block + align16(new_bytes);
+      header->size = align16(new_bytes);
+      for (u32 step = BLITZ_ECS_ARRAYS; step > 0u; step -= 1u) {
+        u32 i = step - 1u;
+        usize src = ecs_offset(i, entity_capacity);
+        usize dst = ecs_offset(i, new_cap);
+        if (dst != src) {
+          for (usize b = (usize)live * ecs_strides[i]; b > 0u; b -= 1u) {
+            ecs_block[dst + b - 1u] = ecs_block[src + b - 1u];
+          }
+        }
+      }
+      entity_capacity = new_cap;
+      ecs_bind_pointers(new_cap);
+      return 1;
+    }
+  }
+
+  unsigned char *next = (unsigned char *)blitz_alloc(new_bytes);
+  if (!next) {
+    return 0;
+  }
+  if (ecs_block && entity_capacity) {
+    for (u32 i = 0u; i < BLITZ_ECS_ARRAYS; i += 1u) {
+      copy_bytes(next + ecs_offset(i, new_cap),
+                 ecs_block + ecs_offset(i, entity_capacity),
+                 (usize)live * ecs_strides[i]);
+    }
+    blitz_free(ecs_block);
+  }
+  ecs_block = next;
+  entity_capacity = new_cap;
+  ecs_bind_pointers(new_cap);
+  return 1;
+}
+
+static void ecs_storage_init(void) {
+  // blitz_init resets the whole heap, releasing every demand block wholesale,
+  // so all heap-backed pointers must be cleared here.
+  heap_reset();
+  shape_commands = 0;
+  rect_draws = 0;
+  triangle_draws = 0;
+  oval_draws = 0;
+  text_draws = 0;
+  dyn_commands = 0;
+  dyn_rects = 0;
+  scene_file_buffer = 0;
+  scene_file_capacity = 0u;
+  text_pool = 0;
+  text_pool_capacity = 0u;
+  scene_query_items = 0;
+  scene_query_items_cap = 0u;
+  shape_commands_cap = 0u;
+  rect_draws_cap = 0u;
+  triangle_draws_cap = 0u;
+  oval_draws_cap = 0u;
+  text_draws_cap = 0u;
+  dyn_commands_cap = 0u;
+  dyn_rects_cap = 0u;
+  ecs_block = 0;
+  entity_capacity = 0u;
+  world.draw_order = 0;
+  world.draw_order_scratch = 0;
+  world.selected = 0;
+  world.object_ids = 0;
+  world.masks = 0;
+  world.positions = 0;
+  world.sizes = 0;
+  world.rect_views = 0;
+  world.triangle_views = 0;
+  world.oval_views = 0;
+  world.text_views = 0;
+  world.frame_views = 0;
+  world.relative_transforms = 0;
+  world.first_child = 0;
+  world.next_sibling = 0;
+  world.prev_sibling = 0;
+  transform_dirty = 0;
+  transform_dirty_entities = 0;
+  draw_order_seen = 0;
+  draw_order_child_head = 0;
+  draw_order_child_tail = 0;
+  draw_order_next_child = 0;
+  duplicate_entity_map = 0;
+  internal_clipboard_sources = 0;
+  marquee_base_selected = 0;
+  free_slots = 0;
+}
+
+// Reserve room for one more entry in the dynamic stream before a push: grow the
+// buffers and report whether the (possibly relocated) buffers are usable. Both
+// buffers a push touches are reserved together.
+static int dyn_rect_reserve(void) {
+  dyn_commands = (ShapeCommand *)dyn_grow(dyn_commands, &dyn_commands_cap,
+                                          dyn_command_count, sizeof(ShapeCommand));
+  dyn_rects = (RectDraw *)dyn_grow(dyn_rects, &dyn_rects_cap, dyn_rect_count,
+                                   sizeof(RectDraw));
+  return dyn_commands != 0 && dyn_rects != 0;
+}
+static int dyn_text_reserve(void) {
+  dyn_commands = (ShapeCommand *)dyn_grow(dyn_commands, &dyn_commands_cap,
+                                          dyn_command_count, sizeof(ShapeCommand));
+  text_draws = (TextDraw *)dyn_grow(text_draws, &text_draws_cap, text_draw_count,
+                                    sizeof(TextDraw));
+  return dyn_commands != 0 && text_draws != 0;
+}
 static Vec2 marquee_start;
 static Vec2 marquee_end;
 static u32 camera_fit_initialized;
@@ -797,6 +1244,12 @@ static u32 ecs_create_entity(void) {
     entity = free_slots[free_count];
   } else if (world.entity_count < BLITZ_MAX_ENTITIES) {
     entity = world.entity_count;
+    // Grow before committing the slot so a failed reservation needs no rollback.
+    // Reused free slots were live at a prior high-water mark, so they are
+    // already backed (capacity never shrinks).
+    if (!ecs_storage_reserve(entity + 1u)) {
+      return BLITZ_INVALID_INDEX;
+    }
     world.entity_count += 1u;
   } else {
     return BLITZ_INVALID_INDEX;
@@ -1145,8 +1598,7 @@ static void push_rect_draw(u32 entity, u32 order) {
 }
 
 static void push_selection_draw(u32 entity, u32 order) {
-  if (dyn_command_count >= BLITZ_MAX_DYN_COMMANDS ||
-      dyn_rect_count >= BLITZ_MAX_DYN_RECTS) {
+  if (!dyn_rect_reserve()) {
     return;
   }
 
@@ -1180,9 +1632,7 @@ static void push_selection_draw(u32 entity, u32 order) {
 }
 
 static void push_container_hover_draw(u32 entity, u32 order) {
-  if (entity == BLITZ_INVALID_INDEX ||
-      dyn_command_count >= BLITZ_MAX_DYN_COMMANDS ||
-      dyn_rect_count >= BLITZ_MAX_DYN_RECTS) {
+  if (entity == BLITZ_INVALID_INDEX || !dyn_rect_reserve()) {
     return;
   }
 
@@ -1216,8 +1666,7 @@ static void push_container_hover_draw(u32 entity, u32 order) {
 }
 
 static void push_resize_handle_draw(float center_x, float center_y, u32 order) {
-  if (dyn_command_count >= BLITZ_MAX_DYN_COMMANDS ||
-      dyn_rect_count >= BLITZ_MAX_DYN_RECTS) {
+  if (!dyn_rect_reserve()) {
     return;
   }
 
@@ -1249,8 +1698,7 @@ static void push_resize_handle_draw(float center_x, float center_y, u32 order) {
 }
 
 static void push_marquee_draw(u32 order) {
-  if (!marquee_active || dyn_command_count >= BLITZ_MAX_DYN_COMMANDS ||
-      dyn_rect_count >= BLITZ_MAX_DYN_RECTS) {
+  if (!marquee_active || !dyn_rect_reserve()) {
     return;
   }
 
@@ -1646,9 +2094,7 @@ static void push_text_draws(u32 entity, u32 order) {
     while (text < end) {
       u32 codepoint = utf8_next(&text);
       const FontGlyphMetric *glyph = font_glyph_metric(codepoint);
-      if (codepoint != (u32)' ' &&
-          dyn_command_count < BLITZ_MAX_DYN_COMMANDS &&
-          text_draw_count < BLITZ_MAX_TEXT_DRAWS) {
+      if (codepoint != (u32)' ' && dyn_text_reserve()) {
         TextDraw *draw = &text_draws[text_draw_count];
         draw->rect[0] = pen_x + glyph->plane_left * view.font_size;
         draw->rect[1] = baseline_y + glyph->plane_top * view.font_size;
@@ -1681,9 +2127,7 @@ static void push_text_run_draws(u32 entity, const char *text, Color color,
   while (*cursor != '\0') {
     u32 codepoint = utf8_next(&cursor);
     const FontGlyphMetric *glyph = font_glyph_metric(codepoint);
-    if (codepoint != (u32)' ' &&
-        dyn_command_count < BLITZ_MAX_DYN_COMMANDS &&
-        text_draw_count < BLITZ_MAX_TEXT_DRAWS) {
+    if (codepoint != (u32)' ' && dyn_text_reserve()) {
       TextDraw *draw = &text_draws[text_draw_count];
       draw->rect[0] = pen_x + glyph->plane_left * font_size;
       draw->rect[1] = baseline_y + glyph->plane_top * font_size;
@@ -1745,6 +2189,20 @@ static void extract_static_shapes(void) {
   rect_draw_count = 0u;
   triangle_draw_count = 0u;
   oval_draw_count = 0u;
+  u32 draw_need = world.draw_order_count;
+  shape_commands = draw_reserve(shape_commands, &shape_commands_cap, draw_need,
+                                sizeof(ShapeCommand));
+  rect_draws =
+      draw_reserve(rect_draws, &rect_draws_cap, draw_need, sizeof(RectDraw));
+  triangle_draws = draw_reserve(triangle_draws, &triangle_draws_cap, draw_need,
+                                sizeof(TriangleDraw));
+  oval_draws =
+      draw_reserve(oval_draws, &oval_draws_cap, draw_need, sizeof(OvalDraw));
+  if (draw_need && (!shape_commands || !rect_draws || !triangle_draws ||
+                    !oval_draws)) {
+    static_dirty = 0u;
+    return;
+  }
   u32 base_required = BLITZ_COMPONENT_POSITION | BLITZ_COMPONENT_SIZE;
 
   for (u32 order_index = 0u; order_index < world.draw_order_count;
@@ -2375,8 +2833,10 @@ static u32 clone_entity_for_duplicate(u32 source, float offset_x,
 }
 
 static const char *copy_text_input(u32 text_length) {
-  if (text_length >= BLITZ_TEXT_INPUT_BYTES ||
-      text_pool_used + text_length + 1u > BLITZ_TEXT_POOL_BYTES) {
+  if (text_length >= BLITZ_TEXT_INPUT_BYTES) {
+    return 0;
+  }
+  if (!text_pool_ensure(text_length + 1u)) {
     return 0;
   }
   char *destination = &text_pool[text_pool_used];
@@ -2487,6 +2947,7 @@ static void create_demo_world(void) {
 
 EXPORT("blitz_init")
 void blitz_init(void) {
+  ecs_storage_init();
   world.entity_count = 0u;
   world.draw_order_count = 0u;
   free_count = 0u;
@@ -3630,6 +4091,13 @@ u32 blitz_query_scene(float min_x, float min_y, float max_x, float max_y,
     if (scene_query_count >= limit) {
       continue;
     }
+    scene_query_items = (SceneItem *)dyn_grow(scene_query_items,
+                                              &scene_query_items_cap,
+                                              scene_query_count,
+                                              sizeof(SceneItem));
+    if (!scene_query_items) {
+      break;
+    }
     SceneItem *item = &scene_query_items[scene_query_count];
     item->object_id = world.object_ids[entity];
     item->shape_kind = kind;
@@ -3689,7 +4157,7 @@ u32 blitz_query_scene(float min_x, float min_y, float max_x, float max_y,
 
 EXPORT("blitz_scene_query_ptr")
 u32 blitz_scene_query_ptr(void) {
-  return (u32)&scene_query_items[0];
+  return (u32)scene_query_items;
 }
 
 EXPORT("blitz_scene_query_item_bytes")
@@ -3709,12 +4177,26 @@ u32 blitz_scene_query_total(void) {
 
 EXPORT("blitz_scene_file_buffer_ptr")
 u32 blitz_scene_file_buffer_ptr(void) {
-  return (u32)&scene_file_buffer[0];
+  return (u32)scene_file_buffer;
 }
 
 EXPORT("blitz_scene_file_buffer_capacity")
 u32 blitz_scene_file_buffer_capacity(void) {
   return BLITZ_SCENE_FILE_BUFFER_BYTES;
+}
+
+// Ensure the file buffer holds `bytes` and return its address (0 if `bytes`
+// exceeds the supported maximum or allocation fails). Callers write here before
+// blitz_scene_deserialize.
+EXPORT("blitz_scene_file_buffer_reserve")
+u32 blitz_scene_file_buffer_reserve(u32 bytes) {
+  if (bytes > BLITZ_SCENE_FILE_BUFFER_BYTES) {
+    return 0u;
+  }
+  if (!scene_file_ensure(bytes ? bytes : 1u, 0u)) {
+    return 0u;
+  }
+  return (u32)scene_file_buffer;
 }
 
 EXPORT("blitz_scene_revision")
@@ -3734,6 +4216,9 @@ u32 blitz_scene_serialize(void) {
   world_sync_for_read();
   u32 offset = BLITZ_SCENE_FILE_HEADER_BYTES;
   u32 object_count = 0u;
+  if (!scene_file_ensure(BLITZ_SCENE_FILE_HEADER_BYTES, 0u)) {
+    return 0;
+  }
 
   for (u32 order = 0u; order < world.draw_order_count; order += 1u) {
     u32 entity = world.draw_order[order];
@@ -3808,6 +4293,9 @@ u32 blitz_scene_serialize(void) {
 
     Vec2 position = world.positions[entity];
     Vec2 size = world.sizes[entity];
+    if (!scene_file_ensure(offset + record_bytes, offset)) {
+      return 0;
+    }
     write_u32(scene_file_buffer, offset, kind);
     write_u32(scene_file_buffer, offset + 4u, record_bytes);
     ObjectId object_id = world.object_ids[entity];
@@ -3991,6 +4479,10 @@ u32 blitz_scene_deserialize(u32 byte_count) {
     } else if (kind == BLITZ_SHAPE_FRAME) {
       char *title = "";
       if (text_length > 0u) {
+        if (!text_pool_ensure(text_length + 1u)) {
+          clear_scene_state();
+          return 13u;
+        }
         title = &text_pool[text_pool_used];
         for (u32 i = 0u; i < text_length; i += 1u) {
           title[i] = (char)scene_file_buffer[offset + fixed_record_bytes + i];
@@ -4010,6 +4502,10 @@ u32 blitz_scene_deserialize(u32 byte_count) {
       ecs_set_oval_view(entity, fill, stroke, stroke_width);
       ecs_set_resizable(entity, 1u, 1u);
     } else {
+      if (!text_pool_ensure(text_length + 1u)) {
+        clear_scene_state();
+        return 13u;
+      }
       char *text = &text_pool[text_pool_used];
       for (u32 i = 0u; i < text_length; i += 1u) {
         text[i] = (char)scene_file_buffer[

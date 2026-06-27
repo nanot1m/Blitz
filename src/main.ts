@@ -319,41 +319,22 @@ async function boot() {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   const maxShapes = wasm.blitz_render_max_shapes();
-  const shapeCommandU32Count = wasm.blitz_shape_command_u32_count();
-  const shapeCommandBufferByteLength =
-    maxShapes * shapeCommandU32Count * Uint32Array.BYTES_PER_ELEMENT;
-  const rectDrawF32Count = wasm.blitz_rect_draw_f32_count();
-  const rectDrawBufferByteLength =
-    maxShapes * rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
-  const triangleDrawF32Count = wasm.blitz_triangle_draw_f32_count();
-  const triangleDrawBufferByteLength =
-    maxShapes * triangleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
-  const ovalDrawF32Count = wasm.blitz_oval_draw_f32_count();
-  const ovalDrawBufferByteLength =
-    maxShapes * ovalDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
-  const textDrawF32Count = wasm.blitz_text_draw_f32_count();
-  const textDrawBufferByteLength =
-    wasm.blitz_render_max_text_draws() *
-    textDrawF32Count *
-    Float32Array.BYTES_PER_ELEMENT;
+  const maxTextDraws = wasm.blitz_render_max_text_draws();
   const maxDynCommands = wasm.blitz_render_max_dyn_commands();
-  const dynCommandBufferByteLength =
-    maxDynCommands * shapeCommandU32Count * Uint32Array.BYTES_PER_ELEMENT;
   const maxDynRects = wasm.blitz_render_max_dyn_rects();
-  const dynRectBufferByteLength =
-    maxDynRects * rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
-  // Total bytes of the fixed storage buffers, for the stats panel (excludes the
-  // resize-dependent depth texture, reported separately).
-  const gpuBufferBytes =
-    uniformByteLength +
-    shapeCommandBufferByteLength * 2 +
-    rectDrawBufferByteLength +
-    triangleDrawBufferByteLength +
-    ovalDrawBufferByteLength +
-    textDrawBufferByteLength +
-    dynCommandBufferByteLength +
-    dynRectBufferByteLength +
-    16;
+  const shapeCommandU32Count = wasm.blitz_shape_command_u32_count();
+  const rectDrawF32Count = wasm.blitz_rect_draw_f32_count();
+  const triangleDrawF32Count = wasm.blitz_triangle_draw_f32_count();
+  const ovalDrawF32Count = wasm.blitz_oval_draw_f32_count();
+  const textDrawF32Count = wasm.blitz_text_draw_f32_count();
+  const shapeCommandStride = shapeCommandU32Count * Uint32Array.BYTES_PER_ELEMENT;
+  const rectDrawStride = rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const triangleDrawStride = triangleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const ovalDrawStride = ovalDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const textDrawStride = textDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  // Storage buffers start small and grow on demand toward the capacity ceilings
+  // above, so GPU memory tracks scene size instead of reserving for the maximum.
+  const initialStorageCapacity = 1024;
   const atlasResponse = await fetch(
     `${import.meta.env.BASE_URL}font-atlas.png`,
   );
@@ -560,35 +541,44 @@ async function boot() {
     }),
     compute: { module: cullShader, entryPoint: "cull_main" },
   });
-  const shapeCommandStorageBuffer = device.createBuffer({
+  let shapeCommandCapacity = initialStorageCapacity;
+  let visibleCommandCapacity = initialStorageCapacity;
+  let rectCapacity = initialStorageCapacity;
+  let triangleCapacity = initialStorageCapacity;
+  let ovalCapacity = initialStorageCapacity;
+  let textCapacity = initialStorageCapacity;
+  let dynCommandCapacity = initialStorageCapacity;
+  let dynRectCapacity = initialStorageCapacity;
+  const storageDstUsage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+  let shapeCommandStorageBuffer = device.createBuffer({
     label: "Blitz Shape Command Storage",
-    size: shapeCommandBufferByteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    size: shapeCommandCapacity * shapeCommandStride,
+    usage: storageDstUsage,
   });
-  const rectStorageBuffer = device.createBuffer({
+  let rectStorageBuffer = device.createBuffer({
     label: "Blitz Rect Draw Storage",
-    size: rectDrawBufferByteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    size: rectCapacity * rectDrawStride,
+    usage: storageDstUsage,
   });
-  const triangleStorageBuffer = device.createBuffer({
+  let triangleStorageBuffer = device.createBuffer({
     label: "Blitz Triangle Draw Storage",
-    size: triangleDrawBufferByteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    size: triangleCapacity * triangleDrawStride,
+    usage: storageDstUsage,
   });
-  const ovalStorageBuffer = device.createBuffer({
+  let ovalStorageBuffer = device.createBuffer({
     label: "Blitz Oval Draw Storage",
-    size: ovalDrawBufferByteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    size: ovalCapacity * ovalDrawStride,
+    usage: storageDstUsage,
   });
-  const textStorageBuffer = device.createBuffer({
+  let textStorageBuffer = device.createBuffer({
     label: "Blitz Text Draw Storage",
-    size: textDrawBufferByteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    size: textCapacity * textDrawStride,
+    usage: storageDstUsage,
   });
   // Compute-cull output: compacted visible static commands + indirect draw args.
-  const visibleCommandStorageBuffer = device.createBuffer({
+  let visibleCommandStorageBuffer = device.createBuffer({
     label: "Blitz Visible Command Storage",
-    size: shapeCommandBufferByteLength,
+    size: visibleCommandCapacity * shapeCommandStride,
     usage: GPUBufferUsage.STORAGE,
   });
   const drawArgsBuffer = device.createBuffer({
@@ -606,66 +596,107 @@ async function boot() {
     size: 4 * Uint32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
-  const dynCommandStorageBuffer = device.createBuffer({
+  let dynCommandStorageBuffer = device.createBuffer({
     label: "Blitz Dynamic Command Storage",
-    size: dynCommandBufferByteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    size: dynCommandCapacity * shapeCommandStride,
+    usage: storageDstUsage,
   });
-  const dynRectStorageBuffer = device.createBuffer({
+  let dynRectStorageBuffer = device.createBuffer({
     label: "Blitz Dynamic Rect Storage",
-    size: dynRectBufferByteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    size: dynRectCapacity * rectDrawStride,
+    usage: storageDstUsage,
   });
   const backgroundBindGroup = device.createBindGroup({
     label: "Blitz Background Bind Group",
     layout: backgroundBindGroupLayout,
     entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
   });
-  const cullBindGroup = device.createBindGroup({
-    label: "Blitz Cull Bind Group",
-    layout: cullBindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: uniformBuffer } },
-      { binding: 1, resource: { buffer: shapeCommandStorageBuffer } },
-      { binding: 2, resource: { buffer: rectStorageBuffer } },
-      { binding: 3, resource: { buffer: triangleStorageBuffer } },
-      { binding: 4, resource: { buffer: ovalStorageBuffer } },
-      { binding: 5, resource: { buffer: visibleCommandStorageBuffer } },
-      { binding: 6, resource: { buffer: drawArgsBuffer } },
-    ],
-  });
-  // Static pass draws the culled commands; text binding is unused (no text in
-  // the static stream) but the layout requires it.
-  const staticRenderBindGroup = device.createBindGroup({
-    label: "Blitz Static Render Bind Group",
-    layout: bindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: uniformBuffer } },
-      { binding: 1, resource: { buffer: visibleCommandStorageBuffer } },
-      { binding: 2, resource: { buffer: rectStorageBuffer } },
-      { binding: 3, resource: { buffer: triangleStorageBuffer } },
-      { binding: 4, resource: { buffer: ovalStorageBuffer } },
-      { binding: 5, resource: { buffer: textStorageBuffer } },
-      { binding: 6, resource: fontAtlasTexture.createView() },
-      { binding: 7, resource: fontSampler },
-    ],
-  });
-  // Dynamic pass draws text + selection/marquee; triangle/oval bindings are
-  // unused but the layout requires them.
-  const dynamicRenderBindGroup = device.createBindGroup({
-    label: "Blitz Dynamic Render Bind Group",
-    layout: bindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: uniformBuffer } },
-      { binding: 1, resource: { buffer: dynCommandStorageBuffer } },
-      { binding: 2, resource: { buffer: dynRectStorageBuffer } },
-      { binding: 3, resource: { buffer: triangleStorageBuffer } },
-      { binding: 4, resource: { buffer: ovalStorageBuffer } },
-      { binding: 5, resource: { buffer: textStorageBuffer } },
-      { binding: 6, resource: fontAtlasTexture.createView() },
-      { binding: 7, resource: fontSampler },
-    ],
-  });
+  const fontAtlasView = fontAtlasTexture.createView();
+  let cullBindGroup!: GPUBindGroup;
+  let staticRenderBindGroup!: GPUBindGroup;
+  let dynamicRenderBindGroup!: GPUBindGroup;
+  // Bind groups capture the specific buffer objects they reference, so they are
+  // rebuilt whenever a storage buffer grows. The dynamic pass's triangle/oval
+  // and the static pass's text bindings are unused but required by the layout.
+  const rebuildBindGroups = () => {
+    cullBindGroup = device.createBindGroup({
+      label: "Blitz Cull Bind Group",
+      layout: cullBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuffer } },
+        { binding: 1, resource: { buffer: shapeCommandStorageBuffer } },
+        { binding: 2, resource: { buffer: rectStorageBuffer } },
+        { binding: 3, resource: { buffer: triangleStorageBuffer } },
+        { binding: 4, resource: { buffer: ovalStorageBuffer } },
+        { binding: 5, resource: { buffer: visibleCommandStorageBuffer } },
+        { binding: 6, resource: { buffer: drawArgsBuffer } },
+      ],
+    });
+    staticRenderBindGroup = device.createBindGroup({
+      label: "Blitz Static Render Bind Group",
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuffer } },
+        { binding: 1, resource: { buffer: visibleCommandStorageBuffer } },
+        { binding: 2, resource: { buffer: rectStorageBuffer } },
+        { binding: 3, resource: { buffer: triangleStorageBuffer } },
+        { binding: 4, resource: { buffer: ovalStorageBuffer } },
+        { binding: 5, resource: { buffer: textStorageBuffer } },
+        { binding: 6, resource: fontAtlasView },
+        { binding: 7, resource: fontSampler },
+      ],
+    });
+    dynamicRenderBindGroup = device.createBindGroup({
+      label: "Blitz Dynamic Render Bind Group",
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuffer } },
+        { binding: 1, resource: { buffer: dynCommandStorageBuffer } },
+        { binding: 2, resource: { buffer: dynRectStorageBuffer } },
+        { binding: 3, resource: { buffer: triangleStorageBuffer } },
+        { binding: 4, resource: { buffer: ovalStorageBuffer } },
+        { binding: 5, resource: { buffer: textStorageBuffer } },
+        { binding: 6, resource: fontAtlasView },
+        { binding: 7, resource: fontSampler },
+      ],
+    });
+  };
+  rebuildBindGroups();
+  // Grow a storage buffer (destroy + recreate larger) when a draw count exceeds
+  // its capacity. WebGPU defers the actual free until in-flight work referencing
+  // the old buffer completes, so destroying immediately is safe.
+  const ensureStorage = (
+    buffer: GPUBuffer,
+    capacity: number,
+    needed: number,
+    ceiling: number,
+    stride: number,
+    usage: number,
+    label: string,
+  ): { buffer: GPUBuffer; capacity: number; grew: boolean } => {
+    if (needed <= capacity) return { buffer, capacity, grew: false };
+    let next = capacity;
+    while (next < needed) next *= 2;
+    if (next > ceiling) next = ceiling;
+    buffer.destroy();
+    return {
+      buffer: device.createBuffer({ label, size: next * stride, usage }),
+      capacity: next,
+      grew: true,
+    };
+  };
+  // Sum of the currently-allocated GPU buffer sizes, for the stats panel
+  // (excludes the resize-dependent depth texture, reported separately).
+  const gpuBufferBytes = () =>
+    uniformByteLength +
+    (shapeCommandCapacity + visibleCommandCapacity) * shapeCommandStride +
+    rectCapacity * rectDrawStride +
+    triangleCapacity * triangleDrawStride +
+    ovalCapacity * ovalDrawStride +
+    textCapacity * textDrawStride +
+    dynCommandCapacity * shapeCommandStride +
+    dynRectCapacity * rectDrawStride +
+    2 * 4 * Uint32Array.BYTES_PER_ELEMENT;
   let lastUploadedShapeCommandVersion = -1;
   let currentShapeCommandCount = 0;
   let lastUploadedDynVersion = -1;
@@ -736,7 +767,7 @@ async function boot() {
       <div class="stats-section">
         ${metricRow("WASM reserved", formatBytes(wasm.memory.buffer.byteLength))}
         ${metricRow("WASM live", formatBytes(wasm.blitz_wasm_live_bytes()))}
-        ${metricRow("GPU buffers", formatBytes(gpuBufferBytes))}
+        ${metricRow("GPU buffers", formatBytes(gpuBufferBytes()))}
         ${metricRow("Depth texture", formatBytes(ui.canvas.width * ui.canvas.height * 4))}
       </div>
     `;
@@ -2086,6 +2117,7 @@ async function boot() {
     lastFrameStamp = now;
     // Call the trigger pointer first: it runs extract_static_shapes() (guarded
     // by the dirty flag) so the version below reflects the latest build.
+    let bindGroupsDirty = false;
     const shapeCommandPtr = wasm.blitz_shape_command_ptr();
     const shapeCommandVersion = wasm.blitz_shape_command_version();
     if (shapeCommandVersion !== lastUploadedShapeCommandVersion) {
@@ -2097,6 +2129,26 @@ async function boot() {
       const ovalDrawPtr = wasm.blitz_oval_draw_ptr();
       const ovalDrawCount = wasm.blitz_oval_draw_count();
       currentShapeCommandCount = shapeCommandCount;
+      const eShape = ensureStorage(shapeCommandStorageBuffer, shapeCommandCapacity, shapeCommandCount, maxShapes, shapeCommandStride, storageDstUsage, "Blitz Shape Command Storage");
+      shapeCommandStorageBuffer = eShape.buffer;
+      shapeCommandCapacity = eShape.capacity;
+      bindGroupsDirty ||= eShape.grew;
+      const eVisible = ensureStorage(visibleCommandStorageBuffer, visibleCommandCapacity, shapeCommandCount, maxShapes, shapeCommandStride, GPUBufferUsage.STORAGE, "Blitz Visible Command Storage");
+      visibleCommandStorageBuffer = eVisible.buffer;
+      visibleCommandCapacity = eVisible.capacity;
+      bindGroupsDirty ||= eVisible.grew;
+      const eRect = ensureStorage(rectStorageBuffer, rectCapacity, rectDrawCount, maxShapes, rectDrawStride, storageDstUsage, "Blitz Rect Draw Storage");
+      rectStorageBuffer = eRect.buffer;
+      rectCapacity = eRect.capacity;
+      bindGroupsDirty ||= eRect.grew;
+      const eTriangle = ensureStorage(triangleStorageBuffer, triangleCapacity, triangleDrawCount, maxShapes, triangleDrawStride, storageDstUsage, "Blitz Triangle Draw Storage");
+      triangleStorageBuffer = eTriangle.buffer;
+      triangleCapacity = eTriangle.capacity;
+      bindGroupsDirty ||= eTriangle.grew;
+      const eOval = ensureStorage(ovalStorageBuffer, ovalCapacity, ovalDrawCount, maxShapes, ovalDrawStride, storageDstUsage, "Blitz Oval Draw Storage");
+      ovalStorageBuffer = eOval.buffer;
+      ovalCapacity = eOval.capacity;
+      bindGroupsDirty ||= eOval.grew;
       if (shapeCommandCount > 0) {
         device.queue.writeBuffer(
           shapeCommandStorageBuffer,
@@ -2152,6 +2204,18 @@ async function boot() {
       const textDrawPtr = wasm.blitz_text_draw_ptr();
       const textDrawCount = wasm.blitz_text_draw_count();
       currentDynCommandCount = dynCommandCount;
+      const eDynCommand = ensureStorage(dynCommandStorageBuffer, dynCommandCapacity, dynCommandCount, maxDynCommands, shapeCommandStride, storageDstUsage, "Blitz Dynamic Command Storage");
+      dynCommandStorageBuffer = eDynCommand.buffer;
+      dynCommandCapacity = eDynCommand.capacity;
+      bindGroupsDirty ||= eDynCommand.grew;
+      const eDynRect = ensureStorage(dynRectStorageBuffer, dynRectCapacity, dynRectCount, maxDynRects, rectDrawStride, storageDstUsage, "Blitz Dynamic Rect Storage");
+      dynRectStorageBuffer = eDynRect.buffer;
+      dynRectCapacity = eDynRect.capacity;
+      bindGroupsDirty ||= eDynRect.grew;
+      const eText = ensureStorage(textStorageBuffer, textCapacity, textDrawCount, maxTextDraws, textDrawStride, storageDstUsage, "Blitz Text Draw Storage");
+      textStorageBuffer = eText.buffer;
+      textCapacity = eText.capacity;
+      bindGroupsDirty ||= eText.grew;
       if (dynCommandCount > 0) {
         device.queue.writeBuffer(
           dynCommandStorageBuffer,
@@ -2199,6 +2263,9 @@ async function boot() {
     if (zoomPercent !== lastZoomPercent) {
       lastZoomPercent = zoomPercent;
       ui.zoomIndicator.textContent = `${zoomPercent}%`;
+    }
+    if (bindGroupsDirty) {
+      rebuildBindGroups();
     }
     device.queue.writeBuffer(drawArgsBuffer, 0, drawArgsReset);
     const encoder = device.createCommandEncoder({

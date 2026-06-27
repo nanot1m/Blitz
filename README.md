@@ -85,7 +85,7 @@ Selection is session-only UI state. Selecting, deselecting, or marquee-selecting
 
 WASM exposes a monotonic scene revision covering persisted changes such as geometry, text, and z-order. A gray dot appears on the Save icon while the current revision differs from the last successful save or load. Closing or reloading a page with unsaved changes triggers the browser's standard unsaved-changes confirmation. Browsers do not permit reliable asynchronous saving during page unload, so the application warns rather than attempting a silent final save.
 
-The WASM file buffer is allocated on demand and grows to fit the scene, up to a 128 MB ceiling (room for roughly one million fixed-size shape records plus text payloads). Files include a magic number, format version, total byte count, camera header, and variable-length shape records. Invalid files are fully validated before the live scene is replaced.
+The WASM file buffer is allocated on demand and grows to fit the scene, up to a 512 MB ceiling (room for a full ~4M-entity scene of fixed-size shape records plus text payloads). Files include a magic number, format version, total byte count, camera header, and variable-length shape records. Invalid files are fully validated before the live scene is replaced.
 
 ### Phones and tablets
 
@@ -267,7 +267,7 @@ Large WASM buffers are not preallocated. A free-list allocator over the module's
 
 ### WASM ECS
 
-- Entity capacity: per-entity arrays grow on demand up to 1,000,000 slots
+- Entity capacity: per-entity arrays grow on demand up to 4,000,000 slots (the ceiling that keeps the single-dimension GPU cull dispatch within limits; the wasm32 4 GB linear-memory cap is the next wall)
 - Components: position, size, selectable, rectangle view, triangle view, circle view, and text view
 - Draw order: one entity-order stream shared by all shape types
 - Selection: hit testing, dragging, marquee selection, deletion, and z-order changes run in C

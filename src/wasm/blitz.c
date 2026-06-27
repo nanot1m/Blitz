@@ -13,10 +13,15 @@ usize strlen(const char *text) {
   return length;
 }
 
-#define BLITZ_MAX_ENTITIES 1000000u
+// Capacity ceiling, not a reservation: all per-entity storage grows on demand,
+// so this only bounds entity creation and the render dispatch. 4M keeps the
+// single-dimension GPU cull dispatch (ceil(n/64) workgroups) under the 65535
+// limit; the wasm32 4 GB linear-memory ceiling is the next wall beyond that.
+#define BLITZ_MAX_ENTITIES 4000000u
 #define BLITZ_RENDER_CHUNK_RECTS 250000u
-#define BLITZ_RENDER_CHUNKS 4u
-#define BLITZ_MAX_RECT_DRAWS (BLITZ_RENDER_CHUNK_RECTS * BLITZ_RENDER_CHUNKS)
+// Every entity may be a renderable static shape, so the draw-stream ceiling
+// tracks the entity ceiling.
+#define BLITZ_MAX_RECT_DRAWS BLITZ_MAX_ENTITIES
 #define BLITZ_MAX_TEXT_DRAWS 262144u
 #define BLITZ_MAX_DYN_RECTS 1000000u
 #define BLITZ_MAX_DYN_COMMANDS (BLITZ_MAX_TEXT_DRAWS + BLITZ_MAX_DYN_RECTS)
@@ -24,7 +29,10 @@ usize strlen(const char *text) {
 #define BLITZ_TEXT_INPUT_BYTES 4096u
 #define BLITZ_TEXT_POOL_BYTES (16u * 1024u * 1024u)
 #define BLITZ_MAX_SCENE_QUERY_ITEMS 65536u
-#define BLITZ_SCENE_FILE_BUFFER_BYTES (128u * 1024u * 1024u)
+// Demand-grown (allocated only during serialize/deserialize), so this is the
+// load-acceptance ceiling, not a reservation. 512 MB covers a full ~4M-entity
+// scene (records + text); it is the load/restore size guard.
+#define BLITZ_SCENE_FILE_BUFFER_BYTES (512u * 1024u * 1024u)
 #define BLITZ_SCENE_FILE_MAGIC 0x5a544c42u
 #define BLITZ_SCENE_FILE_VERSION 5u
 #define BLITZ_SCENE_FILE_HEADER_BYTES 32u

@@ -73,6 +73,21 @@ if (wasm.blitz_scene_deserialize(stressBytes) !== 0 || wasm.blitz_entity_count()
   throw new Error(`Stress scene (${stressCount} entities) did not survive a binary round trip.`);
 }
 
+// Beyond the former 1,000,000-entity cap: demand allocation lets entity count
+// exceed a million, bounded now only by the render dispatch and wasm32 memory.
+wasm.blitz_init();
+wasm.blitz_set_actor_id(1, 1);
+wasm.blitz_resize(1920, 1080);
+const BEYOND_CAP = 1_100_000;
+createGrid(BEYOND_CAP);
+if (wasm.blitz_entity_count() !== BEYOND_CAP) {
+  throw new Error(`Former 1M cap not lifted: expected ${BEYOND_CAP} entities, got ${wasm.blitz_entity_count()}.`);
+}
+const beyondBytes = wasm.blitz_scene_serialize();
+if (wasm.blitz_scene_deserialize(beyondBytes) !== 0 || wasm.blitz_entity_count() !== BEYOND_CAP) {
+  throw new Error(`Scene with ${BEYOND_CAP} entities did not survive a binary round trip.`);
+}
+
 // Dynamic stream growth: many in-view selected rects force the selection-overlay
 // buffers (dyn_commands, dyn_rects) to grow well past their initial capacity.
 wasm.blitz_clear_scene();
@@ -128,5 +143,5 @@ if (wasm.blitz_entity_count() !== 0) {
 }
 
 console.log(
-  `Scene growth test passed (${COUNT} grid + ${stressCount} stress + ${OVERLAYS} overlay + ${TEXT_ENTITIES} text entities).`,
+  `Scene growth test passed (${COUNT} grid + ${stressCount} stress + ${BEYOND_CAP} beyond-1M + ${OVERLAYS} overlay + ${TEXT_ENTITIES} text entities).`,
 );

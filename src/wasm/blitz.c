@@ -355,13 +355,31 @@ static int heap_ensure(usize end) {
   return 1;
 }
 
+static usize block_end(BlockHeader *block) {
+  return (usize)block + BLITZ_HEADER_BYTES + block->size;
+}
+
 static void *blitz_alloc(usize size) {
   size = align16(size);
   BlockHeader *prev = 0;
   BlockHeader *block = heap_free_list;
   while (block) {
     if (block->size >= size) {
-      if (prev) {
+      usize remainder = block->size - size;
+      if (remainder >= BLITZ_HEADER_BYTES + 16u) {
+        // Split: keep `size` here and return the tail to the free list in place,
+        // so a large coalesced region isn't consumed whole by a small request.
+        BlockHeader *tail =
+            (BlockHeader *)((usize)block + BLITZ_HEADER_BYTES + size);
+        tail->size = remainder - BLITZ_HEADER_BYTES;
+        tail->next_free = block->next_free;
+        block->size = size;
+        if (prev) {
+          prev->next_free = tail;
+        } else {
+          heap_free_list = tail;
+        }
+      } else if (prev) {
         prev->next_free = block->next_free;
       } else {
         heap_free_list = block->next_free;
@@ -382,39 +400,53 @@ static void *blitz_alloc(usize size) {
   return (void *)data;
 }
 
+// The free list is kept sorted by address so a freed block can merge with its
+// physical neighbors into a larger reusable region, and the highest block can
+// be handed back to the bump pointer. Without coalescing, blocks freed below
+// the draw buffers (e.g. old ECS blocks after the ECS array relocates) would
+// strand and inflate the committed footprint.
 static void blitz_free(void *ptr) {
   if (!ptr) {
     return;
   }
   BlockHeader *block =
       (BlockHeader *)((unsigned char *)ptr - BLITZ_HEADER_BYTES);
-  block->next_free = heap_free_list;
-  heap_free_list = block;
-  // Reclaim any free block sitting at the top of the heap, repeatedly, so the
-  // common free-then-grow-bigger pattern keeps the bump pointer tight.
-  for (;;) {
-    BlockHeader *prev = 0;
-    BlockHeader *cur = heap_free_list;
-    BlockHeader *top = 0;
-    BlockHeader *top_prev = 0;
-    while (cur) {
-      if ((usize)cur + BLITZ_HEADER_BYTES + cur->size == heap_top) {
-        top = cur;
-        top_prev = prev;
-        break;
-      }
-      prev = cur;
-      cur = cur->next_free;
-    }
-    if (!top) {
-      break;
-    }
-    if (top_prev) {
-      top_prev->next_free = top->next_free;
+  BlockHeader *prev = 0;
+  BlockHeader *next = heap_free_list;
+  while (next && next < block) {
+    prev = next;
+    next = next->next_free;
+  }
+  block->next_free = next;
+  if (prev) {
+    prev->next_free = block;
+  } else {
+    heap_free_list = block;
+  }
+  if (next && block_end(block) == (usize)next) {
+    block->size += BLITZ_HEADER_BYTES + next->size;
+    block->next_free = next->next_free;
+  }
+  if (prev && block_end(prev) == (usize)block) {
+    prev->size += BLITZ_HEADER_BYTES + block->size;
+    prev->next_free = block->next_free;
+    block = prev;
+  }
+  // If the merged block is now the highest one and reaches the top of the heap,
+  // return it to the bump pointer.
+  if (block->next_free == 0 && block_end(block) == heap_top) {
+    if (heap_free_list == block) {
+      heap_free_list = 0;
     } else {
-      heap_free_list = top->next_free;
+      BlockHeader *scan = heap_free_list;
+      while (scan && scan->next_free != block) {
+        scan = scan->next_free;
+      }
+      if (scan) {
+        scan->next_free = 0;
+      }
     }
-    heap_top = (usize)top;
+    heap_top = (usize)block;
   }
 }
 

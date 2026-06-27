@@ -66,6 +66,7 @@ type UiActions = {
 };
 
 type StyleControlElements = {
+  containerInput: HTMLInputElement;
   fillInput: HTMLInputElement;
   fillOpacityInput: HTMLInputElement;
   strokeInput: HTMLInputElement;
@@ -85,6 +86,7 @@ type StyleActions = {
   setStroke(red: number, green: number, blue: number): void;
   setStrokeOpacity(opacity: number): void;
   setStrokeWidth(width: number): void;
+  setContainer(enabled: boolean): void;
   setTextColor(red: number, green: number, blue: number): void;
   setTextFontSize(fontSize: number): void;
   setTextOpacity(opacity: number): void;
@@ -714,6 +716,9 @@ export function setupStyleControls(
   elements: StyleControlElements,
   actions: StyleActions,
 ): void {
+  elements.containerInput.addEventListener("change", () => {
+    actions.setContainer(elements.containerInput.checked);
+  });
   elements.fillInput.addEventListener("input", makeTransactionable(() => {
     actions.setFill(...colorChannels(elements.fillInput.value));
   }, actions));

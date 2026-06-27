@@ -32,6 +32,7 @@ usize strlen(const char *text) {
 #define BLITZ_SCENE_FILE_RECORD_BYTES 92u
 #define BLITZ_SCENE_FILE_V4_RECORD_BYTES 108u
 #define BLITZ_MAX_TEXT_LAYOUT_LINES 256u
+#define BLITZ_CONTAINER_RETARGET_SELECTION_LIMIT 32u
 
 #define BLITZ_INVALID_INDEX 0xffffffffu
 // High bit of a command's order word: set while the command's entity is being
@@ -47,6 +48,8 @@ usize strlen(const char *text) {
 #define BLITZ_COMPONENT_SELECTABLE 64u
 #define BLITZ_COMPONENT_RESIZABLE_X 128u
 #define BLITZ_COMPONENT_RESIZABLE_Y 256u
+#define BLITZ_COMPONENT_RELATIVE_TRANSFORM 512u
+#define BLITZ_COMPONENT_CONTAINER 1024u
 
 #define BLITZ_SHAPE_RECT 0u
 #define BLITZ_SHAPE_TRIANGLE 1u
@@ -116,6 +119,12 @@ typedef struct TextView {
   u32 max_lines;
   u32 align;
 } TextView;
+
+typedef struct RelativeTransform {
+  u32 parent;
+  float offset_x;
+  float offset_y;
+} RelativeTransform;
 
 typedef struct TextLayoutLine {
   u32 start;
@@ -194,6 +203,10 @@ typedef struct World {
   TriangleView triangle_views[BLITZ_MAX_ENTITIES];
   OvalView oval_views[BLITZ_MAX_ENTITIES];
   TextView text_views[BLITZ_MAX_ENTITIES];
+  RelativeTransform relative_transforms[BLITZ_MAX_ENTITIES];
+  u32 first_child[BLITZ_MAX_ENTITIES];
+  u32 next_sibling[BLITZ_MAX_ENTITIES];
+  u32 prev_sibling[BLITZ_MAX_ENTITIES];
 } World;
 
 static BlitzUniforms uniforms;
@@ -241,10 +254,21 @@ static u32 spawn_count;
 static Vec2 drag_last_world;
 static Vec2 drag_offset;
 static u32 drag_active;
+static u32 drag_hover_container;
+static u32 drag_top_level_count;
 static u32 resize_active;
 static u32 resize_entity;
 static u32 resize_handle;
 static u32 hidden_text_entity;
+static u32 transform_dirty[BLITZ_MAX_ENTITIES];
+static u32 transform_dirty_entities[BLITZ_MAX_ENTITIES];
+static u32 transform_dirty_count;
+static u32 draw_order_seen[BLITZ_MAX_ENTITIES];
+static u32 draw_order_child_head[BLITZ_MAX_ENTITIES];
+static u32 draw_order_child_tail[BLITZ_MAX_ENTITIES];
+static u32 draw_order_next_child[BLITZ_MAX_ENTITIES];
+static u32 draw_order_normalization_deferred;
+static u32 draw_order_normalization_pending;
 static Vec2 resize_start_position;
 static Vec2 resize_start_size;
 // Selection state captured when a marquee starts, so each marquee move can
@@ -269,6 +293,10 @@ static ObjectId last_created_object_id;
 static u32 history_transaction_active;
 
 static void clear_selection(void);
+static void extract_static_shapes(void);
+static void extract_dynamic(void);
+static void normalize_draw_order_hierarchy(void);
+static void request_draw_order_normalize(void);
 
 static float clampf(float value, float min_value, float max_value) {
   if (value < min_value) {
@@ -398,6 +426,200 @@ static void mark_view_dirty(void) {
   dynamic_dirty = 1u;
 }
 
+static void mark_transform_dirty(u32 entity) {
+  if (entity == BLITZ_INVALID_INDEX || world.masks[entity] == 0u) {
+    return;
+  }
+  if (!transform_dirty[entity]) {
+    transform_dirty[entity] = 1u;
+    transform_dirty_entities[transform_dirty_count] = entity;
+    transform_dirty_count += 1u;
+  }
+}
+
+static void mark_transform_subtree_dirty(u32 entity) {
+  if (entity == BLITZ_INVALID_INDEX || world.masks[entity] == 0u) {
+    return;
+  }
+  for (u32 child = world.first_child[entity]; child != BLITZ_INVALID_INDEX;
+       child = world.next_sibling[child]) {
+    mark_transform_dirty(child);
+    mark_transform_subtree_dirty(child);
+  }
+}
+
+static void detach_from_parent(u32 entity) {
+  if (entity == BLITZ_INVALID_INDEX ||
+      !(world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM)) {
+    return;
+  }
+  u32 parent = world.relative_transforms[entity].parent;
+  u32 previous = world.prev_sibling[entity];
+  u32 next = world.next_sibling[entity];
+  if (previous != BLITZ_INVALID_INDEX) {
+    world.next_sibling[previous] = next;
+  } else if (parent != BLITZ_INVALID_INDEX) {
+    world.first_child[parent] = next;
+  }
+  if (next != BLITZ_INVALID_INDEX) {
+    world.prev_sibling[next] = previous;
+  }
+  world.prev_sibling[entity] = BLITZ_INVALID_INDEX;
+  world.next_sibling[entity] = BLITZ_INVALID_INDEX;
+  world.relative_transforms[entity].parent = BLITZ_INVALID_INDEX;
+  world.relative_transforms[entity].offset_x = 0.0f;
+  world.relative_transforms[entity].offset_y = 0.0f;
+  world.masks[entity] &= ~BLITZ_COMPONENT_RELATIVE_TRANSFORM;
+}
+
+static u32 transform_is_descendant(u32 ancestor, u32 candidate) {
+  for (u32 child = world.first_child[ancestor]; child != BLITZ_INVALID_INDEX;
+       child = world.next_sibling[child]) {
+    if (child == candidate || transform_is_descendant(child, candidate)) {
+      return 1u;
+    }
+  }
+  return 0u;
+}
+
+static u32 entity_has_selected_ancestor(u32 entity) {
+  if (entity == BLITZ_INVALID_INDEX) {
+    return 0u;
+  }
+  u32 parent = world.relative_transforms[entity].parent;
+  while (parent != BLITZ_INVALID_INDEX && world.masks[parent] != 0u) {
+    if (world.selected[parent]) {
+      return 1u;
+    }
+    parent = world.relative_transforms[parent].parent;
+  }
+  return 0u;
+}
+
+static u32 entity_is_dragged(u32 entity) {
+  return world.selected[entity] || entity_has_selected_ancestor(entity);
+}
+
+static u32 selected_top_level_count_capped(u32 cap) {
+  u32 count = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.selected[entity] && !entity_has_selected_ancestor(entity)) {
+      count += 1u;
+      if (count >= cap) {
+        return count;
+      }
+    }
+  }
+  return count;
+}
+
+static u32 attach_relative_transform(u32 entity, u32 parent, float offset_x,
+                                     float offset_y) {
+  if (entity == BLITZ_INVALID_INDEX || parent == BLITZ_INVALID_INDEX ||
+      entity == parent || world.masks[entity] == 0u ||
+      world.masks[parent] == 0u || transform_is_descendant(entity, parent)) {
+    return 0u;
+  }
+  detach_from_parent(entity);
+  world.relative_transforms[entity].parent = parent;
+  world.relative_transforms[entity].offset_x = offset_x;
+  world.relative_transforms[entity].offset_y = offset_y;
+  world.prev_sibling[entity] = BLITZ_INVALID_INDEX;
+  world.next_sibling[entity] = world.first_child[parent];
+  if (world.first_child[parent] != BLITZ_INVALID_INDEX) {
+    world.prev_sibling[world.first_child[parent]] = entity;
+  }
+  world.first_child[parent] = entity;
+  world.masks[entity] |= BLITZ_COMPONENT_RELATIVE_TRANSFORM;
+  mark_transform_dirty(entity);
+  mark_transform_subtree_dirty(entity);
+  request_draw_order_normalize();
+  mark_render_list_dirty();
+  return 1u;
+}
+
+static u32 set_entity_container(u32 entity, u32 enabled) {
+  if (entity == BLITZ_INVALID_INDEX || world.masks[entity] == 0u) {
+    return 0u;
+  }
+  if (enabled) {
+    if (world.masks[entity] & BLITZ_COMPONENT_CONTAINER) {
+      return 0u;
+    }
+    world.masks[entity] |= BLITZ_COMPONENT_CONTAINER;
+    mark_render_list_dirty();
+    return 1u;
+  }
+  if (!(world.masks[entity] & BLITZ_COMPONENT_CONTAINER)) {
+    return 0u;
+  }
+  while (world.first_child[entity] != BLITZ_INVALID_INDEX) {
+    u32 child = world.first_child[entity];
+    detach_from_parent(child);
+    mark_transform_subtree_dirty(child);
+  }
+  world.masks[entity] &= ~BLITZ_COMPONENT_CONTAINER;
+  mark_render_list_dirty();
+  return 1u;
+}
+
+static void cleanup_entity_hierarchy(u32 entity) {
+  while (world.first_child[entity] != BLITZ_INVALID_INDEX) {
+    detach_from_parent(world.first_child[entity]);
+  }
+  detach_from_parent(entity);
+  transform_dirty[entity] = 0u;
+  world.first_child[entity] = BLITZ_INVALID_INDEX;
+  world.next_sibling[entity] = BLITZ_INVALID_INDEX;
+  world.prev_sibling[entity] = BLITZ_INVALID_INDEX;
+  world.relative_transforms[entity].parent = BLITZ_INVALID_INDEX;
+  world.relative_transforms[entity].offset_x = 0.0f;
+  world.relative_transforms[entity].offset_y = 0.0f;
+  if (hidden_text_entity == entity) {
+    hidden_text_entity = BLITZ_INVALID_INDEX;
+  }
+}
+
+static void resolve_transform_entity(u32 entity, u32 depth) {
+  if (entity == BLITZ_INVALID_INDEX || !transform_dirty[entity] ||
+      depth > BLITZ_MAX_ENTITIES) {
+    return;
+  }
+  if (world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM) {
+    RelativeTransform relative = world.relative_transforms[entity];
+    resolve_transform_entity(relative.parent, depth + 1u);
+    if (relative.parent != BLITZ_INVALID_INDEX &&
+        world.masks[relative.parent] != 0u) {
+      world.positions[entity].x =
+          world.positions[relative.parent].x + relative.offset_x;
+      world.positions[entity].y =
+          world.positions[relative.parent].y + relative.offset_y;
+    }
+  }
+  transform_dirty[entity] = 0u;
+}
+
+static void system_resolve_relative_transforms(void) {
+  if (transform_dirty_count == 0u) {
+    return;
+  }
+  u32 count = transform_dirty_count;
+  for (u32 i = 0u; i < count; i += 1u) {
+    resolve_transform_entity(transform_dirty_entities[i], 0u);
+  }
+  transform_dirty_count = 0u;
+}
+
+static void world_sync_for_read(void) {
+  system_resolve_relative_transforms();
+}
+
+static void world_update_for_frame(void) {
+  system_resolve_relative_transforms();
+  extract_static_shapes();
+  extract_dynamic();
+}
+
 static void history_reset_internal(void) {
   history_transaction_active = 0u;
 }
@@ -449,6 +671,13 @@ static u32 ecs_create_entity(void) {
   world.selected[entity] = 0u;
   world.masks[entity] = 0u;
   world.object_ids[entity] = new_object_id();
+  world.first_child[entity] = BLITZ_INVALID_INDEX;
+  world.next_sibling[entity] = BLITZ_INVALID_INDEX;
+  world.prev_sibling[entity] = BLITZ_INVALID_INDEX;
+  world.relative_transforms[entity].parent = BLITZ_INVALID_INDEX;
+  world.relative_transforms[entity].offset_x = 0.0f;
+  world.relative_transforms[entity].offset_y = 0.0f;
+  transform_dirty[entity] = 0u;
   live_count += 1u;
   return entity;
 }
@@ -460,6 +689,24 @@ static void ecs_set_position(u32 entity, float x, float y) {
   world.positions[entity].x = x;
   world.positions[entity].y = y;
   world.masks[entity] |= BLITZ_COMPONENT_POSITION;
+  mark_transform_subtree_dirty(entity);
+}
+
+static void ecs_move_absolute(u32 entity, float x, float y) {
+  if (entity == BLITZ_INVALID_INDEX) {
+    return;
+  }
+  world.positions[entity].x = x;
+  world.positions[entity].y = y;
+  if (world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM) {
+    RelativeTransform *relative = &world.relative_transforms[entity];
+    if (relative->parent != BLITZ_INVALID_INDEX &&
+        world.masks[relative->parent] != 0u) {
+      relative->offset_x = x - world.positions[relative->parent].x;
+      relative->offset_y = y - world.positions[relative->parent].y;
+    }
+  }
+  mark_transform_subtree_dirty(entity);
 }
 
 static void ecs_set_size(u32 entity, float width, float height) {
@@ -616,6 +863,82 @@ static void marquee_apply_live(void) {
   selected_count = count;
 }
 
+static void append_draw_order_hierarchy(u32 entity, u32 *output) {
+  if (entity == BLITZ_INVALID_INDEX || world.masks[entity] == 0u ||
+      draw_order_seen[entity]) {
+    return;
+  }
+  draw_order_seen[entity] = 1u;
+  world.draw_order_scratch[*output] = entity;
+  *output += 1u;
+
+  for (u32 child = draw_order_child_head[entity];
+       child != BLITZ_INVALID_INDEX; child = draw_order_next_child[child]) {
+    append_draw_order_hierarchy(child, output);
+  }
+}
+
+static void normalize_draw_order_hierarchy(void) {
+  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
+    u32 entity = world.draw_order[i];
+    draw_order_seen[entity] = 0u;
+    draw_order_child_head[entity] = BLITZ_INVALID_INDEX;
+    draw_order_child_tail[entity] = BLITZ_INVALID_INDEX;
+    draw_order_next_child[entity] = BLITZ_INVALID_INDEX;
+  }
+
+  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
+    u32 entity = world.draw_order[i];
+    if (!(world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM)) {
+      continue;
+    }
+    u32 parent = world.relative_transforms[entity].parent;
+    if (parent == BLITZ_INVALID_INDEX || world.masks[parent] == 0u) {
+      continue;
+    }
+    if (draw_order_child_tail[parent] == BLITZ_INVALID_INDEX) {
+      draw_order_child_head[parent] = entity;
+    } else {
+      draw_order_next_child[draw_order_child_tail[parent]] = entity;
+    }
+    draw_order_child_tail[parent] = entity;
+  }
+
+  u32 output = 0u;
+  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
+    u32 entity = world.draw_order[i];
+    if ((world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM) &&
+        world.relative_transforms[entity].parent != BLITZ_INVALID_INDEX &&
+        world.masks[world.relative_transforms[entity].parent] != 0u) {
+      continue;
+    }
+    append_draw_order_hierarchy(entity, &output);
+  }
+  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
+    append_draw_order_hierarchy(world.draw_order[i], &output);
+  }
+  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
+    world.draw_order[i] = world.draw_order_scratch[i];
+  }
+}
+
+static void request_draw_order_normalize(void) {
+  if (draw_order_normalization_deferred) {
+    draw_order_normalization_pending = 1u;
+    return;
+  }
+  normalize_draw_order_hierarchy();
+}
+
+static void flush_draw_order_normalize(void) {
+  if (draw_order_normalization_deferred ||
+      !draw_order_normalization_pending) {
+    return;
+  }
+  draw_order_normalization_pending = 0u;
+  normalize_draw_order_hierarchy();
+}
+
 static void reorder_selection(u32 selected_first) {
   u32 output = 0u;
   for (u32 pass = 0u; pass < 2u; pass += 1u) {
@@ -631,6 +954,7 @@ static void reorder_selection(u32 selected_first) {
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
     world.draw_order[i] = world.draw_order_scratch[i];
   }
+  request_draw_order_normalize();
   mark_render_list_dirty();
 }
 
@@ -703,6 +1027,42 @@ static void push_selection_draw(u32 entity, u32 order) {
   dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_RECT;
   dyn_commands[dyn_command_count].shape_index = dyn_rect_count;
   dyn_commands[dyn_command_count].entity = BLITZ_INVALID_INDEX;
+  dyn_commands[dyn_command_count]._pad0 = order;
+  dyn_rect_count += 1u;
+  dyn_command_count += 1u;
+}
+
+static void push_container_hover_draw(u32 entity, u32 order) {
+  if (entity == BLITZ_INVALID_INDEX ||
+      dyn_command_count >= BLITZ_MAX_DYN_COMMANDS ||
+      dyn_rect_count >= BLITZ_MAX_DYN_RECTS) {
+    return;
+  }
+
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  float inset = 5.0f / uniforms.style[0];
+  RectDraw *draw = &dyn_rects[dyn_rect_count];
+  draw->rect[0] = position.x - inset;
+  draw->rect[1] = position.y - inset;
+  draw->rect[2] = size.x + inset * 2.0f;
+  draw->rect[3] = size.y + inset * 2.0f;
+  draw->fill_color[0] = 0.11f;
+  draw->fill_color[1] = 0.72f;
+  draw->fill_color[2] = 0.61f;
+  draw->fill_color[3] = 0.08f;
+  draw->stroke_color[0] = 0.11f;
+  draw->stroke_color[1] = 0.72f;
+  draw->stroke_color[2] = 0.61f;
+  draw->stroke_color[3] = 0.95f;
+  draw->stroke_width_pad[0] = 2.0f / uniforms.style[0];
+  draw->stroke_width_pad[1] = 0.0f;
+  draw->stroke_width_pad[2] = 0.0f;
+  draw->stroke_width_pad[3] = 0.0f;
+
+  dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_RECT;
+  dyn_commands[dyn_command_count].shape_index = dyn_rect_count;
+  dyn_commands[dyn_command_count].entity = entity;
   dyn_commands[dyn_command_count]._pad0 = order;
   dyn_rect_count += 1u;
   dyn_command_count += 1u;
@@ -1202,7 +1562,7 @@ static void extract_static_shapes(void) {
       continue;
     }
     u32 order = order_index;
-    if (drag_active && world.selected[entity]) {
+    if (drag_active && entity_is_dragged(entity)) {
       order |= BLITZ_DRAG_FLAG;
     }
     if (world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW) {
@@ -1253,15 +1613,31 @@ static void extract_dynamic(void) {
     if (entity == hidden_text_entity) {
       continue;
     }
-    if (text_visible_in_view(entity, scale, view_min_x, view_min_y, view_max_x,
-                             view_max_y)) {
+    float cull_min_x = view_min_x;
+    float cull_min_y = view_min_y;
+    float cull_max_x = view_max_x;
+    float cull_max_y = view_max_y;
+    u32 dragged = drag_active && entity_is_dragged(entity);
+    if (dragged) {
+      cull_min_x -= drag_offset.x;
+      cull_min_y -= drag_offset.y;
+      cull_max_x -= drag_offset.x;
+      cull_max_y -= drag_offset.y;
+    }
+    if (text_visible_in_view(entity, scale, cull_min_x, cull_min_y, cull_max_x,
+                             cull_max_y)) {
       visible_text_shape_count += 1u;
       u32 order = order_index;
-      if (drag_active && world.selected[entity]) {
+      if (dragged) {
         order |= BLITZ_DRAG_FLAG;
       }
       push_text_draws(entity, order);
     }
+  }
+
+  if (drag_active && drag_hover_container != BLITZ_INVALID_INDEX) {
+    push_container_hover_draw(drag_hover_container,
+                              world.draw_order_count + 2u);
   }
 
   u32 overlay_order = world.draw_order_count + 1u;
@@ -1483,8 +1859,7 @@ static void resize_entity_to(float world_x, float world_y) {
     next_height = world_y > anchor_y + min_size ? world_y - anchor_y : min_size;
   }
 
-  world.positions[resize_entity].x = next_x;
-  world.positions[resize_entity].y = next_y;
+  ecs_move_absolute(resize_entity, next_x, next_y);
   if (world.masks[resize_entity] & BLITZ_COMPONENT_TEXT_VIEW) {
     resize_text_entity_to_width(resize_entity, next_width);
   } else {
@@ -1518,6 +1893,59 @@ static u32 hit_test_entity(float world_x, float world_y) {
     }
   }
   return BLITZ_INVALID_INDEX;
+}
+
+static u32 hit_test_container(float world_x, float world_y,
+                              u32 excluded_root) {
+  for (u32 i = world.draw_order_count; i > 0u; i -= 1u) {
+    u32 entity = world.draw_order[i - 1u];
+    if (!(world.masks[entity] & BLITZ_COMPONENT_CONTAINER) ||
+        world.selected[entity] || entity == excluded_root ||
+        (excluded_root != BLITZ_INVALID_INDEX &&
+         transform_is_descendant(excluded_root, entity))) {
+      continue;
+    }
+    u32 hit = 0u;
+    if (world.masks[entity] & BLITZ_COMPONENT_OVAL_VIEW) {
+      hit = (u32)point_in_oval(world_x, world_y, entity);
+    } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
+      hit = (u32)point_in_triangle(world_x, world_y, entity);
+    } else {
+      hit = (u32)point_in_rect(world_x, world_y, entity);
+    }
+    if (hit) {
+      return entity;
+    }
+  }
+  return BLITZ_INVALID_INDEX;
+}
+
+static u32 drag_hover_container_target(void) {
+  if (drag_top_level_count != 1u) {
+    return BLITZ_INVALID_INDEX;
+  }
+  u32 found = BLITZ_INVALID_INDEX;
+  u32 saw_top_level = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity] || entity_has_selected_ancestor(entity)) {
+      continue;
+    }
+    saw_top_level = 1u;
+    float next_x = world.positions[entity].x + drag_offset.x;
+    float next_y = world.positions[entity].y + drag_offset.y;
+    float center_x = next_x + world.sizes[entity].x * 0.5f;
+    float center_y = next_y + world.sizes[entity].y * 0.5f;
+    u32 target = hit_test_container(center_x, center_y, entity);
+    if (target == BLITZ_INVALID_INDEX) {
+      return BLITZ_INVALID_INDEX;
+    }
+    if (found == BLITZ_INVALID_INDEX) {
+      found = target;
+    } else if (found != target) {
+      return BLITZ_INVALID_INDEX;
+    }
+  }
+  return saw_top_level ? found : BLITZ_INVALID_INDEX;
 }
 
 static u32 create_base_rect(float x, float y, float width, float height,
@@ -1609,19 +2037,36 @@ static u32 create_base_text(const char *text, float x, float top,
 // constructors used by user and MCP-created content.
 static float slide_origin_x = 0.0f;
 static float slide_origin_y = 0.0f;
+static u32 slide_container_entity = BLITZ_INVALID_INDEX;
+
+static void attach_slide_child(u32 entity) {
+  if (entity == BLITZ_INVALID_INDEX ||
+      slide_container_entity == BLITZ_INVALID_INDEX ||
+      entity == slide_container_entity) {
+    return;
+  }
+  attach_relative_transform(
+      entity, slide_container_entity,
+      world.positions[entity].x - world.positions[slide_container_entity].x,
+      world.positions[entity].y - world.positions[slide_container_entity].y);
+}
 
 static u32 create_slide_rect(float x, float y, float width, float height,
                              Color fill, Color stroke, float stroke_width) {
-  return create_base_rect(slide_origin_x + x, slide_origin_y + y, width,
-                          height, fill, stroke, stroke_width);
+  u32 entity = create_base_rect(slide_origin_x + x, slide_origin_y + y, width,
+                                height, fill, stroke, stroke_width);
+  attach_slide_child(entity);
+  return entity;
 }
 
 static u32 create_slide_text(const char *text, float x, float baseline_y,
                              float font_size, Color color) {
   float top = baseline_y - BLITZ_FONT_ASCENDER * font_size;
-  return create_base_text(text, slide_origin_x + x, slide_origin_y + top,
-                          font_size, color, 0.0f, BLITZ_FONT_LINE_HEIGHT, 0u,
-                          0u);
+  u32 entity = create_base_text(text, slide_origin_x + x, slide_origin_y + top,
+                                font_size, color, 0.0f,
+                                BLITZ_FONT_LINE_HEIGHT, 0u, 0u);
+  attach_slide_child(entity);
+  return entity;
 }
 
 static u32 create_user_rect(float x, float y) {
@@ -1676,8 +2121,13 @@ static const char *copy_text_input(u32 text_length) {
 static void create_demo_world(void) {
   Color transparent = {0.0f, 0.0f, 0.0f, 0.0f};
 
-  create_slide_rect(-560.0f, -315.0f, 1120.0f, 630.0f,
-                    (Color){0.965f, 0.972f, 0.984f, 1.0f}, transparent, 0.0f);
+  slide_container_entity = BLITZ_INVALID_INDEX;
+  draw_order_normalization_deferred += 1u;
+  u32 slide = create_slide_rect(-560.0f, -315.0f, 1120.0f, 630.0f,
+                                (Color){0.965f, 0.972f, 0.984f, 1.0f},
+                                transparent, 0.0f);
+  set_entity_container(slide, 1u);
+  slide_container_entity = slide;
   create_slide_rect(-560.0f, -315.0f, 300.0f, 630.0f,
                     (Color){0.075f, 0.095f, 0.13f, 1.0f}, transparent, 0.0f);
   create_slide_rect(-560.0f, -315.0f, 300.0f, 9.0f,
@@ -1761,6 +2211,9 @@ static void create_demo_world(void) {
                     (Color){0.19f, 0.22f, 0.27f, 1.0f});
   create_slide_text("Interaction", -174.0f, 284.0f, 14.0f,
                     (Color){0.19f, 0.22f, 0.27f, 1.0f});
+  slide_container_entity = BLITZ_INVALID_INDEX;
+  draw_order_normalization_deferred -= 1u;
+  flush_draw_order_normalize();
 }
 
 EXPORT("blitz_init")
@@ -1783,12 +2236,18 @@ void blitz_init(void) {
   dynamic_dirty = 1u;
   dragging_selection = 0u;
   drag_active = 0u;
+  drag_hover_container = BLITZ_INVALID_INDEX;
+  drag_top_level_count = 0u;
   drag_offset.x = 0.0f;
   drag_offset.y = 0.0f;
   resize_active = 0u;
   resize_entity = BLITZ_INVALID_INDEX;
   resize_handle = 0u;
   hidden_text_entity = BLITZ_INVALID_INDEX;
+  transform_dirty_count = 0u;
+  draw_order_normalization_deferred = 0u;
+  draw_order_normalization_pending = 0u;
+  slide_container_entity = BLITZ_INVALID_INDEX;
   resize_start_position.x = 0.0f;
   resize_start_position.y = 0.0f;
   resize_start_size.x = 0.0f;
@@ -1838,8 +2297,7 @@ void blitz_init(void) {
   uniforms.interaction[2] = 0.0f;
   uniforms.interaction[3] = 0.0f;
 
-  extract_static_shapes();
-  extract_dynamic();
+  world_update_for_frame();
 }
 
 EXPORT("blitz_set_actor_id")
@@ -1902,6 +2360,7 @@ void blitz_zoom_at(float screen_x, float screen_y, float zoom_delta) {
 
 EXPORT("blitz_pointer_down")
 u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
+  world_sync_for_read();
   float world_x = 0.0f;
   float world_y = 0.0f;
   screen_to_world(screen_x, screen_y, &world_x, &world_y);
@@ -1917,6 +2376,7 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
     resize_start_position = world.positions[resize_target];
     resize_start_size = world.sizes[resize_target];
     dragging_selection = 0u;
+    drag_top_level_count = 0u;
     marquee_active = 0u;
     return 3u + handle;
   }
@@ -1930,6 +2390,8 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
     }
     dragging_selection = world.selected[entity];
     if (dragging_selection) {
+      drag_top_level_count = selected_top_level_count_capped(
+          BLITZ_CONTAINER_RETARGET_SELECTION_LIMIT + 1u);
       history_begin();
       for (u32 selected = 0u; selected < world.entity_count; selected += 1u) {
         if (world.selected[selected]) {
@@ -1943,6 +2405,7 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
   }
 
   dragging_selection = 0u;
+  drag_top_level_count = 0u;
   if (!additive) {
     clear_selection();
   }
@@ -1959,6 +2422,7 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
 
 EXPORT("blitz_hit_test")
 u32 blitz_hit_test(float screen_x, float screen_y) {
+  world_sync_for_read();
   float world_x = 0.0f;
   float world_y = 0.0f;
   screen_to_world(screen_x, screen_y, &world_x, &world_y);
@@ -1967,6 +2431,7 @@ u32 blitz_hit_test(float screen_x, float screen_y) {
 
 EXPORT("blitz_resize_mode_at")
 u32 blitz_resize_mode_at(float screen_x, float screen_y) {
+  world_sync_for_read();
   float world_x = 0.0f;
   float world_y = 0.0f;
   screen_to_world(screen_x, screen_y, &world_x, &world_y);
@@ -1977,6 +2442,7 @@ u32 blitz_resize_mode_at(float screen_x, float screen_y) {
 
 EXPORT("blitz_pointer_move")
 void blitz_pointer_move(float screen_x, float screen_y) {
+  world_sync_for_read();
   float world_x = 0.0f;
   float world_y = 0.0f;
   screen_to_world(screen_x, screen_y, &world_x, &world_y);
@@ -2009,10 +2475,16 @@ void blitz_pointer_move(float screen_x, float screen_y) {
   drag_last_world.y = world_y;
   uniforms.interaction[0] = drag_offset.x;
   uniforms.interaction[1] = drag_offset.y;
+  u32 next_hover_container = drag_hover_container_target();
+  if (drag_hover_container != next_hover_container) {
+    drag_hover_container = next_hover_container;
+    mark_dynamic_dirty();
+  }
 }
 
 EXPORT("blitz_pointer_up")
 void blitz_pointer_up(void) {
+  world_sync_for_read();
   if (resize_active) {
     resize_active = 0u;
     resize_entity = BLITZ_INVALID_INDEX;
@@ -2021,23 +2493,43 @@ void blitz_pointer_up(void) {
     return;
   }
   if (drag_active) {
+    u32 retarget_containers =
+        drag_top_level_count <= BLITZ_CONTAINER_RETARGET_SELECTION_LIMIT;
     for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
-      if (world.selected[entity]) {
-        world.positions[entity].x += drag_offset.x;
-        world.positions[entity].y += drag_offset.y;
+      if (world.selected[entity] && !entity_has_selected_ancestor(entity)) {
+        float next_x = world.positions[entity].x + drag_offset.x;
+        float next_y = world.positions[entity].y + drag_offset.y;
+        ecs_move_absolute(entity, next_x, next_y);
+        if (retarget_containers) {
+          float center_x = next_x + world.sizes[entity].x * 0.5f;
+          float center_y = next_y + world.sizes[entity].y * 0.5f;
+          u32 container = hit_test_container(center_x, center_y, entity);
+          if (container != BLITZ_INVALID_INDEX) {
+            attach_relative_transform(entity, container,
+                                      next_x - world.positions[container].x,
+                                      next_y - world.positions[container].y);
+          } else {
+            detach_from_parent(entity);
+            mark_transform_subtree_dirty(entity);
+          }
+        }
       }
     }
     drag_offset.x = 0.0f;
     drag_offset.y = 0.0f;
+    drag_hover_container = BLITZ_INVALID_INDEX;
     uniforms.interaction[0] = 0.0f;
     uniforms.interaction[1] = 0.0f;
     drag_active = 0u;
     dragging_selection = 0u;
+    drag_top_level_count = 0u;
     mark_render_list_dirty();
     history_commit();
     return;
   }
   dragging_selection = 0u;
+  drag_hover_container = BLITZ_INVALID_INDEX;
+  drag_top_level_count = 0u;
   if (!marquee_active) {
     history_cancel();
     return;
@@ -2138,11 +2630,17 @@ static void clear_scene_state(void) {
   selected_count = 0u;
   dragging_selection = 0u;
   drag_active = 0u;
+  drag_hover_container = BLITZ_INVALID_INDEX;
+  drag_top_level_count = 0u;
   drag_offset.x = 0.0f;
   drag_offset.y = 0.0f;
   resize_active = 0u;
   resize_entity = BLITZ_INVALID_INDEX;
   hidden_text_entity = BLITZ_INVALID_INDEX;
+  transform_dirty_count = 0u;
+  draw_order_normalization_deferred = 0u;
+  draw_order_normalization_pending = 0u;
+  slide_container_entity = BLITZ_INVALID_INDEX;
   uniforms.interaction[0] = 0.0f;
   uniforms.interaction[1] = 0.0f;
   marquee_active = 0u;
@@ -2200,6 +2698,111 @@ u32 blitz_select_object(u32 actor_hi, u32 actor_lo, u32 sequence_hi,
     mark_dynamic_dirty();
   }
   return 1u;
+}
+
+EXPORT("blitz_set_relative_transform")
+u32 blitz_set_relative_transform(u32 child_actor_hi, u32 child_actor_lo,
+                                 u32 child_sequence_hi,
+                                 u32 child_sequence_lo, u32 parent_actor_hi,
+                                 u32 parent_actor_lo,
+                                 u32 parent_sequence_hi,
+                                 u32 parent_sequence_lo, float offset_x,
+                                 float offset_y) {
+  world_sync_for_read();
+  u32 child = entity_for_object_id((ObjectId){
+      child_actor_hi, child_actor_lo, child_sequence_hi, child_sequence_lo});
+  u32 parent = entity_for_object_id((ObjectId){
+      parent_actor_hi, parent_actor_lo, parent_sequence_hi,
+      parent_sequence_lo});
+  if (child == BLITZ_INVALID_INDEX || parent == BLITZ_INVALID_INDEX) {
+    return 0u;
+  }
+  history_record_before(child);
+  u32 changed = attach_relative_transform(child, parent, offset_x, offset_y);
+  if (changed) {
+    history_commit();
+  } else {
+    history_cancel();
+  }
+  return changed;
+}
+
+EXPORT("blitz_clear_relative_transform")
+u32 blitz_clear_relative_transform(u32 actor_hi, u32 actor_lo,
+                                   u32 sequence_hi, u32 sequence_lo) {
+  world_sync_for_read();
+  u32 entity =
+      entity_for_object_id((ObjectId){actor_hi, actor_lo, sequence_hi,
+                                      sequence_lo});
+  if (entity == BLITZ_INVALID_INDEX ||
+      !(world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM)) {
+    return 0u;
+  }
+  history_record_before(entity);
+  detach_from_parent(entity);
+  mark_render_list_dirty();
+  history_commit();
+  return 1u;
+}
+
+EXPORT("blitz_set_container")
+u32 blitz_set_container(u32 actor_hi, u32 actor_lo, u32 sequence_hi,
+                        u32 sequence_lo, u32 enabled) {
+  world_sync_for_read();
+  u32 entity =
+      entity_for_object_id((ObjectId){actor_hi, actor_lo, sequence_hi,
+                                      sequence_lo});
+  if (entity == BLITZ_INVALID_INDEX) {
+    return 0u;
+  }
+  history_record_before(entity);
+  u32 changed = set_entity_container(entity, enabled);
+  if (changed) {
+    history_commit();
+  } else {
+    history_cancel();
+  }
+  return changed;
+}
+
+EXPORT("blitz_set_selected_container")
+u32 blitz_set_selected_container(u32 enabled) {
+  world_sync_for_read();
+  if (selected_count == 0u) {
+    return 0u;
+  }
+  history_record_selected_before();
+  u32 changed = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (!world.selected[entity]) {
+      continue;
+    }
+    changed |= set_entity_container(entity, enabled);
+  }
+  if (changed) {
+    history_commit();
+  } else {
+    history_cancel();
+  }
+  return changed;
+}
+
+EXPORT("blitz_selected_container_state")
+u32 blitz_selected_container_state(void) {
+  if (selected_count == 0u) {
+    return 0u;
+  }
+  u32 container_count = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.selected[entity] &&
+        (world.masks[entity] & BLITZ_COMPONENT_CONTAINER)) {
+      container_count += 1u;
+    }
+  }
+  if (container_count == 0u) {
+    return 1u;
+  }
+  return container_count == selected_count ? 2u : 3u;
 }
 
 EXPORT("blitz_create_rect")
@@ -2338,6 +2941,7 @@ u32 blitz_update_object(
     float font_size, float text_r, float text_g, float text_b, float text_a,
     u32 text_length, float max_width, float line_height, u32 max_lines,
     u32 align) {
+  world_sync_for_read();
   ObjectId id = {actor_hi, actor_lo, sequence_hi, sequence_lo};
   u32 entity = entity_for_object_id(id);
   if (entity == BLITZ_INVALID_INDEX) {
@@ -2380,8 +2984,8 @@ u32 blitz_update_object(
       size.y = width;
     }
     world.sizes[entity] = size;
-    world.positions[entity].x = center_x - size.x * 0.5f;
-    world.positions[entity].y = center_y - size.y * 0.5f;
+    ecs_move_absolute(entity, center_x - size.x * 0.5f,
+                      center_y - size.y * 0.5f);
   } else if (kind == BLITZ_SHAPE_TEXT) {
     TextView *view = &world.text_views[entity];
     float padding = view->origin_x;
@@ -2413,8 +3017,13 @@ u32 blitz_update_object(
     view->max_lines = next_max_lines;
     view->align = next_align;
     view->baseline_offset = padding + BLITZ_FONT_ASCENDER * next_font_size;
-    if (flags & BLITZ_UPDATE_X) world.positions[entity].x = x - padding;
-    if (flags & BLITZ_UPDATE_Y) world.positions[entity].y = y - padding;
+    if (flags & (BLITZ_UPDATE_X | BLITZ_UPDATE_Y)) {
+      float next_x = flags & BLITZ_UPDATE_X ? x - padding
+                                            : world.positions[entity].x;
+      float next_y = flags & BLITZ_UPDATE_Y ? y - padding
+                                            : world.positions[entity].y;
+      ecs_move_absolute(entity, next_x, next_y);
+    }
     world.sizes[entity].x =
         (next_max_width > 0.0f ? next_max_width : text_layout_width) +
         padding * 2.0f;
@@ -2423,8 +3032,11 @@ u32 blitz_update_object(
       view->color = (Color){text_r, text_g, text_b, text_a};
     }
   } else {
-    if (flags & BLITZ_UPDATE_X) world.positions[entity].x = x;
-    if (flags & BLITZ_UPDATE_Y) world.positions[entity].y = y;
+    if (flags & (BLITZ_UPDATE_X | BLITZ_UPDATE_Y)) {
+      float next_x = flags & BLITZ_UPDATE_X ? x : world.positions[entity].x;
+      float next_y = flags & BLITZ_UPDATE_Y ? y : world.positions[entity].y;
+      ecs_move_absolute(entity, next_x, next_y);
+    }
     if (flags & BLITZ_UPDATE_WIDTH) world.sizes[entity].x = width;
     if (flags & BLITZ_UPDATE_HEIGHT) world.sizes[entity].y = height;
   }
@@ -2461,6 +3073,7 @@ u32 blitz_update_object(
 EXPORT("blitz_query_scene")
 u32 blitz_query_scene(float min_x, float min_y, float max_x, float max_y,
                       u32 limit) {
+  world_sync_for_read();
   scene_query_count = 0u;
   scene_query_total = 0u;
   if (limit > BLITZ_MAX_SCENE_QUERY_ITEMS) {
@@ -2598,6 +3211,7 @@ void blitz_capture_start_viewpoint(void) {
 
 EXPORT("blitz_scene_serialize")
 u32 blitz_scene_serialize(void) {
+  world_sync_for_read();
   u32 offset = BLITZ_SCENE_FILE_HEADER_BYTES;
   u32 object_count = 0u;
 
@@ -2881,6 +3495,7 @@ void blitz_stress_test(void) {
   const float pitch_y = 750.0f;
   float base_x = -0.5f * (float)(columns - 1u) * pitch_x;
   float base_y = -0.5f * (float)(rows - 1u) * pitch_y;
+  draw_order_normalization_deferred += 1u;
   for (u32 row = 0u; row < rows; row += 1u) {
     for (u32 col = 0u; col < columns; col += 1u) {
       slide_origin_x = base_x + (float)col * pitch_x;
@@ -2888,6 +3503,8 @@ void blitz_stress_test(void) {
       create_demo_world();
     }
   }
+  draw_order_normalization_deferred -= 1u;
+  flush_draw_order_normalize();
   slide_origin_x = 0.0f;
   slide_origin_y = 0.0f;
   mark_render_list_dirty();
@@ -2903,6 +3520,7 @@ void blitz_delete_selected(void) {
   for (u32 index = 0u; index < world.draw_order_count; index += 1u) {
     u32 entity = world.draw_order[index];
     if (world.selected[entity]) {
+      cleanup_entity_hierarchy(entity);
       world.masks[entity] = 0u;
       world.selected[entity] = 0u;
       free_slots[free_count] = entity;
@@ -2917,6 +3535,7 @@ void blitz_delete_selected(void) {
   selected_count = 0u;
   dragging_selection = 0u;
   drag_active = 0u;
+  drag_top_level_count = 0u;
   resize_active = 0u;
   resize_entity = BLITZ_INVALID_INDEX;
   mark_render_list_dirty();
@@ -2929,6 +3548,7 @@ u32 blitz_has_selection(void) {
 
 EXPORT("blitz_selected_debug_ptr")
 u32 blitz_selected_debug_ptr(void) {
+  world_sync_for_read();
   selected_debug_mask = 0u;
   if (selected_count != 1u) {
     return 0u;
@@ -3413,7 +4033,7 @@ u32 blitz_uniform_f32_count(void) {
 
 EXPORT("blitz_shape_command_ptr")
 u32 blitz_shape_command_ptr(void) {
-  extract_static_shapes();
+  world_update_for_frame();
   return (u32)&shape_commands[0];
 }
 
@@ -3434,7 +4054,7 @@ u32 blitz_shape_command_version(void) {
 
 EXPORT("blitz_rect_draw_ptr")
 u32 blitz_rect_draw_ptr(void) {
-  extract_static_shapes();
+  world_update_for_frame();
   return (u32)&rect_draws[0];
 }
 
@@ -3450,7 +4070,7 @@ u32 blitz_rect_draw_count(void) {
 
 EXPORT("blitz_triangle_draw_ptr")
 u32 blitz_triangle_draw_ptr(void) {
-  extract_static_shapes();
+  world_update_for_frame();
   return (u32)&triangle_draws[0];
 }
 
@@ -3466,7 +4086,7 @@ u32 blitz_triangle_draw_count(void) {
 
 EXPORT("blitz_oval_draw_ptr")
 u32 blitz_oval_draw_ptr(void) {
-  extract_static_shapes();
+  world_update_for_frame();
   return (u32)&oval_draws[0];
 }
 
@@ -3482,7 +4102,7 @@ u32 blitz_oval_draw_count(void) {
 
 EXPORT("blitz_text_draw_ptr")
 u32 blitz_text_draw_ptr(void) {
-  extract_dynamic();
+  world_update_for_frame();
   return (u32)&text_draws[0];
 }
 
@@ -3498,7 +4118,7 @@ u32 blitz_text_draw_count(void) {
 
 EXPORT("blitz_visible_text_shape_count")
 u32 blitz_visible_text_shape_count(void) {
-  extract_dynamic();
+  world_update_for_frame();
   return visible_text_shape_count;
 }
 
@@ -3509,7 +4129,7 @@ u32 blitz_render_max_text_draws(void) {
 
 EXPORT("blitz_dyn_command_ptr")
 u32 blitz_dyn_command_ptr(void) {
-  extract_dynamic();
+  world_update_for_frame();
   return (u32)&dyn_commands[0];
 }
 
@@ -3525,7 +4145,7 @@ u32 blitz_dyn_version(void) {
 
 EXPORT("blitz_dyn_rect_ptr")
 u32 blitz_dyn_rect_ptr(void) {
-  extract_dynamic();
+  world_update_for_frame();
   return (u32)&dyn_rects[0];
 }
 
@@ -3562,7 +4182,8 @@ EXPORT("blitz_wasm_live_bytes")
 u32 blitz_wasm_live_bytes(void) {
   u32 per_entity = 6u * (u32)sizeof(u32) + 2u * (u32)sizeof(Vec2) +
                    (u32)sizeof(RectView) + (u32)sizeof(TriangleView) +
-                   (u32)sizeof(OvalView) + (u32)sizeof(TextView);
+                   (u32)sizeof(OvalView) + (u32)sizeof(TextView) +
+                   (u32)sizeof(RelativeTransform) + 7u * (u32)sizeof(u32);
   u32 entity_bytes = world.entity_count * per_entity;
   u32 draw_bytes = shape_command_count * (u32)sizeof(ShapeCommand) +
                    rect_draw_count * (u32)sizeof(RectDraw) +

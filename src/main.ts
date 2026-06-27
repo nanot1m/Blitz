@@ -151,6 +151,8 @@ type BlitzExports = {
   blitz_stress_test(): void;
   blitz_clear_selection(): void;
   blitz_select_object(actorHi: number, actorLo: number, sequenceHi: number, sequenceLo: number, additive: number): number;
+  blitz_set_selected_container(enabled: number): number;
+  blitz_selected_container_state(): number;
   blitz_delete_selected(): void;
   blitz_has_selection(): number;
   blitz_selected_debug_ptr(): number;
@@ -235,6 +237,7 @@ const {
   debuggerIsland,
   debuggerEntityId,
   debuggerComponents,
+  selectedContainerInput,
   selectedGeometryControls,
   selectedFillInput,
   selectedFillOpacityInput,
@@ -703,6 +706,10 @@ async function boot() {
     );
     const geometric = (kind & 1) !== 0;
     const text = (kind & 2) !== 0;
+    const containerState = wasm.blitz_selected_container_state();
+    selectedContainerInput.checked = containerState === 2;
+    selectedContainerInput.indeterminate = containerState === 3;
+    selectedContainerInput.disabled = containerState === 0;
     selectedGeometryControls.hidden = !geometric;
     selectedTextControls.hidden = !text;
     selectedMixedDivider.hidden = !(geometric && text);
@@ -818,7 +825,12 @@ async function boot() {
     debuggerComponents.append(
       debugComponent("Capabilities", {
         selectable: (mask & 64) !== 0 ? "yes" : "no",
-        resizable: (mask & 128) !== 0 ? "yes" : "no",
+        resizableX: (mask & 128) !== 0 ? "yes" : "no",
+        resizableY: (mask & 256) !== 0 ? "yes" : "no",
+        geometricStyle: (mask & (4 | 8 | 16)) !== 0 ? "yes" : "no",
+        textStyle: (mask & 32) !== 0 ? "yes" : "no",
+        container: (mask & 1024) !== 0 ? "yes" : "no",
+        relativeTransform: (mask & 512) !== 0 ? "yes" : "no",
       }),
     );
   };
@@ -1608,6 +1620,7 @@ async function boot() {
 
   setupStyleControls(
     {
+      containerInput: selectedContainerInput,
       fillInput: selectedFillInput,
       fillOpacityInput: selectedFillOpacityInput,
       strokeInput: selectedStrokeInput,
@@ -1641,6 +1654,12 @@ async function boot() {
       },
       setStrokeWidth(width) {
         wasm.blitz_set_selected_stroke_width(width);
+        updateStyleIsland();
+      },
+      setContainer(enabled) {
+        sceneHistory.transact(() => {
+          wasm.blitz_set_selected_container(enabled ? 1 : 0);
+        });
         updateStyleIsland();
       },
       setTextColor(red, green, blue) {

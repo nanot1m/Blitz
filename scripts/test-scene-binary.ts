@@ -16,6 +16,92 @@ const readObjectId = (offset: number): number[] => {
 
 const objectIdEquals = (left: number[], right: number[]) =>
   left.every((word, index) => word === right[index]);
+
+const readLastCreatedObjectId = () => readObjectId(wasm.blitz_last_created_object_id_ptr());
+
+const querySceneItemByObjectId = (objectId: number[]) => {
+  wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 100);
+  const ptr = wasm.blitz_scene_query_ptr();
+  const itemBytes = wasm.blitz_scene_query_item_bytes();
+  const count = wasm.blitz_scene_query_count();
+  const view = new DataView(wasm.memory.buffer);
+  for (let index = 0; index < count; index += 1) {
+    const offset = ptr + index * itemBytes;
+    if (objectIdEquals(readObjectId(offset), objectId)) {
+      return {
+        order: view.getUint32(offset + 20, true),
+        x: view.getFloat32(offset + 40, true),
+        y: view.getFloat32(offset + 44, true),
+        width: view.getFloat32(offset + 48, true),
+        height: view.getFloat32(offset + 52, true),
+      };
+    }
+  }
+  throw new Error(`Object ${objectId.join(":")} was not found in the scene query.`);
+};
+
+const queriedObjectIdAt = (index: number) => {
+  const ptr = wasm.blitz_scene_query_ptr();
+  const itemBytes = wasm.blitz_scene_query_item_bytes();
+  if (index < 0 || index >= wasm.blitz_scene_query_count()) {
+    throw new Error(`Scene query index ${index} is out of range.`);
+  }
+  return readObjectId(ptr + index * itemBytes);
+};
+
+const expectNear = (actual: number, expected: number, label: string) => {
+  if (Math.abs(actual - expected) > 0.001) {
+    throw new Error(`${label}: expected ${expected}, received ${actual}.`);
+  }
+};
+
+const updateRectPosition = (objectId: number[], x: number, y: number) =>
+  wasm.blitz_update_object(
+    ...objectId,
+    0,
+    1 | 2,
+    x,
+    y,
+    1,
+    1,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    1,
+    0,
+    0,
+  );
+
+const shapeCommandForEntity = (entity: number) => {
+  const ptr = wasm.blitz_shape_command_ptr();
+  const count = wasm.blitz_shape_command_count();
+  const wordsPerCommand = wasm.blitz_shape_command_u32_count();
+  const view = new DataView(wasm.memory.buffer);
+  for (let index = 0; index < count; index += 1) {
+    const offset = ptr + index * wordsPerCommand * 4;
+    if (view.getUint32(offset + 8, true) === entity) {
+      return {
+        shapeKind: view.getUint32(offset, true),
+        order: view.getUint32(offset + 12, true),
+      };
+    }
+  }
+  throw new Error(`Shape command for entity ${entity} was not found.`);
+};
+
 if (wasm.blitz_entity_count() !== 0) {
   throw new Error("A newly initialized scene should be empty.");
 }
@@ -85,6 +171,109 @@ wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
 if (Math.abs(resizedItem.getFloat32(48, true) - 250) > 0.001) {
   throw new Error("Rectangle edge resize did not update its width.");
 }
+
+wasm.blitz_clear_scene();
+wasm.blitz_resize(1000, 1000);
+wasm.blitz_set_camera(0, 0, 1);
+wasm.blitz_create_rect(0, 0, 200, 200, 0.8, 0.8, 1, 1, 0, 0, 0, 1, 1);
+const containerId = readLastCreatedObjectId();
+if (wasm.blitz_set_container(...containerId, 1) !== 1) {
+  throw new Error("Failed to tag a rectangle as a container.");
+}
+wasm.blitz_create_rect(300, 0, 50, 50, 1, 0.8, 0.8, 1, 0, 0, 0, 1, 1);
+const childId = readLastCreatedObjectId();
+wasm.blitz_pointer_down(825, 525, 0);
+wasm.blitz_pointer_move(600, 600);
+wasm.blitz_pointer_up();
+let childItem = querySceneItemByObjectId(childId);
+expectNear(childItem.x, 75, "Dropped child x");
+expectNear(childItem.y, 75, "Dropped child y");
+if (updateRectPosition(containerId, 20, 30) !== 0) {
+  throw new Error("Failed to move a container rectangle.");
+}
+childItem = querySceneItemByObjectId(childId);
+expectNear(childItem.x, 95, "Relative child x after container move");
+expectNear(childItem.y, 105, "Relative child y after container move");
+wasm.blitz_select_object(childId[0], childId[1], childId[2], childId[3], 0);
+wasm.blitz_send_to_back();
+const containerAfterSendBack = querySceneItemByObjectId(containerId);
+childItem = querySceneItemByObjectId(childId);
+if (childItem.order <= containerAfterSendBack.order) {
+  throw new Error("A relative child was allowed to move behind its parent container.");
+}
+wasm.blitz_select_object(containerId[0], containerId[1], containerId[2], containerId[3], 0);
+wasm.blitz_pointer_down(560, 560, 0);
+wasm.blitz_pointer_move(580, 580);
+const parentDragCommand = shapeCommandForEntity(0);
+const childDragCommand = shapeCommandForEntity(1);
+if ((parentDragCommand.order & 0x80000000) === 0 || (childDragCommand.order & 0x80000000) === 0) {
+  wasm.blitz_pointer_up();
+  throw new Error("Dragging a container did not mark its child for live drag rendering.");
+}
+wasm.blitz_pointer_up();
+if (updateRectPosition(containerId, 20, 30) !== 0) {
+  throw new Error("Failed to reset a container after live drag verification.");
+}
+wasm.blitz_pointer_down(620, 630, 0);
+wasm.blitz_pointer_move(900, 900);
+wasm.blitz_pointer_up();
+childItem = querySceneItemByObjectId(childId);
+expectNear(childItem.x, 375, "Detached child x");
+expectNear(childItem.y, 375, "Detached child y");
+if (updateRectPosition(containerId, 0, 0) !== 0) {
+  throw new Error("Failed to move a detached child's former container.");
+}
+childItem = querySceneItemByObjectId(childId);
+expectNear(childItem.x, 375, "Detached child stable x");
+expectNear(childItem.y, 375, "Detached child stable y");
+
+wasm.blitz_clear_scene();
+const bulkContainerIds: number[][] = [];
+const bulkChildIds: number[][] = [];
+for (let index = 0; index < 40; index += 1) {
+  const x = index * 30;
+  wasm.blitz_create_rect(x, 0, 20, 20, 0.8, 0.8, 1, 1, 0, 0, 0, 1, 1);
+  const bulkContainerId = readLastCreatedObjectId();
+  if (wasm.blitz_set_container(...bulkContainerId, 1) !== 1) {
+    throw new Error("Failed to tag a bulk container.");
+  }
+  wasm.blitz_create_rect(x + 4, 4, 8, 8, 1, 0.8, 0.8, 1, 0, 0, 0, 1, 1);
+  const bulkChildId = readLastCreatedObjectId();
+  if (wasm.blitz_set_relative_transform(...bulkChildId, ...bulkContainerId, 4, 4) !== 1) {
+    throw new Error("Failed to attach a bulk child.");
+  }
+  bulkContainerIds.push(bulkContainerId);
+  bulkChildIds.push(bulkChildId);
+}
+wasm.blitz_select_all();
+wasm.blitz_pointer_down(510, 510, 0);
+wasm.blitz_pointer_move(530, 530);
+wasm.blitz_pointer_up();
+const firstBulkContainer = querySceneItemByObjectId(bulkContainerIds[0]);
+const firstBulkChild = querySceneItemByObjectId(bulkChildIds[0]);
+expectNear(firstBulkChild.x, firstBulkContainer.x + 4, "Bulk child kept relative x");
+expectNear(firstBulkChild.y, firstBulkContainer.y + 4, "Bulk child kept relative y");
+if (updateRectPosition(bulkContainerIds[0], firstBulkContainer.x + 10, firstBulkContainer.y + 12) !== 0) {
+  throw new Error("Failed to move a bulk container after drag.");
+}
+const movedBulkChild = querySceneItemByObjectId(bulkChildIds[0]);
+expectNear(movedBulkChild.x, firstBulkContainer.x + 14, "Bulk child follows after skipped retarget x");
+expectNear(movedBulkChild.y, firstBulkContainer.y + 16, "Bulk child follows after skipped retarget y");
+
+wasm.blitz_clear_scene();
+wasm.blitz_load_demo_template();
+wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 4);
+const demoSlideId = queriedObjectIdAt(0);
+const demoChildId = queriedObjectIdAt(1);
+const demoSlide = querySceneItemByObjectId(demoSlideId);
+const demoChild = querySceneItemByObjectId(demoChildId);
+if (updateRectPosition(demoSlideId, demoSlide.x + 25, demoSlide.y + 35) !== 0) {
+  throw new Error("Failed to move the demo slide container.");
+}
+const movedDemoChild = querySceneItemByObjectId(demoChildId);
+expectNear(movedDemoChild.x, demoChild.x + 25, "Demo child relative x");
+expectNear(movedDemoChild.y, demoChild.y + 35, "Demo child relative y");
+
 wasm.blitz_clear_scene();
 const emptyRevision = wasm.blitz_scene_revision();
 wasm.blitz_set_camera(321, -123, 1.75);

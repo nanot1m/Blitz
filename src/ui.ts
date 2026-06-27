@@ -114,6 +114,7 @@ export function createBlitzUi() {
     debuggerIsland: requireElement<HTMLElement>("#debugger-island"),
     debuggerEntityId: requireElement<HTMLElement>("#debugger-entity-id"),
     debuggerComponents: requireElement<HTMLDivElement>("#debugger-components"),
+    selectedContainerInput: requireElement<HTMLInputElement>("#selected-container"),
     selectedGeometryControls: requireElement<HTMLDivElement>("#selected-geometry-controls"),
     selectedFillInput: requireElement<HTMLInputElement>("#selected-fill"),
     selectedFillOpacityInput: requireElement<HTMLInputElement>("#selected-fill-opacity"),

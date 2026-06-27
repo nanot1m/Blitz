@@ -61,7 +61,7 @@ Keyboard shortcuts:
 - `Ctrl/Cmd+Z`: undo
 - `Ctrl/Cmd+Y` or `Ctrl/Cmd+Shift+Z`: redo
 
-Undo/redo is owned by a TypeScript history controller. WASM serializes the current binary scene state into a 128 MB arena, while JavaScript owns transactions, branching, saved-state IDs, and a bounded stack of up to 64 states or 256 MB. Applying history preserves the current viewport and restores structural scene data through the validated WASM deserializer.
+Undo/redo is owned by a TypeScript history controller. WASM serializes the current binary scene state into a demand-grown buffer (sized to the scene, up to a 128 MB ceiling), while JavaScript owns transactions, branching, saved-state IDs, and a bounded stack of up to 64 states or 256 MB. Applying history preserves the current viewport and restores structural scene data through the validated WASM deserializer.
 
 ## Local scene files
 
@@ -85,7 +85,7 @@ Selection is session-only UI state. Selecting, deselecting, or marquee-selecting
 
 WASM exposes a monotonic scene revision covering persisted changes such as geometry, text, and z-order. A gray dot appears on the Save icon while the current revision differs from the last successful save or load. Closing or reloading a page with unsaved changes triggers the browser's standard unsaved-changes confirmation. Browsers do not permit reliable asynchronous saving during page unload, so the application warns rather than attempting a silent final save.
 
-The current version uses a 128 MB WASM file buffer, enough for one million fixed-size shape records plus normal text payloads. Files include a magic number, format version, total byte count, camera header, and variable-length shape records. Invalid files are fully validated before the live scene is replaced.
+The WASM file buffer is allocated on demand and grows to fit the scene, up to a 128 MB ceiling (room for roughly one million fixed-size shape records plus text payloads). Files include a magic number, format version, total byte count, camera header, and variable-length shape records. Invalid files are fully validated before the live scene is replaced.
 
 ### Phones and tablets
 
@@ -261,25 +261,29 @@ Use `verticalAlign: "cap-middle"` with `align: "center"` for single digits, init
 
 ## Architecture
 
+### Memory
+
+Large WASM buffers are not preallocated. A free-list allocator over the module's linear memory backs every growable region — the per-entity component arrays, the render draw buffers, the scene-file buffer, the text pool, and the scene-query buffer — and each grows with scene content. An empty scene commits about 0.2 MB of linear memory; the capacities below are ceilings, not reservations. (GPU storage buffers are sized separately to the rendering ceiling and reported in the stats panel.)
+
 ### WASM ECS
 
-- Maximum entity slots: 1,000,000
+- Entity capacity: per-entity arrays grow on demand up to 1,000,000 slots
 - Components: position, size, selectable, rectangle view, triangle view, circle view, and text view
 - Draw order: one entity-order stream shared by all shape types
 - Selection: hit testing, dragging, marquee selection, deletion, and z-order changes run in C
 - Resize capability: an ECS `RESIZABLE` component enables shared corner controls for geometric shapes; text omits the component
-- Scene inspection: a bounded packed query buffer exposes up to 65,536 ECS objects per browser query
+- Scene inspection: a demand-grown packed query buffer exposes up to 65,536 ECS objects per browser query
 - File persistence: versioned `.blitz` binary serialization is owned by WASM
 - Identity: 128-bit actor/sequence object IDs are generated and owned by WASM
 - History: a bounded TypeScript snapshot stack uses WASM binary serialization and validation
-- Text input: UTF-8 strings copied into a WASM-owned text pool
+- Text input: UTF-8 strings copied into a demand-grown WASM-owned text pool
 
 ### Rendering
 
 - Static shape IR: rectangle, triangle, and circle buffers plus a unified shape-command stream
 - Dynamic IR: visible text glyphs and selection/marquee overlays
 - GPU culling: a compute pass culls the static command stream against the camera
-- Static capacity: four chunks of 250,000 shapes
+- Capacity ceiling: four cull chunks of 250,000 shapes; the WASM draw buffers grow on demand toward it
 - Upload policy: static buffers are refreshed only when their version changes
 - Text: generated from the compiled font atlas and rendered through the same ordered pipeline
 

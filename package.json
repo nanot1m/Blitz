@@ -14,7 +14,8 @@
     "preview": "vite preview --host 127.0.0.1",
     "test:benchmark": "npm run build:wasm && tsx scripts/benchmark-container-drag.ts",
     "test:mcp": "tsx scripts/test-mcp-canvas-adapter.ts && node scripts/test-mcp-bridge.mjs",
-    "test:storage": "tsx scripts/test-scene-binary.ts && tsx scripts/test-scene-history.ts",
+    "test:storage": "tsx scripts/test-scene-binary.ts && tsx scripts/test-scene-history.ts && tsx scripts/test-scene-growth.ts",
+    "test": "npm run build:wasm && npm run typecheck && npm run test:storage && tsx scripts/test-mcp-canvas-adapter.ts",
     "typecheck": "tsc && tsc -p tsconfig.mcp.json"
   },
   "devDependencies": {

@@ -1543,40 +1543,63 @@ static u32 entity_in_container(u32 entity, u32 container) {
   return 0u;
 }
 
-// Make `entity` the topmost element of `container` in z: move it just above the
-// highest-ordered member of the container's subtree (the container itself or
-// any of its descendants). Used when a shape is dropped onto a new container so
-// it sits above the container's existing children; a no-op if already highest.
+// Lift `entity` and everything nested inside it above the rest of `container`
+// in z. The dropped subtree moves together, keeping its internal order, to just
+// above the highest-ordered member of the container that is not part of the
+// subtree — so a dropped container keeps its own children above itself. No-op
+// when the subtree already sits entirely above the container's other contents.
 static void lift_entity_above_container(u32 entity, u32 container) {
-  u32 entity_index = BLITZ_INVALID_INDEX;
-  u32 top_index = BLITZ_INVALID_INDEX;
-  u32 top_member = BLITZ_INVALID_INDEX;
+  // Flag the dropped subtree: the entity plus everything nested inside it.
+  u32 lifted = 0u;
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
     u32 current = world.draw_order[i];
-    if (current == entity) {
-      entity_index = i;
-      continue;
-    }
-    if (current == container || entity_in_container(current, container)) {
-      top_index = i; // ascending scan keeps the highest-ordered member
+    u32 in_subtree =
+        (current == entity) || entity_in_container(current, entity);
+    draw_order_seen[current] = in_subtree;
+    lifted += in_subtree;
+  }
+  if (lifted == 0u) {
+    return;
+  }
+  // Highest-ordered container member that is not being lifted, plus the lowest
+  // position the lifted subtree currently occupies.
+  u32 top_index = BLITZ_INVALID_INDEX;
+  u32 top_member = BLITZ_INVALID_INDEX;
+  u32 lowest_lifted = BLITZ_INVALID_INDEX;
+  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
+    u32 current = world.draw_order[i];
+    if (draw_order_seen[current]) {
+      if (lowest_lifted == BLITZ_INVALID_INDEX) {
+        lowest_lifted = i;
+      }
+    } else if (current == container ||
+               entity_in_container(current, container)) {
+      top_index = i;
       top_member = current;
     }
   }
-  if (entity_index == BLITZ_INVALID_INDEX ||
-      top_member == BLITZ_INVALID_INDEX || entity_index > top_index) {
+  if (top_member == BLITZ_INVALID_INDEX ||
+      (lowest_lifted != BLITZ_INVALID_INDEX && lowest_lifted > top_index)) {
     return;
   }
+  // Rebuild: drop the lifted subtree out, then re-insert it (in its existing
+  // relative order) immediately above the container's topmost other member.
   u32 output = 0u;
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
     u32 current = world.draw_order[i];
-    if (current == entity) {
+    if (draw_order_seen[current]) {
       continue;
     }
     world.draw_order_scratch[output] = current;
     output += 1u;
     if (current == top_member) {
-      world.draw_order_scratch[output] = entity;
-      output += 1u;
+      for (u32 j = 0u; j < world.draw_order_count; j += 1u) {
+        u32 member = world.draw_order[j];
+        if (draw_order_seen[member]) {
+          world.draw_order_scratch[output] = member;
+          output += 1u;
+        }
+      }
     }
   }
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {

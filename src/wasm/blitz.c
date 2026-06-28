@@ -300,6 +300,13 @@ static char text_input[BLITZ_TEXT_INPUT_BYTES];
 static float path_input[BLITZ_PATH_INPUT_POINTS * 2u];
 static Vec2 path_draft_points[BLITZ_PATH_INPUT_POINTS];
 static PathView path_draft_view;
+// The in-progress pen stroke has its own tiny buffers + version so editing it
+// never re-tessellates the committed (static) segment stream.
+static PathSegment *path_draft_segments;
+static u32 path_draft_segments_cap;
+static u32 path_draft_segment_count;
+static PathDraw path_draft_draw;
+static u32 path_draft_version;
 // Text storage pool + last layout_text() result.
 static char *text_pool;
 static u32 text_pool_capacity;
@@ -780,6 +787,7 @@ static void ecs_storage_init(void) {
   text_draws = 0;
   path_draws = 0;
   path_segments = 0;
+  path_draft_segments = 0;
   dyn_commands = 0;
   dyn_rects = 0;
   scene_file_buffer = 0;
@@ -795,6 +803,7 @@ static void ecs_storage_init(void) {
   text_draws_cap = 0u;
   path_draws_cap = 0u;
   path_segments_cap = 0u;
+  path_draft_segments_cap = 0u;
   dyn_commands_cap = 0u;
   dyn_rects_cap = 0u;
   ecs_block = 0;
@@ -2104,8 +2113,8 @@ static void push_oval_draw(u32 entity, u32 order) {
 
 // Emit capsule segments connecting every stride-th point (always reaching the
 // last point) — one LOD tier of the stroke.
-static void emit_path_tier(PathView view, Vec2 position, u32 draw_index,
-                           u32 stride) {
+static void emit_path_tier(PathSegment *out, u32 *out_count, PathView view,
+                           Vec2 position, u32 draw_index, u32 stride) {
   u32 prev = 0u;
   while (prev + 1u < view.point_count) {
     u32 next = prev + stride;
@@ -2114,13 +2123,13 @@ static void emit_path_tier(PathView view, Vec2 position, u32 draw_index,
     }
     Vec2 a = path_point_world(view, position, prev);
     Vec2 b = path_point_world(view, position, next);
-    PathSegment *seg = &path_segments[path_segment_count];
+    PathSegment *seg = &out[*out_count];
     seg->ax = a.x;
     seg->ay = a.y;
     seg->bx = b.x;
     seg->by = b.y;
     seg->draw_index = draw_index;
-    path_segment_count += 1u;
+    *out_count += 1u;
     prev = next;
   }
 }
@@ -2169,9 +2178,10 @@ static void push_path_view_draws(PathView view, Vec2 position, u32 entity,
     return;
   }
   u32 tier0_offset = path_segment_count;
-  emit_path_tier(view, position, this_draw, 1u);
+  emit_path_tier(path_segments, &path_segment_count, view, position, this_draw, 1u);
   u32 tier1_offset = path_segment_count;
-  emit_path_tier(view, position, this_draw, BLITZ_PATH_LOD_STRIDE);
+  emit_path_tier(path_segments, &path_segment_count, view, position, this_draw,
+                 BLITZ_PATH_LOD_STRIDE);
   draw->draw_params[0] = (float)tier0_offset;
   draw->draw_params[1] = (float)(tier1_offset - tier0_offset);
   draw->draw_params[2] = (float)tier1_offset;
@@ -2181,6 +2191,37 @@ static void push_path_view_draws(PathView view, Vec2 position, u32 entity,
 static void push_path_draws(u32 entity, u32 order) {
   push_path_view_draws(world.path_views[entity], world.positions[entity],
                        entity, order);
+}
+
+// Tessellate just the in-progress pen stroke into its own buffer (full detail,
+// drawn on top). Bumps a version the renderer polls — never touches the static
+// stream, so editing the draft over a huge scene stays cheap.
+static void rebuild_path_draft(void) {
+  path_draft_segment_count = 0u;
+  path_draft_version += 1u;
+  PathView view = path_draft_view;
+  if (!path_draft_active || !view.points || view.point_count < 2u ||
+      view.fill_color.a <= 0.001f) {
+    return;
+  }
+  path_draft_draw.fill_color[0] = view.fill_color.r;
+  path_draft_draw.fill_color[1] = view.fill_color.g;
+  path_draft_draw.fill_color[2] = view.fill_color.b;
+  path_draft_draw.fill_color[3] = view.fill_color.a;
+  path_draft_draw.render[0] = (float)world.draw_order_count; // draw on top
+  path_draft_draw.render[1] = 0.0f;
+  path_draft_draw.render[2] = view.stroke_width;
+  path_draft_draw.render[3] = 0.0f;
+  u32 need = view.point_count - 1u;
+  path_draft_segments = draw_reserve(path_draft_segments,
+                                     &path_draft_segments_cap, need,
+                                     sizeof(PathSegment));
+  if (!path_draft_segments) {
+    path_draft_segments_cap = 0u;
+    return;
+  }
+  emit_path_tier(path_draft_segments, &path_draft_segment_count, view,
+                 (Vec2){0.0f, 0.0f}, 0u, 1u);
 }
 
 // --- Fonts & text layout ---------------------------------------------------
@@ -2568,11 +2609,9 @@ static void extract_static_shapes(void) {
       path_segment_need += path_segment_count_for(world.path_views[entity]);
     }
   }
-  if (path_draft_active && path_draft_view.point_count > 1u) {
-    path_draw_need += 1u;
-    path_segment_need += path_segment_count_for(path_draft_view);
-  }
-  u32 command_need = draw_need + (path_draft_active ? 1u : 0u);
+  // The pen draft lives in its own buffer (rebuild_path_draft), not the static
+  // stream, so it isn't reserved or extracted here.
+  u32 command_need = draw_need;
   shape_commands = draw_reserve(shape_commands, &shape_commands_cap, command_need,
                                 sizeof(ShapeCommand));
   rect_draws =
@@ -2613,10 +2652,6 @@ static void extract_static_shapes(void) {
     } else if (world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) {
       push_path_draws(entity, order);
     }
-  }
-  if (path_draft_active && path_draft_view.point_count > 1u) {
-    push_path_view_draws(path_draft_view, (Vec2){0.0f, 0.0f},
-                         BLITZ_INVALID_INDEX, world.draw_order_count);
   }
 
   uniforms.style[1] = (float)path_segment_count;
@@ -4490,7 +4525,7 @@ u32 blitz_update_path_draft(u32 point_count, float fill_r, float fill_g,
       stroke_width <= 0.0f) {
     path_draft_active = 0u;
     path_draft_view.point_count = 0u;
-    mark_static_dynamic_dirty();
+    rebuild_path_draft();
     return 0u;
   }
   for (u32 i = 0u; i < point_count; i += 1u) {
@@ -4506,7 +4541,8 @@ u32 blitz_update_path_draft(u32 point_count, float fill_r, float fill_g,
   path_draft_view.fill_color = (Color){fill_r, fill_g, fill_b, fill_a};
   path_draft_view.stroke_width = stroke_width;
   path_draft_active = 1u;
-  mark_static_dynamic_dirty();
+  // Only rebuild the draft's own buffer — the static stream is untouched.
+  rebuild_path_draft();
   return 1u;
 }
 
@@ -4517,7 +4553,7 @@ void blitz_clear_path_draft(void) {
   }
   path_draft_active = 0u;
   path_draft_view.point_count = 0u;
-  mark_static_dynamic_dirty();
+  rebuild_path_draft();
 }
 
 EXPORT("blitz_create_text")
@@ -6109,6 +6145,26 @@ u32 blitz_path_segment_f32_count(void) {
 EXPORT("blitz_path_segment_count")
 u32 blitz_path_segment_count(void) {
   return path_segment_count;
+}
+
+EXPORT("blitz_path_draft_segment_ptr")
+u32 blitz_path_draft_segment_ptr(void) {
+  return (u32)&path_draft_segments[0];
+}
+
+EXPORT("blitz_path_draft_segment_count")
+u32 blitz_path_draft_segment_count(void) {
+  return path_draft_segment_count;
+}
+
+EXPORT("blitz_path_draft_version")
+u32 blitz_path_draft_version(void) {
+  return path_draft_version;
+}
+
+EXPORT("blitz_path_draft_draw_ptr")
+u32 blitz_path_draft_draw_ptr(void) {
+  return (u32)&path_draft_draw;
 }
 
 EXPORT("blitz_path_shape_count")

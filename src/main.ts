@@ -275,6 +275,10 @@ type BlitzExports = {
   blitz_path_segment_ptr(): number;
   blitz_path_segment_f32_count(): number;
   blitz_path_segment_count(): number;
+  blitz_path_draft_segment_ptr(): number;
+  blitz_path_draft_segment_count(): number;
+  blitz_path_draft_version(): number;
+  blitz_path_draft_draw_ptr(): number;
   blitz_path_shape_count(): number;
   blitz_text_draw_ptr(): number;
   blitz_text_draw_f32_count(): number;
@@ -687,6 +691,19 @@ async function boot() {
     size: pathSegmentCapacity * pathSegmentStride,
     usage: storageDstUsage,
   });
+  // The in-progress pen draft: its own tiny segment buffer + one draw record,
+  // uploaded independently so editing it never re-uploads the static stream.
+  let draftSegmentCapacity = initialStorageCapacity;
+  let draftSegmentBuffer = device.createBuffer({
+    label: "Blitz Draft Segment Storage",
+    size: draftSegmentCapacity * pathSegmentStride,
+    usage: storageDstUsage,
+  });
+  const draftDrawBuffer = device.createBuffer({
+    label: "Blitz Draft Draw Storage",
+    size: pathDrawStride,
+    usage: storageDstUsage,
+  });
   let textStorageBuffer = device.createBuffer({
     label: "Blitz Text Draw Storage",
     size: textCapacity * textDrawStride,
@@ -731,6 +748,7 @@ async function boot() {
   const fontAtlasView = fontAtlasTexture.createView();
   let cullBindGroup!: GPUBindGroup;
   let staticRenderBindGroup!: GPUBindGroup;
+  let draftRenderBindGroup!: GPUBindGroup;
   let dynamicRenderBindGroup!: GPUBindGroup;
   // Bind groups capture the specific buffer objects they reference, so they are
   // rebuilt whenever a storage buffer grows. The dynamic pass's triangle/oval
@@ -780,6 +798,24 @@ async function boot() {
         { binding: 7, resource: fontSampler },
         { binding: 8, resource: { buffer: pathStorageBuffer } },
         { binding: 9, resource: { buffer: pathSegmentStorageBuffer } },
+      ],
+    });
+    // Same layout as the static render group, but binding 8/9 point at the
+    // draft's own draw record + segment buffer.
+    draftRenderBindGroup = device.createBindGroup({
+      label: "Blitz Draft Render Bind Group",
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuffer } },
+        { binding: 1, resource: { buffer: visibleCommandStorageBuffer } },
+        { binding: 2, resource: { buffer: rectStorageBuffer } },
+        { binding: 3, resource: { buffer: triangleStorageBuffer } },
+        { binding: 4, resource: { buffer: ovalStorageBuffer } },
+        { binding: 5, resource: { buffer: textStorageBuffer } },
+        { binding: 6, resource: fontAtlasView },
+        { binding: 7, resource: fontSampler },
+        { binding: 8, resource: { buffer: draftDrawBuffer } },
+        { binding: 9, resource: { buffer: draftSegmentBuffer } },
       ],
     });
   };
@@ -846,6 +882,8 @@ async function boot() {
     coarseCount: number;
   };
   let pathDrawList: PathDrawCull[] = [];
+  let lastUploadedDraftVersion = -1;
+  let currentDraftSegmentCount = 0;
   let lastUploadedDynVersion = -1;
   let currentDynCommandCount = 0;
   let lastZoomPercent = -1;
@@ -2781,6 +2819,34 @@ async function boot() {
       }
       lastUploadedDynVersion = dynVersion;
     }
+    // The pen draft updates every frame while drawing; uploading only its tiny
+    // buffers keeps that independent of the (possibly huge) static stream.
+    const draftVersion = wasm.blitz_path_draft_version();
+    if (draftVersion !== lastUploadedDraftVersion) {
+      lastUploadedDraftVersion = draftVersion;
+      const draftSegmentCount = wasm.blitz_path_draft_segment_count();
+      currentDraftSegmentCount = draftSegmentCount;
+      if (draftSegmentCount > 0) {
+        const eDraft = ensureStorage(draftSegmentBuffer, draftSegmentCapacity, draftSegmentCount, maxPathSegments, pathSegmentStride, storageDstUsage, "Blitz Draft Segment Storage");
+        draftSegmentBuffer = eDraft.buffer;
+        draftSegmentCapacity = eDraft.capacity;
+        bindGroupsDirty ||= eDraft.grew;
+        device.queue.writeBuffer(
+          draftDrawBuffer,
+          0,
+          new Float32Array(wasm.memory.buffer, wasm.blitz_path_draft_draw_ptr(), pathDrawF32Count),
+        );
+        device.queue.writeBuffer(
+          draftSegmentBuffer,
+          0,
+          new Float32Array(
+            wasm.memory.buffer,
+            wasm.blitz_path_draft_segment_ptr(),
+            draftSegmentCount * pathSegmentF32Count,
+          ),
+        );
+      }
+    }
     const uniforms = new Float32Array(
       wasm.memory.buffer,
       uniformPtr,
@@ -2873,6 +2939,12 @@ async function boot() {
         }
         pass.draw(6, count, 0, offset);
       }
+    }
+    if (currentDraftSegmentCount > 0) {
+      // The in-progress pen stroke: always full detail, drawn on top.
+      pass.setPipeline(pathPipeline);
+      pass.setBindGroup(0, draftRenderBindGroup);
+      pass.draw(6, currentDraftSegmentCount, 0, 0);
     }
     if (currentDynCommandCount > 0) {
       pass.setPipeline(shapePipeline);

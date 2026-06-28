@@ -810,41 +810,66 @@ function setColorButtonValue(button: HTMLButtonElement, value: string): void {
   button.style.setProperty("--style-color", value);
 }
 
-function setupColorPickerButton(
+const DEFAULT_COLOR_PALETTE = [
+  "#111827",
+  "#4b5563",
+  "#ffffff",
+  "#ef4444",
+  "#f97316",
+  "#f59e0b",
+  "#22c55e",
+  "#14b8a6",
+  "#3b82f6",
+  "#6366f1",
+  "#a855f7",
+  "#ec4899",
+];
+
+const isHexColor = (value: string) => /^#[0-9a-f]{6}$/i.test(value);
+
+export interface ColorPopoverOptions {
+  palette?: string[];
+  // Show the alpha slider; omit for opaque-only pickers (e.g. the pen color).
+  showAlpha?: boolean;
+  getAlpha?: () => number;
+  // Called with a validated hex string whenever the color changes.
+  onColor: (value: string) => void;
+  onAlpha?: (alpha: number) => void;
+  // Current hex; defaults to button.value. Use when the anchor isn't a swatch.
+  getValue?: () => string;
+  // Caller drives open/close (via the returned handle) instead of the button.
+  manualToggle?: boolean;
+  // Append extra controls (e.g. a width slider) below the color section.
+  buildExtra?: (popover: HTMLDivElement) => void;
+}
+
+export interface ColorPopoverHandle {
+  open: () => void;
+  close: () => void;
+  isOpen: () => boolean;
+}
+
+// A color popover (palette swatches + native picker + hex field, optional alpha)
+// anchored to `button`. By default the button toggles it; pass manualToggle to
+// drive it via the returned handle. The current color comes from getValue() or
+// button.value, which also seeds the highlighted swatch.
+export function attachColorPopover(
   button: HTMLButtonElement,
-  opacityInput: HTMLInputElement,
-  onColor: (red: number, green: number, blue: number) => void,
-  onOpacity: (opacity: number) => void,
-  actions: StyleActions,
-): void {
-  const palette = [
-    "#111827",
-    "#4b5563",
-    "#ffffff",
-    "#ef4444",
-    "#f97316",
-    "#f59e0b",
-    "#22c55e",
-    "#14b8a6",
-    "#3b82f6",
-    "#6366f1",
-    "#a855f7",
-    "#ec4899",
-  ];
+  options: ColorPopoverOptions,
+): ColorPopoverHandle {
+  const palette = options.palette ?? DEFAULT_COLOR_PALETTE;
   let popover: HTMLDivElement | null = null;
-  const isHexColor = (value: string) => /^#[0-9a-f]{6}$/i.test(value);
-  const commitColor = makeTransactionable((value: string) => {
-    if (!isHexColor(value)) {
-      return;
-    }
-    setColorButtonValue(button, value);
-    onColor(...colorChannels(value));
-  }, actions);
-  const commitOpacity = makeTransactionable((value: number) => {
-    opacityInput.value = String(value);
-    onOpacity(value);
-  }, actions);
+  let onDocumentPointerDown: ((event: PointerEvent) => void) | null = null;
+  let onDocumentKeyDown: ((event: KeyboardEvent) => void) | null = null;
   const close = () => {
+    if (onDocumentPointerDown) {
+      document.removeEventListener("pointerdown", onDocumentPointerDown);
+    }
+    if (onDocumentKeyDown) {
+      document.removeEventListener("keydown", onDocumentKeyDown);
+    }
+    onDocumentPointerDown = null;
+    onDocumentKeyDown = null;
     popover?.remove();
     popover = null;
     button.setAttribute("aria-expanded", "false");
@@ -856,7 +881,7 @@ function setupColorPickerButton(
     popover.addEventListener("pointerdown", (event) => event.stopPropagation());
     const swatches = document.createElement("div");
     swatches.className = "color-picker-swatches";
-    const currentValue = button.value || "#000000";
+    const currentValue = (options.getValue?.() ?? button.value) || "#000000";
     const valueRow = document.createElement("div");
     valueRow.className = "color-picker-value";
     const nativePicker = document.createElement("span");
@@ -880,7 +905,7 @@ function setupColorPickerButton(
       swatch.setAttribute("aria-label", value);
       swatch.setAttribute("aria-pressed", String(value.toLowerCase() === currentValue.toLowerCase()));
       swatch.addEventListener("click", () => {
-        commitColor(value);
+        options.onColor(value);
         nativeInput.value = value;
         hexInput.value = value;
         for (const item of swatches.querySelectorAll(".color-picker-swatch")) {
@@ -895,26 +920,30 @@ function setupColorPickerButton(
         return;
       }
       nativeInput.value = value;
-      commitColor(value);
+      options.onColor(value);
     });
     nativeInput.addEventListener("input", () => {
-      commitColor(nativeInput.value);
+      options.onColor(nativeInput.value);
       hexInput.value = nativeInput.value;
       for (const item of swatches.querySelectorAll(".color-picker-swatch")) {
         item.setAttribute("aria-pressed", "false");
       }
     });
     valueRow.append(nativePicker, hexInput);
-    const alpha = document.createElement("input");
-    alpha.type = "range";
-    alpha.min = "0";
-    alpha.max = "1";
-    alpha.step = "0.01";
-    alpha.value = opacityInput.value || "1";
-    alpha.className = "color-picker-alpha";
-    alpha.setAttribute("aria-label", "Alpha");
-    alpha.addEventListener("input", () => commitOpacity(Number(alpha.value)));
-    popover.append(swatches, valueRow, alpha);
+    popover.append(swatches, valueRow);
+    if (options.showAlpha) {
+      const alpha = document.createElement("input");
+      alpha.type = "range";
+      alpha.min = "0";
+      alpha.max = "1";
+      alpha.step = "0.01";
+      alpha.value = String(options.getAlpha?.() ?? 1);
+      alpha.className = "color-picker-alpha";
+      alpha.setAttribute("aria-label", "Alpha");
+      alpha.addEventListener("input", () => options.onAlpha?.(Number(alpha.value)));
+      popover.append(alpha);
+    }
+    options.buildExtra?.(popover);
     document.body.append(popover);
     const rect = button.getBoundingClientRect();
     const popoverRect = popover.getBoundingClientRect();
@@ -929,24 +958,65 @@ function setupColorPickerButton(
     popover.style.left = `${left}px`;
     popover.style.top = `${Math.max(8, Math.min(window.innerHeight - popoverRect.height - 8, top))}px`;
     button.setAttribute("aria-expanded", "true");
+    // Ignore clicks on the anchor so its own handler owns the toggle; any other
+    // outside click (e.g. starting to draw) dismisses the popover.
+    onDocumentPointerDown = (event) => {
+      if (event.target instanceof Node && button.contains(event.target)) {
+        return;
+      }
+      close();
+    };
+    onDocumentKeyDown = (event) => {
+      if (event.key === "Escape") {
+        close();
+      }
+    };
     setTimeout(() => {
-      document.addEventListener("pointerdown", close, { once: true });
-      document.addEventListener("keydown", (event) => {
-        if (event.key === "Escape") {
-          close();
-        }
-      }, { once: true });
+      if (!popover) {
+        return;
+      }
+      document.addEventListener("pointerdown", onDocumentPointerDown!);
+      document.addEventListener("keydown", onDocumentKeyDown!);
     }, 0);
   };
-  button.addEventListener("click", () => {
-    if (popover) {
-      close();
-    } else {
-      open();
-    }
-  });
+  if (!options.manualToggle) {
+    button.addEventListener("click", () => {
+      if (popover) {
+        close();
+      } else {
+        open();
+      }
+    });
+  }
   button.setAttribute("aria-haspopup", "dialog");
   button.setAttribute("aria-expanded", "false");
+  return { open, close, isOpen: () => popover !== null };
+}
+
+function setupColorPickerButton(
+  button: HTMLButtonElement,
+  opacityInput: HTMLInputElement,
+  onColor: (red: number, green: number, blue: number) => void,
+  onOpacity: (opacity: number) => void,
+  actions: StyleActions,
+): void {
+  const commitColor = makeTransactionable((value: string) => {
+    if (!isHexColor(value)) {
+      return;
+    }
+    setColorButtonValue(button, value);
+    onColor(...colorChannels(value));
+  }, actions);
+  const commitOpacity = makeTransactionable((value: number) => {
+    opacityInput.value = String(value);
+    onOpacity(value);
+  }, actions);
+  attachColorPopover(button, {
+    showAlpha: true,
+    getAlpha: () => Number(opacityInput.value || "1"),
+    onColor: (value) => commitColor(value),
+    onAlpha: (alpha) => commitOpacity(alpha),
+  });
 }
 
 function debounce<T extends (...args: any[]) => void>(func: T, wait: number): T {

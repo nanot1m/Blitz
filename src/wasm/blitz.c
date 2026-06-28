@@ -5583,7 +5583,9 @@ u32 blitz_selected_debug_mask(void) {
   return selected_debug_mask;
 }
 
-// Capability mask: bit 0 = geometric styles, bit 1 = text color.
+// Capability mask: bit 0 = geometric styles, bit 1 = text color,
+// bit 2 = stroke-capable (rect/triangle/oval). Pens have a fill and width but no
+// stroke, so a pen-only selection sets bit 0 without bit 2.
 EXPORT("blitz_selected_style_kind")
 u32 blitz_selected_style_kind(void) {
   u32 kind = 0u;
@@ -5600,6 +5602,11 @@ u32 blitz_selected_style_kind(void) {
                                BLITZ_COMPONENT_OVAL_VIEW |
                                BLITZ_COMPONENT_PATH_VIEW)) {
       kind |= 1u;
+    }
+    if (world.masks[entity] & (BLITZ_COMPONENT_RECT_VIEW |
+                               BLITZ_COMPONENT_TRIANGLE_VIEW |
+                               BLITZ_COMPONENT_OVAL_VIEW)) {
+      kind |= 4u;
     }
   }
   return kind;

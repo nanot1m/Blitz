@@ -1,6 +1,7 @@
 import { createCanvasMcpAdapter } from "./mcp/canvas-adapter";
 import { setupMcpBridge } from "./mcp/bridge";
 import {
+  attachColorPopover,
   setupCanvasInteractions,
   setupKeyboardShortcuts,
   setupStyleControls,
@@ -976,6 +977,7 @@ async function boot() {
     );
     const geometric = (kind & 1) !== 0;
     const text = (kind & 2) !== 0;
+    const strokeCapable = (kind & 4) !== 0;
     const frameTitlePtr = wasm.blitz_selected_frame_title_ptr();
     const frameTitleLength =
       frameTitlePtr === 0 ? 0 : wasm.blitz_selected_frame_title_length();
@@ -985,6 +987,7 @@ async function boot() {
     ui.selectedContainerInput.indeterminate = containerState === 3;
     ui.selectedContainerInput.disabled = containerState === 0;
     ui.selectedGeometryControls.hidden = !geometric;
+    ui.selectedStrokeRow.hidden = !strokeCapable;
     ui.selectedFrameControls.hidden = !frame;
     ui.selectedTextControls.hidden = !text;
     ui.selectedMixedDivider.hidden = !(geometric && text);
@@ -2045,11 +2048,93 @@ async function boot() {
   };
   updateHistoryControls();
   let penMode = false;
-  const penFill = { r: 0.08, g: 0.1, b: 0.13, a: 1 };
-  const penStroke = { r: 0.08, g: 0.1, b: 0.13, a: 0, width: 4 };
+  const PEN_COLOR_STORAGE_KEY = "blitz:pen-color";
+  const PEN_WIDTH_STORAGE_KEY = "blitz:pen-width";
+  const DEFAULT_PEN_COLOR = "#141a21";
+  const DEFAULT_PEN_WIDTH = 4;
+  const hexToRgb = (hex: string) => ({
+    r: Number.parseInt(hex.slice(1, 3), 16) / 255,
+    g: Number.parseInt(hex.slice(3, 5), 16) / 255,
+    b: Number.parseInt(hex.slice(5, 7), 16) / 255,
+  });
+  const readStored = (key: string) => {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null; // localStorage unavailable (private mode).
+    }
+  };
+  const persist = (key: string, value: string) => {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      // localStorage unavailable; the value still applies for this session.
+    }
+  };
+  const storedColor = readStored(PEN_COLOR_STORAGE_KEY);
+  let penColorHex =
+    storedColor && /^#[0-9a-f]{6}$/i.test(storedColor)
+      ? storedColor
+      : DEFAULT_PEN_COLOR;
+  const storedWidth = Number(readStored(PEN_WIDTH_STORAGE_KEY));
+  // Pens have a fill and a width but no stroke; stroke stays transparent so they
+  // tessellate as the cheap fill-only ribbon.
+  const penFill = { ...hexToRgb(penColorHex), a: 1 };
+  const penStroke = {
+    r: 0,
+    g: 0,
+    b: 0,
+    a: 0,
+    width: Number.isFinite(storedWidth) && storedWidth > 0 ? storedWidth : DEFAULT_PEN_WIDTH,
+  };
+  const applyPenColor = (hex: string) => {
+    penColorHex = hex;
+    const { r, g, b } = hexToRgb(hex);
+    penFill.r = r;
+    penFill.g = g;
+    penFill.b = b;
+    persist(PEN_COLOR_STORAGE_KEY, hex);
+  };
+  const applyPenWidth = (width: number) => {
+    penStroke.width = width;
+    persist(PEN_WIDTH_STORAGE_KEY, String(width));
+  };
+  // Stroke-width slider appended below the color section in the pen dropdown.
+  const buildPenWidthControl = (popover: HTMLDivElement) => {
+    const row = document.createElement("label");
+    row.className = "pen-width-control";
+    const label = document.createElement("span");
+    label.textContent = "Width";
+    const range = document.createElement("input");
+    range.type = "range";
+    range.min = "1";
+    range.max = "64";
+    range.step = "0.5";
+    range.value = String(penStroke.width);
+    range.setAttribute("aria-label", "Stroke width");
+    const value = document.createElement("span");
+    value.className = "pen-width-value";
+    value.textContent = String(penStroke.width);
+    range.addEventListener("input", () => {
+      const width = Number(range.value);
+      applyPenWidth(width);
+      value.textContent = String(width);
+    });
+    row.append(label, range, value);
+    popover.append(row);
+  };
+  const penPopover = attachColorPopover(ui.penToolButton, {
+    manualToggle: true,
+    getValue: () => penColorHex,
+    onColor: applyPenColor,
+    buildExtra: buildPenWidthControl,
+  });
   const setPenMode = (enabled: boolean) => {
     penMode = enabled;
     ui.penToolButton.setAttribute("aria-pressed", String(enabled));
+    if (!enabled) {
+      penPopover.close();
+    }
   };
   const smoothPenPoints = (points: Array<{ x: number; y: number }>, capacity: number) => {
     if (points.length < 3) {
@@ -2144,7 +2229,14 @@ async function boot() {
     updateEmptyState();
   };
   ui.penToolButton.addEventListener("click", () => {
-    setPenMode(!penMode);
+    if (!penMode) {
+      setPenMode(true);
+      penPopover.open();
+    } else if (penPopover.isOpen()) {
+      setPenMode(false);
+    } else {
+      penPopover.open();
+    }
   });
   stopDragging = setupCanvasInteractions(ui.canvas, wasm, {
     beginEdit: sceneHistory.begin,

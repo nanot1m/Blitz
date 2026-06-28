@@ -429,6 +429,30 @@ dialog {
   accent-color: #155bd7;
 }
 
+.pen-width-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  color: #475569;
+  font: 650 10px/1 inherit;
+}
+
+.pen-width-control input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  height: 18px;
+  accent-color: #155bd7;
+  cursor: pointer;
+}
+
+.pen-width-value {
+  min-width: 22px;
+  color: #313b48;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .style-opacity {
   width: 100%;
   min-width: 0;
@@ -543,6 +567,7 @@ dialog {
   color: #a5acb7;
   cursor: default;
 }
+
 
 #tool-island svg {
   width: 17px;

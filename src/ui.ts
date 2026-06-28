@@ -130,6 +130,7 @@ export function createBlitzUi() {
     selectedGeometryControls: requireElement<HTMLDivElement>("#selected-geometry-controls"),
     selectedFillInput: requireElement<HTMLButtonElement>("#selected-fill"),
     selectedFillOpacityInput: requireElement<HTMLInputElement>("#selected-fill-opacity"),
+    selectedStrokeRow: requireElement<HTMLElement>("#selected-stroke-row"),
     selectedStrokeInput: requireElement<HTMLButtonElement>("#selected-stroke"),
     selectedStrokeOpacityInput: requireElement<HTMLInputElement>("#selected-stroke-opacity"),
     selectedStrokeWidthInput: requireElement<HTMLInputElement>("#selected-stroke-width"),

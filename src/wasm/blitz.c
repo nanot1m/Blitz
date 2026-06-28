@@ -14,6 +14,7 @@ usize strlen(const char *text) {
   return length;
 }
 
+// --- Configuration & limits ------------------------------------------------
 // Capacity ceiling, not a reservation: all per-entity storage grows on demand,
 // so this only bounds entity creation and the render dispatch. 4M keeps the
 // single-dimension GPU cull dispatch (ceil(n/64) workgroups) under the 65535
@@ -50,6 +51,7 @@ usize strlen(const char *text) {
 // dragged, so the shader translates it by the drag offset instead of rebuilding.
 #define BLITZ_DRAG_FLAG 0x80000000u
 
+// Component bitmask: which components an entity carries.
 #define BLITZ_COMPONENT_POSITION 1u
 #define BLITZ_COMPONENT_SIZE 2u
 #define BLITZ_COMPONENT_RECT_VIEW 4u
@@ -64,6 +66,7 @@ usize strlen(const char *text) {
 #define BLITZ_COMPONENT_FRAME_VIEW 2048u
 #define BLITZ_COMPONENT_PATH_VIEW 4096u
 
+// Shape-kind discriminants (SceneItem.shape_kind, debug queries).
 #define BLITZ_SHAPE_RECT 0u
 #define BLITZ_SHAPE_TRIANGLE 1u
 #define BLITZ_SHAPE_OVAL 2u
@@ -71,6 +74,7 @@ usize strlen(const char *text) {
 #define BLITZ_SHAPE_FRAME 4u
 #define BLITZ_SHAPE_PATH 5u
 
+// blitz_update_object field-change bitmask.
 #define BLITZ_UPDATE_X 1u
 #define BLITZ_UPDATE_Y 2u
 #define BLITZ_UPDATE_WIDTH 4u
@@ -86,6 +90,7 @@ usize strlen(const char *text) {
 #define BLITZ_UPDATE_MAX_LINES 4096u
 #define BLITZ_UPDATE_ALIGN 8192u
 
+// --- Data structures -------------------------------------------------------
 typedef struct Vec2 {
   float x;
   float y;
@@ -260,7 +265,9 @@ typedef struct World {
   u32 *prev_sibling;
 } World;
 
+// --- Global state ----------------------------------------------------------
 static BlitzUniforms uniforms;
+// Render output: extracted on scene change, uploaded to the GPU.
 static ShapeCommand *shape_commands;
 static RectDraw *rect_draws;
 static TriangleDraw *triangle_draws;
@@ -271,6 +278,7 @@ static PathVertex *path_points;
 static u16 *path_indices;
 static ShapeCommand *dyn_commands;
 static RectDraw *dyn_rects;
+// Grown-on-demand capacities for the buffers above.
 static u32 shape_commands_cap;
 static u32 rect_draws_cap;
 static u32 triangle_draws_cap;
@@ -281,10 +289,12 @@ static u32 path_points_cap;
 static u32 path_indices_cap;
 static u32 dyn_commands_cap;
 static u32 dyn_rects_cap;
+// Input staging: JS writes text / pen points here before create/update.
 static char text_input[BLITZ_TEXT_INPUT_BYTES];
 static float path_input[BLITZ_PATH_INPUT_POINTS * 2u];
 static Vec2 path_draft_points[BLITZ_PATH_INPUT_POINTS];
 static PathView path_draft_view;
+// Text storage pool + last layout_text() result.
 static char *text_pool;
 static u32 text_pool_capacity;
 static TextLayoutLine text_layout_lines[BLITZ_MAX_TEXT_LAYOUT_LINES];
@@ -293,17 +303,22 @@ static float text_layout_width;
 static float text_layout_height;
 static u32 text_layout_overflow;
 static u32 text_pool_used;
+// Scene query results (hit-test / viewport queries).
 static SceneItem *scene_query_items;
 static u32 scene_query_items_cap;
 static u32 scene_query_count;
 static u32 scene_query_total;
+// Scene serialization buffer.
 static unsigned char *scene_file_buffer;
 static u32 scene_file_capacity;
+// Selected-entity inspector outputs.
 static float selected_style[15];
 static SceneItem selected_debug_item;
 static u32 selected_debug_mask;
 static const char *selected_frame_title;
+// The ECS world.
 static World world;
+// Live counts from the last extraction.
 static u32 shape_command_count;
 static u32 rect_draw_count;
 static u32 triangle_draw_count;
@@ -317,10 +332,12 @@ static u32 visible_text_shape_count;
 static u32 container_entity_count;
 static u32 dyn_command_count;
 static u32 dyn_rect_count;
+// Render-stream versions + dirty flags.
 static u32 shape_command_version;
 static u32 dyn_version;
 static u32 static_dirty;
 static u32 dynamic_dirty;
+// Interaction state: drag, marquee, resize.
 static u32 dragging_selection;
 static u32 marquee_active;
 static u32 marquee_additive;
@@ -358,6 +375,7 @@ static u32 *free_slots;
 static u32 free_count;
 static u32 live_count;
 
+// --- Memory allocator (free-list over linear memory) -----------------------
 // General free-list allocator over Wasm linear memory. Every demand buffer (the
 // per-entity SoA block, render draw buffers, the scene file buffer) allocates
 // through it, so multiple regions each grow independently without a fixed
@@ -608,6 +626,7 @@ static int text_pool_ensure(u32 extra) {
   return 1;
 }
 
+// --- ECS storage & layout --------------------------------------------------
 static unsigned char *ecs_block;
 static u32 entity_capacity;
 
@@ -881,6 +900,7 @@ static u32 align4(u32 value) {
   return (value + 3u) & ~3u;
 }
 
+// --- Byte writers & object IDs ---------------------------------------------
 static void write_u32(unsigned char *buffer, u32 offset, u32 value) {
   buffer[offset] = (unsigned char)(value & 0xffu);
   buffer[offset + 1u] = (unsigned char)((value >> 8u) & 0xffu);
@@ -963,6 +983,7 @@ static float read_f32(const unsigned char *buffer, u32 offset) {
   return bits.f;
 }
 
+// --- Dirty flags & invalidation --------------------------------------------
 static void mark_render_list_dirty(void) {
   static_dirty = 1u;
   dynamic_dirty = 1u;
@@ -1004,6 +1025,7 @@ static void mark_transform_subtree_dirty(u32 entity) {
   }
 }
 
+// --- Entity hierarchy & containers -----------------------------------------
 static void detach_from_parent(u32 entity) {
   if (entity == BLITZ_INVALID_INDEX ||
       !(world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM)) {
@@ -1277,6 +1299,7 @@ static void release_entity_resources(u32 entity) {
   }
 }
 
+// --- Relative transforms ---------------------------------------------------
 static void resolve_transform_entity(u32 entity, u32 depth) {
   if (entity == BLITZ_INVALID_INDEX || !transform_dirty[entity] ||
       depth > BLITZ_MAX_ENTITIES) {
@@ -1307,6 +1330,7 @@ static void system_resolve_relative_transforms(void) {
   transform_dirty_count = 0u;
 }
 
+// --- Frame update ----------------------------------------------------------
 static void world_sync_for_read(void) {
   system_resolve_relative_transforms();
 }
@@ -1317,6 +1341,7 @@ static void world_update_for_frame(void) {
   extract_dynamic();
 }
 
+// --- History (undo/redo) ---------------------------------------------------
 static void history_reset_internal(void) {
   history_transaction_active = 0u;
 }
@@ -1385,6 +1410,7 @@ static u32 ecs_create_entity(void) {
   return entity;
 }
 
+// --- ECS component setters -------------------------------------------------
 static void ecs_set_position(u32 entity, float x, float y) {
   if (entity == BLITZ_INVALID_INDEX) {
     return;
@@ -1579,6 +1605,7 @@ static Vec2 path_tangent_at(PathView view, Vec2 position, u32 index) {
   return (Vec2){x / length, y / length};
 }
 
+// --- Path geometry & tessellation ------------------------------------------
 static void push_path_vertex(Vec2 position) {
   PathVertex *vertex = &path_points[path_point_count];
   vertex->x = position.x;
@@ -1685,6 +1712,7 @@ static void path_recompute_entity_bounds_preserve_world(u32 entity) {
   world.sizes[entity].y = max.y - min.y + pad * 2.0f;
 }
 
+// --- Selection -------------------------------------------------------------
 static void clear_selection(void) {
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
     world.selected[entity] = 0u;
@@ -1744,6 +1772,7 @@ static void marquee_apply_live(void) {
 // runs. Entities keep their own z-order; the single rule (a child must not
 // render below the container it was dropped onto) is enforced only at drop time
 // by lift_selection_above_container.
+// --- Draw order ------------------------------------------------------------
 static void normalize_draw_order_hierarchy(void) {}
 
 // True when `container` is an ancestor of `entity` in the relative-transform
@@ -1868,6 +1897,7 @@ static void reorder_selection(u32 selected_first) {
   mark_render_list_dirty();
 }
 
+// --- Draw extraction: shapes & overlays ------------------------------------
 static void push_rect_draw(u32 entity, u32 order) {
   if (shape_command_count >= BLITZ_MAX_RECT_DRAWS ||
       rect_draw_count >= BLITZ_MAX_RECT_DRAWS) {
@@ -2250,6 +2280,7 @@ static void push_path_draws(u32 entity, u32 order) {
                        entity, order);
 }
 
+// --- Fonts & text layout ---------------------------------------------------
 static const FontGlyphMetric *font_glyph_metric(u32 codepoint) {
   u32 low = 0u;
   u32 high = BLITZ_FONT_GLYPH_COUNT;
@@ -2497,6 +2528,7 @@ u32 blitz_font_glyph_codepoint(u32 index) {
   return blitz_font_glyphs[index].codepoint;
 }
 
+// --- Draw extraction: text -------------------------------------------------
 static void push_text_draws(u32 entity, u32 order) {
   if (entity == hidden_text_entity) {
     return;
@@ -2610,6 +2642,7 @@ static int text_visible_in_view(u32 entity, float scale, float min_x,
 
 // Full unculled shape stream (rects/triangles/ovals), rebuilt only on
 // structural change. The GPU compute pass culls it against the viewport.
+// --- Scene extraction (static & dynamic streams) ---------------------------
 static void extract_static_shapes(void) {
   if (!static_dirty) {
     return;
@@ -2816,6 +2849,7 @@ static void extract_dynamic(void) {
   dynamic_dirty = 0u;
 }
 
+// --- Coordinates, hit-testing & resize -------------------------------------
 static void screen_to_world(float screen_x, float screen_y, float *world_x,
                             float *world_y) {
   float half_w = uniforms.viewport_camera[0] * 0.5f;
@@ -3255,6 +3289,7 @@ static float slide_origin_x = 0.0f;
 static float slide_origin_y = 0.0f;
 static u32 slide_container_entity = BLITZ_INVALID_INDEX;
 
+// --- Slide containers ------------------------------------------------------
 static void attach_slide_child(u32 entity) {
   if (entity == BLITZ_INVALID_INDEX ||
       slide_container_entity == BLITZ_INVALID_INDEX ||
@@ -3414,6 +3449,7 @@ static const char *copy_text_input(u32 text_length) {
   return destination;
 }
 
+// --- Demo scene ------------------------------------------------------------
 static void create_demo_world(void) {
   Color transparent = {0.0f, 0.0f, 0.0f, 0.0f};
 
@@ -3511,6 +3547,7 @@ static void create_demo_world(void) {
   flush_draw_order_normalize();
 }
 
+// --- Public API: lifecycle -------------------------------------------------
 EXPORT("blitz_init")
 void blitz_init(void) {
   ecs_storage_init();
@@ -3618,6 +3655,7 @@ u32 blitz_last_created_object_id_ptr(void) {
   return (u32)&last_created_object_id;
 }
 
+// --- Public API: viewport & camera -----------------------------------------
 EXPORT("blitz_resize")
 void blitz_resize(float width, float height) {
   float next_width = width > 1.0f ? width : 1.0f;
@@ -3665,6 +3703,7 @@ void blitz_zoom_at(float screen_x, float screen_y, float zoom_delta) {
   mark_view_dirty();
 }
 
+// --- Public API: pointer & marquee -----------------------------------------
 EXPORT("blitz_pointer_down")
 u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
   world_sync_for_read();
@@ -3907,6 +3946,7 @@ void blitz_pointer_up(void) {
   history_cancel();
 }
 
+// --- Public API: quick-add shapes ------------------------------------------
 EXPORT("blitz_add_rect")
 void blitz_add_rect(void) {
   u32 history_owned = history_begin_owned();
@@ -3979,6 +4019,7 @@ void blitz_add_text(void) {
   if (history_owned) history_commit();
 }
 
+// --- Public API: duplicate & clipboard -------------------------------------
 EXPORT("blitz_duplicate_selected")
 u32 blitz_duplicate_selected(float offset_x, float offset_y) {
   world_sync_for_read();
@@ -4160,6 +4201,7 @@ u32 blitz_paste_internal_clipboard(float offset_x, float offset_y) {
   return pasted;
 }
 
+// --- Public API: scene & selection management ------------------------------
 static void clear_scene_state(void) {
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
     if (world.masks[entity] != 0u) {
@@ -4349,6 +4391,7 @@ u32 blitz_selected_container_state(void) {
   return container_count == selected_count ? 2u : 3u;
 }
 
+// --- Public API: create shapes ---------------------------------------------
 EXPORT("blitz_create_rect")
 u32 blitz_create_rect(float x, float y, float width, float height,
                       float fill_r, float fill_g, float fill_b, float fill_a,
@@ -4525,6 +4568,7 @@ u32 blitz_create_path(u32 point_count, float fill_r, float fill_g,
   return entity;
 }
 
+// --- Public API: text & path input -----------------------------------------
 EXPORT("blitz_text_input_ptr")
 u32 blitz_text_input_ptr(void) {
   return (u32)&text_input[0];
@@ -4614,6 +4658,7 @@ u32 blitz_create_text(float x, float y, float font_size, float color_r,
 
 // Returns 0 on success, 1 when the object is missing, 2 for a type mismatch,
 // 3 for invalid values, and 4 when updated text cannot be allocated.
+// --- Public API: object update ---------------------------------------------
 EXPORT("blitz_update_object")
 u32 blitz_update_object(
     u32 actor_hi, u32 actor_lo, u32 sequence_hi, u32 sequence_lo,
@@ -4754,6 +4799,7 @@ u32 blitz_update_object(
   return 0u;
 }
 
+// --- Public API: scene queries ---------------------------------------------
 EXPORT("blitz_query_scene")
 u32 blitz_query_scene(float min_x, float min_y, float max_x, float max_y,
                       u32 limit) {
@@ -4915,6 +4961,7 @@ u32 blitz_scene_query_total(void) {
   return scene_query_total;
 }
 
+// --- Public API: serialization ---------------------------------------------
 EXPORT("blitz_scene_file_buffer_ptr")
 u32 blitz_scene_file_buffer_ptr(void) {
   return (u32)scene_file_buffer;
@@ -5331,6 +5378,7 @@ u32 blitz_scene_deserialize(u32 byte_count) {
   return 0u;
 }
 
+// --- Public API: stress test & delete --------------------------------------
 EXPORT("blitz_stress_test")
 void blitz_stress_test(void) {
   history_reset_internal();
@@ -5392,6 +5440,7 @@ u32 blitz_has_selection(void) {
   return selected_count > 0u;
 }
 
+// --- Public API: selection inspector ---------------------------------------
 EXPORT("blitz_selected_debug_ptr")
 u32 blitz_selected_debug_ptr(void) {
   world_sync_for_read();
@@ -5637,6 +5686,7 @@ u32 blitz_selected_style_f32_count(void) {
   return 15u;
 }
 
+// --- Public API: style setters ---------------------------------------------
 EXPORT("blitz_set_selected_fill")
 void blitz_set_selected_fill(float r, float g, float b) {
   u32 history_owned = !history_transaction_active;
@@ -5937,6 +5987,7 @@ void blitz_reset_selected_text_width(void) {
   }
 }
 
+// --- Public API: frame title -----------------------------------------------
 EXPORT("blitz_selected_frame_title_ptr")
 u32 blitz_selected_frame_title_ptr(void) {
   selected_frame_title = "";
@@ -5984,6 +6035,7 @@ void blitz_set_selected_frame_title(u32 text_length) {
   }
 }
 
+// --- Public API: ordering & selection ops ----------------------------------
 EXPORT("blitz_select_all")
 void blitz_select_all(void) {
   selected_count = 0u;
@@ -6016,6 +6068,7 @@ void blitz_send_to_back(void) {
   history_commit();
 }
 
+// --- Public API: render buffer accessors -----------------------------------
 EXPORT("blitz_uniform_ptr")
 u32 blitz_uniform_ptr(void) {
   return (u32)&uniforms;
@@ -6213,6 +6266,7 @@ u32 blitz_render_max_dyn_rects(void) {
   return BLITZ_MAX_DYN_RECTS;
 }
 
+// --- Public API: stats & limits --------------------------------------------
 EXPORT("blitz_entity_count")
 u32 blitz_entity_count(void) {
   return live_count;

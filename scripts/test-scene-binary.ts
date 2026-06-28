@@ -27,6 +27,12 @@ const writeTextInput = (value: string) => {
   return bytes.byteLength;
 };
 
+const writePathInput = (points: Array<{ x: number; y: number }>) => {
+  new Float32Array(wasm.memory.buffer, wasm.blitz_path_input_ptr(), points.length * 2).set(
+    points.flatMap((point) => [point.x, point.y]),
+  );
+};
+
 const readText = (ptr: number, length: number) =>
   textDecoder.decode(new Uint8Array(wasm.memory.buffer, ptr, length));
 
@@ -393,6 +399,39 @@ expectNear(multiDropSecond.x, 105, "Multi-drop attached second x");
 expectNear(multiDropSecond.y, 55, "Multi-drop attached second y");
 
 wasm.blitz_clear_scene();
+wasm.blitz_resize(1000, 1000);
+wasm.blitz_set_camera(0, 0, 1);
+wasm.blitz_create_rect(0, 0, 200, 200, 0.8, 0.8, 1, 1, 0, 0, 0, 1, 1);
+const creationAttachContainerId = readLastCreatedObjectId();
+if (wasm.blitz_set_container(...creationAttachContainerId, 1) !== 1) {
+  throw new Error("Failed to tag the creation-attach target as a container.");
+}
+wasm.blitz_create_rect(25, 30, 40, 40, 1, 0.8, 0.8, 1, 0, 0, 0, 1, 1);
+const creationAttachRectId = readLastCreatedObjectId();
+writePathInput([
+  { x: 530, y: 530 },
+  { x: 570, y: 530 },
+  { x: 570, y: 570 },
+]);
+wasm.blitz_create_path(3, 0.08, 0.1, 0.13, 1, 0.08, 0.1, 0.13, 0, 4);
+const creationAttachPathId = readLastCreatedObjectId();
+let creationAttachedRect = querySceneItemByObjectId(creationAttachRectId);
+let creationAttachedPath = querySceneItemByObjectId(creationAttachPathId);
+expectNear(creationAttachedRect.x, 25, "Creation-attached rect initial x");
+expectNear(creationAttachedRect.y, 30, "Creation-attached rect initial y");
+expectNear(creationAttachedPath.x, 28, "Creation-attached path initial x");
+expectNear(creationAttachedPath.y, 28, "Creation-attached path initial y");
+if (updateRectPosition(creationAttachContainerId, 20, 30) !== 0) {
+  throw new Error("Failed to move the creation-attach container.");
+}
+creationAttachedRect = querySceneItemByObjectId(creationAttachRectId);
+creationAttachedPath = querySceneItemByObjectId(creationAttachPathId);
+expectNear(creationAttachedRect.x, 45, "Creation-attached rect follows x");
+expectNear(creationAttachedRect.y, 60, "Creation-attached rect follows y");
+expectNear(creationAttachedPath.x, 48, "Creation-attached path follows x");
+expectNear(creationAttachedPath.y, 58, "Creation-attached path follows y");
+
+wasm.blitz_clear_scene();
 wasm.blitz_create_rect(0, 0, 120, 100, 0.9, 0.9, 1, 1, 0, 0, 0, 1, 1);
 const duplicateContainerId = readLastCreatedObjectId();
 if (wasm.blitz_set_container(...duplicateContainerId, 1) !== 1) {
@@ -578,6 +617,20 @@ const frameRoundTripId = readLastCreatedObjectId();
 if (wasm.blitz_set_selected_container(0) !== 1) {
   throw new Error("Failed to disable a frame container before round trip.");
 }
+writePathInput([
+  { x: 500, y: 500 },
+  { x: 560, y: 500 },
+  { x: 560, y: 540 },
+]);
+wasm.blitz_create_path(3, 0.08, 0.1, 0.13, 0.9, 0.08, 0.1, 0.13, 0, 5);
+const pathRoundTripId = readLastCreatedObjectId();
+if (wasm.blitz_selected_style_kind() !== 1) {
+  throw new Error("A selected path did not expose geometric styles.");
+}
+const pathRoundTripItem = querySceneItemByObjectId(pathRoundTripId);
+if (pathRoundTripItem.kind !== 5) {
+  throw new Error("A path was not exposed as the path shape kind.");
+}
 if (wasm.blitz_scene_revision() === emptyRevision) {
   throw new Error("Scene mutations did not advance the revision.");
 }
@@ -701,10 +754,14 @@ if (
 }
 
 wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 10);
-if (wasm.blitz_scene_query_total() !== 5) {
-  throw new Error(`Expected five restored objects, received ${wasm.blitz_scene_query_total()}.`);
+if (wasm.blitz_scene_query_total() !== 6) {
+  throw new Error(`Expected six restored objects, received ${wasm.blitz_scene_query_total()}.`);
 }
 const restoredFrame = querySceneItemByObjectId(frameRoundTripId);
+const restoredPath = querySceneItemByObjectId(pathRoundTripId);
+if (restoredPath.kind !== 5) {
+  throw new Error("A restored path did not keep its shape kind.");
+}
 wasm.blitz_select_object(
   frameRoundTripId[0],
   frameRoundTripId[1],

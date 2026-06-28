@@ -34,7 +34,7 @@ usize strlen(const char *text) {
 // scene (records + text); it is the load/restore size guard.
 #define BLITZ_SCENE_FILE_BUFFER_BYTES (512u * 1024u * 1024u)
 #define BLITZ_SCENE_FILE_MAGIC 0x5a544c42u
-#define BLITZ_SCENE_FILE_VERSION 6u
+#define BLITZ_SCENE_FILE_VERSION 7u
 #define BLITZ_SCENE_FILE_HEADER_BYTES 32u
 #define BLITZ_SCENE_FILE_LEGACY_RECORD_BYTES 80u
 #define BLITZ_SCENE_FILE_RECORD_BYTES 92u
@@ -42,6 +42,7 @@ usize strlen(const char *text) {
 #define BLITZ_SCENE_FILE_V6_RECORD_BYTES 112u
 #define BLITZ_MAX_TEXT_LAYOUT_LINES 256u
 #define BLITZ_CONTAINER_RETARGET_SELECTION_LIMIT 32u
+#define BLITZ_PATH_INPUT_POINTS 8192u
 
 #define BLITZ_INVALID_INDEX 0xffffffffu
 // High bit of a command's order word: set while the command's entity is being
@@ -60,12 +61,14 @@ usize strlen(const char *text) {
 #define BLITZ_COMPONENT_RELATIVE_TRANSFORM 512u
 #define BLITZ_COMPONENT_CONTAINER 1024u
 #define BLITZ_COMPONENT_FRAME_VIEW 2048u
+#define BLITZ_COMPONENT_PATH_VIEW 4096u
 
 #define BLITZ_SHAPE_RECT 0u
 #define BLITZ_SHAPE_TRIANGLE 1u
 #define BLITZ_SHAPE_OVAL 2u
 #define BLITZ_SHAPE_TEXT 3u
 #define BLITZ_SHAPE_FRAME 4u
+#define BLITZ_SHAPE_PATH 5u
 
 #define BLITZ_UPDATE_X 1u
 #define BLITZ_UPDATE_Y 2u
@@ -137,6 +140,14 @@ typedef struct FrameView {
   float title_font_size;
 } FrameView;
 
+typedef struct PathView {
+  Vec2 *points;
+  u32 point_count;
+  Color fill_color;
+  Color stroke_color;
+  float stroke_width;
+} PathView;
+
 typedef struct RelativeTransform {
   u32 parent;
   float offset_x;
@@ -192,6 +203,18 @@ typedef struct TextDraw {
   float color[4];
 } TextDraw;
 
+typedef struct PathDraw {
+  float bounds[4];
+  float fill_color[4];
+  float stroke_color[4];
+  float info[4];
+} PathDraw;
+
+typedef struct PathVertex {
+  float position_order_drag[4];
+  float color[4];
+} PathVertex;
+
 typedef struct SceneItem {
   ObjectId object_id;
   u32 shape_kind;
@@ -227,6 +250,7 @@ typedef struct World {
   OvalView *oval_views;
   TextView *text_views;
   FrameView *frame_views;
+  PathView *path_views;
   RelativeTransform *relative_transforms;
   u32 *first_child;
   u32 *next_sibling;
@@ -239,6 +263,8 @@ static RectDraw *rect_draws;
 static TriangleDraw *triangle_draws;
 static OvalDraw *oval_draws;
 static TextDraw *text_draws;
+static PathDraw *path_draws;
+static PathVertex *path_points;
 static ShapeCommand *dyn_commands;
 static RectDraw *dyn_rects;
 static u32 shape_commands_cap;
@@ -246,9 +272,14 @@ static u32 rect_draws_cap;
 static u32 triangle_draws_cap;
 static u32 oval_draws_cap;
 static u32 text_draws_cap;
+static u32 path_draws_cap;
+static u32 path_points_cap;
 static u32 dyn_commands_cap;
 static u32 dyn_rects_cap;
 static char text_input[BLITZ_TEXT_INPUT_BYTES];
+static float path_input[BLITZ_PATH_INPUT_POINTS * 2u];
+static Vec2 path_draft_points[BLITZ_PATH_INPUT_POINTS];
+static PathView path_draft_view;
 static char *text_pool;
 static u32 text_pool_capacity;
 static TextLayoutLine text_layout_lines[BLITZ_MAX_TEXT_LAYOUT_LINES];
@@ -272,8 +303,12 @@ static u32 shape_command_count;
 static u32 rect_draw_count;
 static u32 triangle_draw_count;
 static u32 oval_draw_count;
+static u32 path_draw_count;
+static u32 path_point_count;
+static u32 path_draft_active;
 static u32 text_draw_count;
 static u32 visible_text_shape_count;
+static u32 container_entity_count;
 static u32 dyn_command_count;
 static u32 dyn_rect_count;
 static u32 shape_command_version;
@@ -585,6 +620,7 @@ static const u32 ecs_strides[] = {
     sizeof(OvalView),          // oval_views
     sizeof(TextView),          // text_views
     sizeof(FrameView),         // frame_views
+    sizeof(PathView),          // path_views
     sizeof(RelativeTransform), // relative_transforms
     sizeof(u32),               // first_child
     sizeof(u32),               // next_sibling
@@ -629,18 +665,19 @@ static void ecs_bind_pointers(u32 capacity) {
   world.oval_views = (OvalView *)(ecs_block + ecs_offset(9u, capacity));
   world.text_views = (TextView *)(ecs_block + ecs_offset(10u, capacity));
   world.frame_views = (FrameView *)(ecs_block + ecs_offset(11u, capacity));
+  world.path_views = (PathView *)(ecs_block + ecs_offset(12u, capacity));
   world.relative_transforms =
-      (RelativeTransform *)(ecs_block + ecs_offset(12u, capacity));
-  world.first_child = (u32 *)(ecs_block + ecs_offset(13u, capacity));
-  world.next_sibling = (u32 *)(ecs_block + ecs_offset(14u, capacity));
-  world.prev_sibling = (u32 *)(ecs_block + ecs_offset(15u, capacity));
-  transform_dirty = (u32 *)(ecs_block + ecs_offset(16u, capacity));
-  transform_dirty_entities = (u32 *)(ecs_block + ecs_offset(17u, capacity));
-  draw_order_seen = (u32 *)(ecs_block + ecs_offset(18u, capacity));
-  duplicate_entity_map = (u32 *)(ecs_block + ecs_offset(19u, capacity));
-  internal_clipboard_sources = (u32 *)(ecs_block + ecs_offset(20u, capacity));
-  marquee_base_selected = (u32 *)(ecs_block + ecs_offset(21u, capacity));
-  free_slots = (u32 *)(ecs_block + ecs_offset(22u, capacity));
+      (RelativeTransform *)(ecs_block + ecs_offset(13u, capacity));
+  world.first_child = (u32 *)(ecs_block + ecs_offset(14u, capacity));
+  world.next_sibling = (u32 *)(ecs_block + ecs_offset(15u, capacity));
+  world.prev_sibling = (u32 *)(ecs_block + ecs_offset(16u, capacity));
+  transform_dirty = (u32 *)(ecs_block + ecs_offset(17u, capacity));
+  transform_dirty_entities = (u32 *)(ecs_block + ecs_offset(18u, capacity));
+  draw_order_seen = (u32 *)(ecs_block + ecs_offset(19u, capacity));
+  duplicate_entity_map = (u32 *)(ecs_block + ecs_offset(20u, capacity));
+  internal_clipboard_sources = (u32 *)(ecs_block + ecs_offset(21u, capacity));
+  marquee_base_selected = (u32 *)(ecs_block + ecs_offset(22u, capacity));
+  free_slots = (u32 *)(ecs_block + ecs_offset(23u, capacity));
 }
 
 // Grow the per-entity block to hold `count` slots. If the block is the last
@@ -711,6 +748,8 @@ static void ecs_storage_init(void) {
   triangle_draws = 0;
   oval_draws = 0;
   text_draws = 0;
+  path_draws = 0;
+  path_points = 0;
   dyn_commands = 0;
   dyn_rects = 0;
   scene_file_buffer = 0;
@@ -724,6 +763,8 @@ static void ecs_storage_init(void) {
   triangle_draws_cap = 0u;
   oval_draws_cap = 0u;
   text_draws_cap = 0u;
+  path_draws_cap = 0u;
+  path_points_cap = 0u;
   dyn_commands_cap = 0u;
   dyn_rects_cap = 0u;
   ecs_block = 0;
@@ -740,6 +781,7 @@ static void ecs_storage_init(void) {
   world.oval_views = 0;
   world.text_views = 0;
   world.frame_views = 0;
+  world.path_views = 0;
   world.relative_transforms = 0;
   world.first_child = 0;
   world.next_sibling = 0;
@@ -789,6 +831,7 @@ static void extract_static_shapes(void);
 static void extract_dynamic(void);
 static void normalize_draw_order_hierarchy(void);
 static void request_draw_order_normalize(void);
+static void mark_static_dynamic_dirty(void);
 static void flush_draw_order_normalize(void);
 static int point_in_rect(float world_x, float world_y, u32 entity);
 static int point_in_triangle(float world_x, float world_y, u32 entity);
@@ -916,6 +959,11 @@ static void mark_render_list_dirty(void) {
   static_dirty = 1u;
   dynamic_dirty = 1u;
   scene_revision += 1u;
+}
+
+static void mark_static_dynamic_dirty(void) {
+  static_dirty = 1u;
+  dynamic_dirty = 1u;
 }
 
 static void mark_dynamic_dirty(void) {
@@ -1094,6 +1142,32 @@ static u32 attach_entity_to_container_target(u32 entity, u32 target) {
                                        world.positions[target].y);
 }
 
+static void set_container_component(u32 entity, u32 enabled) {
+  if (entity == BLITZ_INVALID_INDEX || world.masks[entity] == 0u) {
+    return;
+  }
+  u32 has_container = (world.masks[entity] & BLITZ_COMPONENT_CONTAINER) != 0u;
+  if (enabled && !has_container) {
+    world.masks[entity] |= BLITZ_COMPONENT_CONTAINER;
+    container_entity_count += 1u;
+  } else if (!enabled && has_container) {
+    world.masks[entity] &= ~BLITZ_COMPONENT_CONTAINER;
+    if (container_entity_count > 0u) {
+      container_entity_count -= 1u;
+    }
+  }
+}
+
+static void attach_new_entity_to_container_target(u32 entity) {
+  if (container_entity_count == 0u) {
+    return;
+  }
+  u32 target = container_target_for_entity(entity, 0u, 0u);
+  if (target != BLITZ_INVALID_INDEX) {
+    attach_entity_to_container_target(entity, target);
+  }
+}
+
 static u32 attach_contained_items_to_container(u32 container) {
   if (container == BLITZ_INVALID_INDEX ||
       !(world.masks[container] & BLITZ_COMPONENT_CONTAINER)) {
@@ -1156,7 +1230,7 @@ static u32 set_entity_container(u32 entity, u32 enabled) {
     if (world.masks[entity] & BLITZ_COMPONENT_CONTAINER) {
       return 0u;
     }
-    world.masks[entity] |= BLITZ_COMPONENT_CONTAINER;
+    set_container_component(entity, 1u);
     attach_contained_items_to_container(entity);
     mark_render_list_dirty();
     return 1u;
@@ -1164,7 +1238,7 @@ static u32 set_entity_container(u32 entity, u32 enabled) {
   if (!(world.masks[entity] & BLITZ_COMPONENT_CONTAINER)) {
     return 0u;
   }
-  world.masks[entity] &= ~BLITZ_COMPONENT_CONTAINER;
+  set_container_component(entity, 0u);
   detach_container_children_to_underlying_targets(entity);
   mark_render_list_dirty();
   return 1u;
@@ -1184,6 +1258,14 @@ static void cleanup_entity_hierarchy(u32 entity) {
   world.relative_transforms[entity].offset_y = 0.0f;
   if (hidden_text_entity == entity) {
     hidden_text_entity = BLITZ_INVALID_INDEX;
+  }
+}
+
+static void release_entity_resources(u32 entity) {
+  if (world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) {
+    blitz_free(world.path_views[entity].points);
+    world.path_views[entity].points = 0;
+    world.path_views[entity].point_count = 0u;
   }
 }
 
@@ -1430,6 +1512,118 @@ static void ecs_set_frame_view(u32 entity, const char *title, Color title_color,
   world.frame_views[entity].title_color = title_color;
   world.frame_views[entity].title_font_size = title_font_size;
   world.masks[entity] |= BLITZ_COMPONENT_FRAME_VIEW;
+}
+
+static void ecs_set_path_view(u32 entity, Vec2 *points, u32 point_count,
+                              Color fill_color, Color stroke_color,
+                              float stroke_width) {
+  if (entity == BLITZ_INVALID_INDEX) {
+    return;
+  }
+  world.path_views[entity].points = points;
+  world.path_views[entity].point_count = point_count;
+  world.path_views[entity].fill_color = fill_color;
+  world.path_views[entity].stroke_color = stroke_color;
+  world.path_views[entity].stroke_width = stroke_width;
+  world.masks[entity] |= BLITZ_COMPONENT_PATH_VIEW;
+}
+
+static Vec2 path_bounds_min(Vec2 *points, u32 point_count) {
+  Vec2 result = points[0];
+  for (u32 i = 1u; i < point_count; i += 1u) {
+    result.x = result.x < points[i].x ? result.x : points[i].x;
+    result.y = result.y < points[i].y ? result.y : points[i].y;
+  }
+  return result;
+}
+
+static Vec2 path_bounds_max(Vec2 *points, u32 point_count) {
+  Vec2 result = points[0];
+  for (u32 i = 1u; i < point_count; i += 1u) {
+    result.x = result.x > points[i].x ? result.x : points[i].x;
+    result.y = result.y > points[i].y ? result.y : points[i].y;
+  }
+  return result;
+}
+
+static float vec2_length(float x, float y) {
+  return __builtin_sqrtf(x * x + y * y);
+}
+
+static Vec2 path_point_world(PathView view, Vec2 position, u32 index) {
+  Vec2 point = {position.x + view.points[index].x,
+                position.y + view.points[index].y};
+  return point;
+}
+
+static Vec2 path_tangent_at(PathView view, Vec2 position, u32 index) {
+  Vec2 prev = index > 0u ? path_point_world(view, position, index - 1u)
+                         : path_point_world(view, position, index);
+  Vec2 next = index + 1u < view.point_count
+                  ? path_point_world(view, position, index + 1u)
+                  : path_point_world(view, position, index);
+  float x = next.x - prev.x;
+  float y = next.y - prev.y;
+  float length = vec2_length(x, y);
+  if (length <= 0.001f) {
+    return (Vec2){1.0f, 0.0f};
+  }
+  return (Vec2){x / length, y / length};
+}
+
+static void push_path_vertex(Vec2 position, Color color, u32 order) {
+  PathVertex *vertex = &path_points[path_point_count];
+  vertex->position_order_drag[0] = position.x;
+  vertex->position_order_drag[1] = position.y;
+  vertex->position_order_drag[2] = (float)(order & 0x7fffffffu);
+  vertex->position_order_drag[3] = (order & BLITZ_DRAG_FLAG) ? 1.0f : 0.0f;
+  vertex->color[0] = color.r;
+  vertex->color[1] = color.g;
+  vertex->color[2] = color.b;
+  vertex->color[3] = color.a;
+  path_point_count += 1u;
+}
+
+static void push_path_triangle(Vec2 a, Vec2 b, Vec2 c, Color color,
+                               u32 order) {
+  push_path_vertex(a, color, order);
+  push_path_vertex(b, color, order);
+  push_path_vertex(c, color, order);
+}
+
+static void push_path_quad(Vec2 a, Vec2 b, Vec2 c, Vec2 d, Color color,
+                           u32 order) {
+  if (color.a <= 0.001f) {
+    return;
+  }
+  push_path_triangle(a, b, c, color, order);
+  push_path_triangle(c, b, d, color, order);
+}
+
+static void path_recompute_entity_bounds_preserve_world(u32 entity) {
+  if (entity == BLITZ_INVALID_INDEX ||
+      !(world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW)) {
+    return;
+  }
+  PathView view = world.path_views[entity];
+  if (!view.points || view.point_count < 2u) {
+    return;
+  }
+  Vec2 old_position = world.positions[entity];
+  Vec2 min = path_bounds_min(view.points, view.point_count);
+  Vec2 max = path_bounds_max(view.points, view.point_count);
+  float pad = view.stroke_width * 0.5f;
+  Vec2 next_position = {old_position.x + min.x - pad,
+                        old_position.y + min.y - pad};
+  float dx = old_position.x - next_position.x;
+  float dy = old_position.y - next_position.y;
+  for (u32 i = 0u; i < view.point_count; i += 1u) {
+    view.points[i].x += dx;
+    view.points[i].y += dy;
+  }
+  world.positions[entity] = next_position;
+  world.sizes[entity].x = max.x - min.x + pad * 2.0f;
+  world.sizes[entity].y = max.y - min.y + pad * 2.0f;
 }
 
 static void clear_selection(void) {
@@ -1877,6 +2071,107 @@ static void push_oval_draw(u32 entity, u32 order) {
   shape_command_count += 1u;
 }
 
+static void push_path_view_draws(PathView view, Vec2 position, u32 entity,
+                                 u32 order) {
+  if (!view.points || view.point_count < 2u) {
+    return;
+  }
+  if (path_draw_count >= BLITZ_MAX_RECT_DRAWS) {
+    return;
+  }
+  PathDraw *draw = &path_draws[path_draw_count];
+  if (entity == BLITZ_INVALID_INDEX) {
+    Vec2 min = path_bounds_min(view.points, view.point_count);
+    Vec2 max = path_bounds_max(view.points, view.point_count);
+    float pad = view.stroke_width * 0.5f;
+    draw->bounds[0] = min.x - pad;
+    draw->bounds[1] = min.y - pad;
+    draw->bounds[2] = max.x - min.x + pad * 2.0f;
+    draw->bounds[3] = max.y - min.y + pad * 2.0f;
+  } else {
+    draw->bounds[0] = position.x;
+    draw->bounds[1] = position.y;
+    draw->bounds[2] = world.sizes[entity].x;
+    draw->bounds[3] = world.sizes[entity].y;
+  }
+  draw->fill_color[0] = view.fill_color.r;
+  draw->fill_color[1] = view.fill_color.g;
+  draw->fill_color[2] = view.fill_color.b;
+  draw->fill_color[3] = view.fill_color.a;
+  draw->stroke_color[0] = view.stroke_color.r;
+  draw->stroke_color[1] = view.stroke_color.g;
+  draw->stroke_color[2] = view.stroke_color.b;
+  draw->stroke_color[3] = view.stroke_color.a;
+  draw->info[0] = view.stroke_width;
+  draw->info[1] = (float)path_point_count;
+  draw->info[2] = (float)view.point_count;
+  draw->info[3] = 0.0f;
+
+  float half_width = view.stroke_width * 0.5f;
+  float border_width = 0.0f;
+  if (view.stroke_color.a > 0.001f) {
+    border_width = half_width * 0.25f;
+    if (border_width < 1.0f) {
+      border_width = 1.0f;
+    }
+    if (border_width > half_width) {
+      border_width = half_width;
+    }
+  }
+  float fill_half_width = half_width - border_width;
+  if (fill_half_width < 0.0f) {
+    fill_half_width = 0.0f;
+  }
+
+  for (u32 i = 1u; i < view.point_count; i += 1u) {
+    Vec2 start = path_point_world(view, position, i - 1u);
+    Vec2 end = path_point_world(view, position, i);
+    Vec2 start_tangent = path_tangent_at(view, position, i - 1u);
+    Vec2 end_tangent = path_tangent_at(view, position, i);
+    Vec2 start_normal = {-start_tangent.y, start_tangent.x};
+    Vec2 end_normal = {-end_tangent.y, end_tangent.x};
+
+    Vec2 start_outer_l = {start.x + start_normal.x * half_width,
+                          start.y + start_normal.y * half_width};
+    Vec2 start_outer_r = {start.x - start_normal.x * half_width,
+                          start.y - start_normal.y * half_width};
+    Vec2 end_outer_l = {end.x + end_normal.x * half_width,
+                        end.y + end_normal.y * half_width};
+    Vec2 end_outer_r = {end.x - end_normal.x * half_width,
+                        end.y - end_normal.y * half_width};
+
+    if (fill_half_width > 0.001f) {
+      Vec2 start_inner_l = {start.x + start_normal.x * fill_half_width,
+                            start.y + start_normal.y * fill_half_width};
+      Vec2 start_inner_r = {start.x - start_normal.x * fill_half_width,
+                            start.y - start_normal.y * fill_half_width};
+      Vec2 end_inner_l = {end.x + end_normal.x * fill_half_width,
+                          end.y + end_normal.y * fill_half_width};
+      Vec2 end_inner_r = {end.x - end_normal.x * fill_half_width,
+                          end.y - end_normal.y * fill_half_width};
+      push_path_quad(start_inner_l, start_inner_r, end_inner_l, end_inner_r,
+                     view.fill_color, order);
+      if (border_width > 0.001f) {
+        push_path_quad(start_outer_l, start_inner_l, end_outer_l, end_inner_l,
+                       view.stroke_color, order);
+        push_path_quad(start_inner_r, start_outer_r, end_inner_r, end_outer_r,
+                       view.stroke_color, order);
+      }
+    } else {
+      push_path_quad(start_outer_l, start_outer_r, end_outer_l, end_outer_r,
+                     border_width > 0.001f ? view.stroke_color
+                                           : view.fill_color,
+                     order);
+    }
+  }
+  path_draw_count += 1u;
+}
+
+static void push_path_draws(u32 entity, u32 order) {
+  push_path_view_draws(world.path_views[entity], world.positions[entity],
+                       entity, order);
+}
+
 static const FontGlyphMetric *font_glyph_metric(u32 codepoint) {
   u32 low = 0u;
   u32 high = BLITZ_FONT_GLYPH_COUNT;
@@ -2246,8 +2541,25 @@ static void extract_static_shapes(void) {
   rect_draw_count = 0u;
   triangle_draw_count = 0u;
   oval_draw_count = 0u;
+  path_draw_count = 0u;
+  path_point_count = 0u;
   u32 draw_need = world.draw_order_count;
-  shape_commands = draw_reserve(shape_commands, &shape_commands_cap, draw_need,
+  u32 path_draw_need = 0u;
+  u32 path_point_need = 0u;
+  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
+    u32 entity = world.draw_order[i];
+    if ((world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) &&
+        world.path_views[entity].point_count > 1u) {
+      path_draw_need += 1u;
+      path_point_need += (world.path_views[entity].point_count - 1u) * 18u;
+    }
+  }
+  if (path_draft_active && path_draft_view.point_count > 1u) {
+    path_draw_need += 1u;
+    path_point_need += (path_draft_view.point_count - 1u) * 18u;
+  }
+  u32 command_need = draw_need + (path_draft_active ? 1u : 0u);
+  shape_commands = draw_reserve(shape_commands, &shape_commands_cap, command_need,
                                 sizeof(ShapeCommand));
   rect_draws =
       draw_reserve(rect_draws, &rect_draws_cap, draw_need, sizeof(RectDraw));
@@ -2255,8 +2567,13 @@ static void extract_static_shapes(void) {
                                 sizeof(TriangleDraw));
   oval_draws =
       draw_reserve(oval_draws, &oval_draws_cap, draw_need, sizeof(OvalDraw));
-  if (draw_need && (!shape_commands || !rect_draws || !triangle_draws ||
-                    !oval_draws)) {
+  path_draws =
+      draw_reserve(path_draws, &path_draws_cap, path_draw_need, sizeof(PathDraw));
+  path_points = draw_reserve(path_points, &path_points_cap, path_point_need,
+                             sizeof(PathVertex));
+  if ((command_need && !shape_commands) ||
+      (draw_need && (!rect_draws || !triangle_draws || !oval_draws)) ||
+      (path_draw_need && !path_draws) || (path_point_need && !path_points)) {
     static_dirty = 0u;
     return;
   }
@@ -2278,7 +2595,13 @@ static void extract_static_shapes(void) {
       push_oval_draw(entity, order);
     } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
       push_triangle_draw(entity, order);
+    } else if (world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) {
+      push_path_draws(entity, order);
     }
+  }
+  if (path_draft_active && path_draft_view.point_count > 1u) {
+    push_path_view_draws(path_draft_view, (Vec2){0.0f, 0.0f},
+                         BLITZ_INVALID_INDEX, world.draw_order_count);
   }
 
   uniforms.style[2] = (float)shape_command_count;
@@ -2463,6 +2786,38 @@ static int point_in_oval(float world_x, float world_y, u32 entity) {
   return dx * dx + dy * dy <= 1.0f;
 }
 
+static float distance_to_segment_sq(float px, float py, Vec2 a, Vec2 b) {
+  float vx = b.x - a.x;
+  float vy = b.y - a.y;
+  float wx = px - a.x;
+  float wy = py - a.y;
+  float len_sq = vx * vx + vy * vy;
+  float t = len_sq > 0.001f ? (wx * vx + wy * vy) / len_sq : 0.0f;
+  t = clampf(t, 0.0f, 1.0f);
+  float dx = px - (a.x + vx * t);
+  float dy = py - (a.y + vy * t);
+  return dx * dx + dy * dy;
+}
+
+static int point_in_path(float world_x, float world_y, u32 entity) {
+  PathView view = world.path_views[entity];
+  if (!view.points || view.point_count < 2u) {
+    return 0;
+  }
+  float hit_radius = view.stroke_width * 0.5f + 5.0f / uniforms.style[0];
+  float hit_radius_sq = hit_radius * hit_radius;
+  Vec2 position = world.positions[entity];
+  for (u32 i = 1u; i < view.point_count; i += 1u) {
+    Vec2 a = {position.x + view.points[i - 1u].x,
+              position.y + view.points[i - 1u].y};
+    Vec2 b = {position.x + view.points[i].x, position.y + view.points[i].y};
+    if (distance_to_segment_sq(world_x, world_y, a, b) <= hit_radius_sq) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static void resize_text_entity_to_width(u32 entity, float width) {
   TextView *view = &world.text_views[entity];
   float padding = view->origin_x;
@@ -2598,6 +2953,8 @@ static u32 hit_test_entity(float world_x, float world_y) {
       hit = (u32)point_in_oval(world_x, world_y, entity);
     } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
       hit = (u32)point_in_triangle(world_x, world_y, entity);
+    } else if (world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) {
+      hit = (u32)point_in_path(world_x, world_y, entity);
     } else {
       hit = (u32)point_in_rect(world_x, world_y, entity);
     }
@@ -2707,7 +3064,7 @@ static u32 create_base_frame(float x, float y, float width, float height,
     return entity;
   }
   ecs_set_frame_view(entity, title, title_color, title_font_size);
-  world.masks[entity] |= BLITZ_COMPONENT_CONTAINER;
+  set_container_component(entity, 1u);
   return entity;
 }
 
@@ -2740,6 +3097,34 @@ static u32 create_base_triangle(float x, float y, float width, float height,
   ecs_set_triangle_view(entity, fill, stroke, stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
   ecs_set_resizable(entity, 1u, 1u);
+  if (history_transaction_active) {
+    history_record_created(entity);
+  }
+  return entity;
+}
+
+static u32 create_base_path(Vec2 *points, u32 point_count, Color fill,
+                            Color stroke, float stroke_width) {
+  if (!points || point_count < 2u || stroke_width <= 0.0f) {
+    return BLITZ_INVALID_INDEX;
+  }
+  u32 entity = ecs_create_entity();
+  if (entity == BLITZ_INVALID_INDEX) {
+    return entity;
+  }
+  Vec2 min = path_bounds_min(points, point_count);
+  Vec2 max = path_bounds_max(points, point_count);
+  float pad = stroke_width * 0.5f;
+  Vec2 position = {min.x - pad, min.y - pad};
+  for (u32 i = 0u; i < point_count; i += 1u) {
+    points[i].x -= position.x;
+    points[i].y -= position.y;
+  }
+  ecs_set_position(entity, position.x, position.y);
+  ecs_set_size(entity, max.x - min.x + pad * 2.0f,
+               max.y - min.y + pad * 2.0f);
+  ecs_set_path_view(entity, points, point_count, fill, stroke, stroke_width);
+  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
   if (history_transaction_active) {
     history_record_created(entity);
   }
@@ -2803,7 +3188,7 @@ static u32 create_slide_rect(float x, float y, float width, float height,
   u32 entity = create_base_rect(slide_origin_x + x, slide_origin_y + y, width,
                                 height, fill, stroke, stroke_width);
   attach_slide_child(entity);
-  world.masks[entity] |= BLITZ_COMPONENT_CONTAINER;
+  set_container_component(entity, 1u);
   return entity;
 }
 
@@ -2903,12 +3288,27 @@ static u32 clone_entity_for_duplicate(u32 source, float offset_x,
                              position.y + view.origin_x + offset_y,
                              view.font_size, view.color, view.max_width,
                              view.line_height, view.max_lines, view.align);
+  } else if (mask & BLITZ_COMPONENT_PATH_VIEW) {
+    PathView view = world.path_views[source];
+    Vec2 *points =
+        (Vec2 *)blitz_alloc((usize)view.point_count * sizeof(Vec2));
+    if (points) {
+      for (u32 i = 0u; i < view.point_count; i += 1u) {
+        points[i].x = position.x + view.points[i].x + offset_x;
+        points[i].y = position.y + view.points[i].y + offset_y;
+      }
+      clone = create_base_path(points, view.point_count, view.fill_color,
+                               view.stroke_color, view.stroke_width);
+      if (clone == BLITZ_INVALID_INDEX) {
+        blitz_free(points);
+      }
+    }
   }
   if (clone != BLITZ_INVALID_INDEX &&
       (mask & BLITZ_COMPONENT_CONTAINER)) {
-    world.masks[clone] |= BLITZ_COMPONENT_CONTAINER;
+    set_container_component(clone, 1u);
   } else if (clone != BLITZ_INVALID_INDEX) {
-    world.masks[clone] &= ~BLITZ_COMPONENT_CONTAINER;
+    set_container_component(clone, 0u);
   }
   return clone;
 }
@@ -3037,8 +3437,17 @@ void blitz_init(void) {
   rect_draw_count = 0u;
   triangle_draw_count = 0u;
   oval_draw_count = 0u;
+  path_draw_count = 0u;
+  path_draft_active = 0u;
+  path_draft_view.points = path_draft_points;
+  path_draft_view.point_count = 0u;
+  path_draft_view.fill_color = (Color){0.08f, 0.10f, 0.13f, 1.0f};
+  path_draft_view.stroke_color = (Color){0.08f, 0.10f, 0.13f, 1.0f};
+  path_draft_view.stroke_width = 4.0f;
+  path_point_count = 0u;
   text_draw_count = 0u;
   visible_text_shape_count = 0u;
+  container_entity_count = 0u;
   dyn_command_count = 0u;
   dyn_rect_count = 0u;
   shape_command_version = 0u;
@@ -3051,6 +3460,8 @@ void blitz_init(void) {
   drag_top_level_count = 0u;
   drag_offset.x = 0.0f;
   drag_offset.y = 0.0f;
+  path_draft_active = 0u;
+  path_draft_view.point_count = 0u;
   resize_active = 0u;
   resize_entity = BLITZ_INVALID_INDEX;
   resize_handle = 0u;
@@ -3665,11 +4076,17 @@ u32 blitz_paste_internal_clipboard(float offset_x, float offset_y) {
 }
 
 static void clear_scene_state(void) {
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.masks[entity] != 0u) {
+      release_entity_resources(entity);
+    }
+  }
   world.entity_count = 0u;
   world.draw_order_count = 0u;
   free_count = 0u;
   live_count = 0u;
   selected_count = 0u;
+  container_entity_count = 0u;
   dragging_selection = 0u;
   drag_active = 0u;
   drag_hover_container = BLITZ_INVALID_INDEX;
@@ -3863,6 +4280,7 @@ u32 blitz_create_rect(float x, float y, float width, float height,
     if (history_owned) history_cancel();
     return entity;
   }
+  attach_new_entity_to_container_target(entity);
   select_only(entity);
   mark_render_list_dirty();
   if (history_owned) history_commit();
@@ -3893,6 +4311,7 @@ u32 blitz_create_frame(float x, float y, float width, float height,
     if (history_owned) history_cancel();
     return entity;
   }
+  attach_new_entity_to_container_target(entity);
   select_only(entity);
   mark_render_list_dirty();
   if (history_owned) history_commit();
@@ -3916,6 +4335,7 @@ u32 blitz_create_circle(float center_x, float center_y, float radius,
     if (history_owned) history_cancel();
     return entity;
   }
+  attach_new_entity_to_container_target(entity);
   select_only(entity);
   mark_render_list_dirty();
   if (history_owned) history_commit();
@@ -3938,6 +4358,7 @@ u32 blitz_create_oval(float x, float y, float width, float height,
     if (history_owned) history_cancel();
     return entity;
   }
+  attach_new_entity_to_container_target(entity);
   select_only(entity);
   mark_render_list_dirty();
   if (history_owned) history_commit();
@@ -3960,6 +4381,59 @@ u32 blitz_create_triangle(float x, float y, float width, float height,
     if (history_owned) history_cancel();
     return entity;
   }
+  attach_new_entity_to_container_target(entity);
+  select_only(entity);
+  mark_render_list_dirty();
+  if (history_owned) history_commit();
+  return entity;
+}
+
+EXPORT("blitz_create_path")
+u32 blitz_create_path(u32 point_count, float fill_r, float fill_g,
+                      float fill_b, float fill_a, float stroke_r,
+                      float stroke_g, float stroke_b, float stroke_a,
+                      float stroke_width) {
+  if (point_count < 2u || point_count > BLITZ_PATH_INPUT_POINTS ||
+      stroke_width <= 0.0f) {
+    return BLITZ_INVALID_INDEX;
+  }
+  Vec2 *points = (Vec2 *)blitz_alloc((usize)point_count * sizeof(Vec2));
+  if (!points) {
+    return BLITZ_INVALID_INDEX;
+  }
+  u32 kept = 0u;
+  float min_distance = 1.5f / maxf_local(uniforms.style[0], 0.001f);
+  for (u32 i = 0u; i < point_count; i += 1u) {
+    float world_x = 0.0f;
+    float world_y = 0.0f;
+    screen_to_world(path_input[i * 2u], path_input[i * 2u + 1u], &world_x,
+                    &world_y);
+    if (kept > 0u) {
+      float dx = world_x - points[kept - 1u].x;
+      float dy = world_y - points[kept - 1u].y;
+      if (dx * dx + dy * dy < min_distance * min_distance &&
+          i + 1u < point_count) {
+        continue;
+      }
+    }
+    points[kept].x = world_x;
+    points[kept].y = world_y;
+    kept += 1u;
+  }
+  if (kept < 2u) {
+    blitz_free(points);
+    return BLITZ_INVALID_INDEX;
+  }
+  u32 history_owned = history_begin_owned();
+  u32 entity = create_base_path(
+      points, kept, (Color){fill_r, fill_g, fill_b, fill_a},
+      (Color){stroke_r, stroke_g, stroke_b, stroke_a}, stroke_width);
+  if (entity == BLITZ_INVALID_INDEX) {
+    blitz_free(points);
+    if (history_owned) history_cancel();
+    return entity;
+  }
+  attach_new_entity_to_container_target(entity);
   select_only(entity);
   mark_render_list_dirty();
   if (history_owned) history_commit();
@@ -3974,6 +4448,56 @@ u32 blitz_text_input_ptr(void) {
 EXPORT("blitz_text_input_capacity")
 u32 blitz_text_input_capacity(void) {
   return BLITZ_TEXT_INPUT_BYTES;
+}
+
+EXPORT("blitz_path_input_ptr")
+u32 blitz_path_input_ptr(void) {
+  return (u32)&path_input[0];
+}
+
+EXPORT("blitz_path_input_capacity")
+u32 blitz_path_input_capacity(void) {
+  return BLITZ_PATH_INPUT_POINTS;
+}
+
+EXPORT("blitz_update_path_draft")
+u32 blitz_update_path_draft(u32 point_count, float fill_r, float fill_g,
+                            float fill_b, float fill_a, float stroke_r,
+                            float stroke_g, float stroke_b, float stroke_a,
+                            float stroke_width) {
+  if (point_count < 2u || point_count > BLITZ_PATH_INPUT_POINTS ||
+      stroke_width <= 0.0f) {
+    path_draft_active = 0u;
+    path_draft_view.point_count = 0u;
+    mark_static_dynamic_dirty();
+    return 0u;
+  }
+  for (u32 i = 0u; i < point_count; i += 1u) {
+    float world_x = 0.0f;
+    float world_y = 0.0f;
+    screen_to_world(path_input[i * 2u], path_input[i * 2u + 1u], &world_x,
+                    &world_y);
+    path_draft_points[i].x = world_x;
+    path_draft_points[i].y = world_y;
+  }
+  path_draft_view.points = path_draft_points;
+  path_draft_view.point_count = point_count;
+  path_draft_view.fill_color = (Color){fill_r, fill_g, fill_b, fill_a};
+  path_draft_view.stroke_color = (Color){stroke_r, stroke_g, stroke_b, stroke_a};
+  path_draft_view.stroke_width = stroke_width;
+  path_draft_active = 1u;
+  mark_static_dynamic_dirty();
+  return 1u;
+}
+
+EXPORT("blitz_clear_path_draft")
+void blitz_clear_path_draft(void) {
+  if (!path_draft_active && path_draft_view.point_count == 0u) {
+    return;
+  }
+  path_draft_active = 0u;
+  path_draft_view.point_count = 0u;
+  mark_static_dynamic_dirty();
 }
 
 EXPORT("blitz_create_text")
@@ -3996,6 +4520,7 @@ u32 blitz_create_text(float x, float y, float font_size, float color_r,
     if (history_owned) history_cancel();
     return entity;
   }
+  attach_new_entity_to_container_target(entity);
   select_only(entity);
   mark_render_list_dirty();
   if (history_owned) history_commit();
@@ -4207,6 +4732,12 @@ u32 blitz_query_scene(float min_x, float min_y, float max_x, float max_y,
       fill = view.color;
       font_size = view.font_size;
       text = view.text;
+    } else if (mask & BLITZ_COMPONENT_PATH_VIEW) {
+      PathView view = world.path_views[entity];
+      kind = BLITZ_SHAPE_PATH;
+      fill = view.fill_color;
+      stroke = view.stroke_color;
+      stroke_width = view.stroke_width;
     } else {
       continue;
     }
@@ -4406,11 +4937,21 @@ u32 blitz_scene_serialize(void) {
       align = view.align;
       text = view.text;
       text_length = string_length(text);
+    } else if (mask & BLITZ_COMPONENT_PATH_VIEW) {
+      PathView view = world.path_views[entity];
+      kind = BLITZ_SHAPE_PATH;
+      fill = view.fill_color;
+      stroke = view.stroke_color;
+      stroke_width = view.stroke_width;
+      text_length = view.point_count;
     } else {
       continue;
     }
 
-    u32 record_bytes = BLITZ_SCENE_FILE_V6_RECORD_BYTES + align4(text_length);
+    u32 payload_bytes =
+        kind == BLITZ_SHAPE_PATH ? text_length * 2u * sizeof(float)
+                                 : align4(text_length);
+    u32 record_bytes = BLITZ_SCENE_FILE_V6_RECORD_BYTES + payload_bytes;
     if (offset + record_bytes > BLITZ_SCENE_FILE_BUFFER_BYTES) {
       return 0u;
     }
@@ -4450,9 +4991,21 @@ u32 blitz_scene_serialize(void) {
     write_u32(scene_file_buffer, offset + 104u, align);
     write_u32(scene_file_buffer, offset + 108u,
               mask & BLITZ_COMPONENT_CONTAINER);
-    for (u32 i = 0u; i < align4(text_length); i += 1u) {
-      scene_file_buffer[offset + BLITZ_SCENE_FILE_V6_RECORD_BYTES + i] =
-          i < text_length ? (unsigned char)text[i] : 0u;
+    if (kind == BLITZ_SHAPE_PATH) {
+      PathView view = world.path_views[entity];
+      for (u32 i = 0u; i < view.point_count; i += 1u) {
+        write_f32(scene_file_buffer,
+                  offset + BLITZ_SCENE_FILE_V6_RECORD_BYTES + i * 8u,
+                  view.points[i].x);
+        write_f32(scene_file_buffer,
+                  offset + BLITZ_SCENE_FILE_V6_RECORD_BYTES + i * 8u + 4u,
+                  view.points[i].y);
+      }
+    } else {
+      for (u32 i = 0u; i < align4(text_length); i += 1u) {
+        scene_file_buffer[offset + BLITZ_SCENE_FILE_V6_RECORD_BYTES + i] =
+            i < text_length ? (unsigned char)text[i] : 0u;
+      }
     }
     offset += record_bytes;
     object_count += 1u;
@@ -4517,11 +5070,20 @@ u32 blitz_scene_deserialize(u32 byte_count) {
     u32 record_bytes = read_u32(scene_file_buffer, offset + 4u);
     u32 text_length = read_u32(scene_file_buffer, offset + 12u);
     u32 max_kind =
-        file_version >= 5u ? BLITZ_SHAPE_FRAME : BLITZ_SHAPE_TEXT;
+        file_version >= 7u
+            ? BLITZ_SHAPE_PATH
+            : (file_version >= 5u ? BLITZ_SHAPE_FRAME : BLITZ_SHAPE_TEXT);
     if (kind > max_kind ||
         record_bytes < fixed_record_bytes ||
-        offset + record_bytes > byte_count ||
-        text_length > record_bytes - fixed_record_bytes) {
+        offset + record_bytes > byte_count) {
+      return 8u;
+    }
+    u32 payload_bytes = record_bytes - fixed_record_bytes;
+    if (kind == BLITZ_SHAPE_PATH) {
+      if (text_length < 2u || payload_bytes != text_length * 8u) {
+        return 8u;
+      }
+    } else if (text_length > payload_bytes) {
       return 8u;
     }
     float width = read_f32(scene_file_buffer, offset + 24u);
@@ -4535,7 +5097,7 @@ u32 blitz_scene_deserialize(u32 byte_count) {
         return 10u;
       }
       required_text_bytes += text_length + 1u;
-    } else if (text_length != 0u) {
+    } else if (kind != BLITZ_SHAPE_PATH && text_length != 0u) {
       return 11u;
     }
     offset += record_bytes;
@@ -4625,7 +5187,7 @@ u32 blitz_scene_deserialize(u32 byte_count) {
       ecs_set_rect_view(entity, fill, stroke, stroke_width);
       ecs_set_frame_view(entity, title, title_color, title_font_size);
       if (file_version < 6u) {
-        world.masks[entity] |= BLITZ_COMPONENT_CONTAINER;
+        set_container_component(entity, 1u);
       }
       ecs_set_resizable(entity, 1u, 1u);
     } else if (kind == BLITZ_SHAPE_TRIANGLE) {
@@ -4634,6 +5196,19 @@ u32 blitz_scene_deserialize(u32 byte_count) {
     } else if (kind == BLITZ_SHAPE_OVAL) {
       ecs_set_oval_view(entity, fill, stroke, stroke_width);
       ecs_set_resizable(entity, 1u, 1u);
+    } else if (kind == BLITZ_SHAPE_PATH) {
+      Vec2 *points = (Vec2 *)blitz_alloc((usize)text_length * sizeof(Vec2));
+      if (!points) {
+        clear_scene_state();
+        return 13u;
+      }
+      for (u32 i = 0u; i < text_length; i += 1u) {
+        points[i].x = read_f32(scene_file_buffer,
+                               offset + fixed_record_bytes + i * 8u);
+        points[i].y = read_f32(scene_file_buffer,
+                               offset + fixed_record_bytes + i * 8u + 4u);
+      }
+      ecs_set_path_view(entity, points, text_length, fill, stroke, stroke_width);
     } else {
       if (!text_pool_ensure(text_length + 1u)) {
         clear_scene_state();
@@ -4653,7 +5228,7 @@ u32 blitz_scene_deserialize(u32 byte_count) {
     }
     if (file_version >= 6u &&
         (stored_component_mask & BLITZ_COMPONENT_CONTAINER)) {
-      world.masks[entity] |= BLITZ_COMPONENT_CONTAINER;
+      set_container_component(entity, 1u);
     }
     world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
     world.selected[entity] = 0u;
@@ -4706,6 +5281,7 @@ void blitz_delete_selected(void) {
     u32 entity = world.draw_order[index];
     if (world.selected[entity]) {
       cleanup_entity_hierarchy(entity);
+      release_entity_resources(entity);
       world.masks[entity] = 0u;
       world.selected[entity] = 0u;
       free_slots[free_count] = entity;
@@ -4792,6 +5368,12 @@ u32 blitz_selected_debug_ptr(void) {
     fill = view.color;
     font_size = view.font_size;
     text = view.text;
+  } else if (mask & BLITZ_COMPONENT_PATH_VIEW) {
+    PathView view = world.path_views[entity];
+    kind = BLITZ_SHAPE_PATH;
+    fill = view.fill_color;
+    stroke = view.stroke_color;
+    stroke_width = view.stroke_width;
   }
   selected_debug_item.object_id = world.object_ids[entity];
   selected_debug_item.shape_kind = kind;
@@ -4870,7 +5452,8 @@ u32 blitz_selected_style_kind(void) {
     }
     if (world.masks[entity] & (BLITZ_COMPONENT_RECT_VIEW |
                                BLITZ_COMPONENT_TRIANGLE_VIEW |
-                               BLITZ_COMPONENT_OVAL_VIEW)) {
+                               BLITZ_COMPONENT_OVAL_VIEW |
+                               BLITZ_COMPONENT_PATH_VIEW)) {
       kind |= 1u;
     }
   }
@@ -4894,7 +5477,8 @@ u32 blitz_selected_style_ptr(void) {
     if (!found_geometry &&
         (world.masks[entity] & (BLITZ_COMPONENT_RECT_VIEW |
                                 BLITZ_COMPONENT_TRIANGLE_VIEW |
-                                BLITZ_COMPONENT_OVAL_VIEW))) {
+                                BLITZ_COMPONENT_OVAL_VIEW |
+                                BLITZ_COMPONENT_PATH_VIEW))) {
       found_geometry = 1u;
       if (world.masks[entity] & BLITZ_COMPONENT_RECT_VIEW) {
         RectView view = world.rect_views[entity];
@@ -4906,8 +5490,13 @@ u32 blitz_selected_style_ptr(void) {
         fill = view.fill_color;
         stroke = view.stroke_color;
         stroke_width = view.stroke_width;
-      } else {
+      } else if (world.masks[entity] & BLITZ_COMPONENT_OVAL_VIEW) {
         OvalView view = world.oval_views[entity];
+        fill = view.fill_color;
+        stroke = view.stroke_color;
+        stroke_width = view.stroke_width;
+      } else {
+        PathView view = world.path_views[entity];
         fill = view.fill_color;
         stroke = view.stroke_color;
         stroke_width = view.stroke_width;
@@ -4974,6 +5563,11 @@ void blitz_set_selected_fill(float r, float g, float b) {
       world.oval_views[entity].fill_color.g = g;
       world.oval_views[entity].fill_color.b = b;
       changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) {
+      world.path_views[entity].fill_color.r = r;
+      world.path_views[entity].fill_color.g = g;
+      world.path_views[entity].fill_color.b = b;
+      changed = 1u;
     }
   }
   if (changed) {
@@ -5000,6 +5594,9 @@ void blitz_set_selected_fill_opacity(float opacity) {
       changed = 1u;
     } else if (world.masks[entity] & BLITZ_COMPONENT_OVAL_VIEW) {
       world.oval_views[entity].fill_color.a = opacity;
+      changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) {
+      world.path_views[entity].fill_color.a = opacity;
       changed = 1u;
     }
   }
@@ -5033,6 +5630,11 @@ void blitz_set_selected_stroke(float r, float g, float b) {
       world.oval_views[entity].stroke_color.g = g;
       world.oval_views[entity].stroke_color.b = b;
       changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) {
+      world.path_views[entity].stroke_color.r = r;
+      world.path_views[entity].stroke_color.g = g;
+      world.path_views[entity].stroke_color.b = b;
+      changed = 1u;
     }
   }
   if (changed) {
@@ -5060,6 +5662,9 @@ void blitz_set_selected_stroke_opacity(float opacity) {
     } else if (world.masks[entity] & BLITZ_COMPONENT_OVAL_VIEW) {
       world.oval_views[entity].stroke_color.a = opacity;
       changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) {
+      world.path_views[entity].stroke_color.a = opacity;
+      changed = 1u;
     }
   }
   if (changed) {
@@ -5086,6 +5691,10 @@ void blitz_set_selected_stroke_width(float width) {
       changed = 1u;
     } else if (world.masks[entity] & BLITZ_COMPONENT_OVAL_VIEW) {
       world.oval_views[entity].stroke_width = width;
+      changed = 1u;
+    } else if (world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) {
+      world.path_views[entity].stroke_width = width;
+      path_recompute_entity_bounds_preserve_world(entity);
       changed = 1u;
     }
   }
@@ -5388,6 +5997,49 @@ u32 blitz_oval_draw_f32_count(void) {
 EXPORT("blitz_oval_draw_count")
 u32 blitz_oval_draw_count(void) {
   return oval_draw_count;
+}
+
+EXPORT("blitz_path_draw_ptr")
+u32 blitz_path_draw_ptr(void) {
+  world_update_for_frame();
+  return (u32)&path_draws[0];
+}
+
+EXPORT("blitz_path_draw_f32_count")
+u32 blitz_path_draw_f32_count(void) {
+  return sizeof(PathDraw) / sizeof(float);
+}
+
+EXPORT("blitz_path_draw_count")
+u32 blitz_path_draw_count(void) {
+  return path_draw_count;
+}
+
+EXPORT("blitz_path_point_ptr")
+u32 blitz_path_point_ptr(void) {
+  world_update_for_frame();
+  return (u32)&path_points[0];
+}
+
+EXPORT("blitz_path_point_f32_count")
+u32 blitz_path_point_f32_count(void) {
+  return sizeof(PathVertex) / sizeof(float);
+}
+
+EXPORT("blitz_path_point_count")
+u32 blitz_path_point_count(void) {
+  return path_point_count;
+}
+
+EXPORT("blitz_path_shape_count")
+u32 blitz_path_shape_count(void) {
+  u32 count = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) {
+      count += 1u;
+    }
+  }
+  return count;
 }
 
 EXPORT("blitz_text_draw_ptr")

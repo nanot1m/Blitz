@@ -14,6 +14,10 @@ type CanvasInteractionOptions = {
   beginTextEdit(): void;
   cancelEdit(): void;
   commitEdit(): void;
+  createPenStroke(points: Array<{ x: number; y: number }>): void;
+  updatePenDraft(points: Array<{ x: number; y: number }>): void;
+  clearPenDraft(): void;
+  isPenMode(): boolean;
   onSelectionChanged(): void;
 };
 
@@ -181,6 +185,8 @@ export function setupCanvasInteractions(
   let lastTapAt = 0;
   let lastTapX = 0;
   let lastTapY = 0;
+  let penPointerId: number | null = null;
+  let penPoints: Array<{ x: number; y: number }> = [];
 
   const eventToCanvasPixels = (event: PointerEvent | WheelEvent) => {
     const rect = canvas.getBoundingClientRect();
@@ -298,6 +304,9 @@ export function setupCanvasInteractions(
 
   const stopDragging = () => {
     clearLongPressTimer();
+    penPointerId = null;
+    penPoints = [];
+    options.clearPenDraft();
     draggingCamera = false;
     draggingEntity = false;
     resizingEntity = false;
@@ -313,6 +322,17 @@ export function setupCanvasInteractions(
   };
 
   canvas.addEventListener("pointerdown", (event) => {
+    if (options.isPenMode() && event.button === 0 && activeTouches.size === 0) {
+      event.preventDefault();
+      stopDragging();
+      const point = eventToCanvasPixels(event);
+      penPointerId = event.pointerId;
+      penPoints = [point];
+      options.updatePenDraft(penPoints);
+      canvas.setPointerCapture(event.pointerId);
+      canvas.classList.add("is-selecting");
+      return;
+    }
     if (event.pointerType === "touch") {
       event.preventDefault();
       activeTouches.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -410,6 +430,16 @@ export function setupCanvasInteractions(
   });
 
   canvas.addEventListener("pointermove", (event) => {
+    if (penPointerId === event.pointerId) {
+      event.preventDefault();
+      const point = eventToCanvasPixels(event);
+      const last = penPoints[penPoints.length - 1];
+      if (!last || Math.hypot(point.x - last.x, point.y - last.y) >= 1.5) {
+        penPoints.push(point);
+        options.updatePenDraft(penPoints);
+      }
+      return;
+    }
     if (event.pointerType === "touch") {
       if (!activeTouches.has(event.pointerId)) {
         return;
@@ -492,6 +522,28 @@ export function setupCanvasInteractions(
   });
 
   canvas.addEventListener("pointerup", (event) => {
+    if (penPointerId === event.pointerId) {
+      event.preventDefault();
+      const point = eventToCanvasPixels(event);
+      const last = penPoints[penPoints.length - 1];
+      if (!last || last.x !== point.x || last.y !== point.y) {
+        penPoints.push(point);
+      }
+      const points = penPoints;
+      penPointerId = null;
+      penPoints = [];
+      clearInteractionClasses();
+      if (canvas.hasPointerCapture(event.pointerId)) {
+        canvas.releasePointerCapture(event.pointerId);
+      }
+      if (points.length >= 2) {
+        options.createPenStroke(points);
+        options.onSelectionChanged();
+      } else {
+        options.clearPenDraft();
+      }
+      return;
+    }
     if (event.pointerType === "touch") {
       clearLongPressTimer();
       const wasPrimary = event.pointerId === primaryTouchId;
@@ -566,6 +618,16 @@ export function setupCanvasInteractions(
   });
 
   canvas.addEventListener("pointercancel", (event) => {
+    if (penPointerId === event.pointerId) {
+      penPointerId = null;
+      penPoints = [];
+      options.clearPenDraft();
+      clearInteractionClasses();
+      if (canvas.hasPointerCapture(event.pointerId)) {
+        canvas.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
     if (event.pointerType === "touch") {
       clearLongPressTimer();
       activeTouches.delete(event.pointerId);

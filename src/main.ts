@@ -145,8 +145,35 @@ type BlitzExports = {
     strokeA: number,
     strokeWidth: number,
   ): number;
+  blitz_create_path(
+    pointCount: number,
+    fillR: number,
+    fillG: number,
+    fillB: number,
+    fillA: number,
+    strokeR: number,
+    strokeG: number,
+    strokeB: number,
+    strokeA: number,
+    strokeWidth: number,
+  ): number;
   blitz_text_input_ptr(): number;
   blitz_text_input_capacity(): number;
+  blitz_path_input_ptr(): number;
+  blitz_path_input_capacity(): number;
+  blitz_update_path_draft(
+    pointCount: number,
+    fillR: number,
+    fillG: number,
+    fillB: number,
+    fillA: number,
+    strokeR: number,
+    strokeG: number,
+    strokeB: number,
+    strokeA: number,
+    strokeWidth: number,
+  ): number;
+  blitz_clear_path_draft(): void;
   blitz_measure_text_width(textLength: number, fontSize: number): number;
   blitz_layout_text(
     textLength: number,
@@ -249,6 +276,13 @@ type BlitzExports = {
   blitz_oval_draw_ptr(): number;
   blitz_oval_draw_f32_count(): number;
   blitz_oval_draw_count(): number;
+  blitz_path_draw_ptr(): number;
+  blitz_path_draw_f32_count(): number;
+  blitz_path_draw_count(): number;
+  blitz_path_point_ptr(): number;
+  blitz_path_point_f32_count(): number;
+  blitz_path_point_count(): number;
+  blitz_path_shape_count(): number;
   blitz_text_draw_ptr(): number;
   blitz_text_draw_f32_count(): number;
   blitz_text_draw_count(): number;
@@ -320,6 +354,7 @@ async function boot() {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   const maxShapes = wasm.blitz_render_max_shapes();
+  const maxPathVertices = maxShapes * 18;
   const maxTextDraws = wasm.blitz_render_max_text_draws();
   const maxDynCommands = wasm.blitz_render_max_dyn_commands();
   const maxDynRects = wasm.blitz_render_max_dyn_rects();
@@ -327,11 +362,15 @@ async function boot() {
   const rectDrawF32Count = wasm.blitz_rect_draw_f32_count();
   const triangleDrawF32Count = wasm.blitz_triangle_draw_f32_count();
   const ovalDrawF32Count = wasm.blitz_oval_draw_f32_count();
+  const pathDrawF32Count = wasm.blitz_path_draw_f32_count();
+  const pathPointF32Count = wasm.blitz_path_point_f32_count();
   const textDrawF32Count = wasm.blitz_text_draw_f32_count();
   const shapeCommandStride = shapeCommandU32Count * Uint32Array.BYTES_PER_ELEMENT;
   const rectDrawStride = rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const triangleDrawStride = triangleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const ovalDrawStride = ovalDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const pathDrawStride = pathDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const pathPointStride = pathPointF32Count * Float32Array.BYTES_PER_ELEMENT;
   const textDrawStride = textDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   // Storage buffers start small and grow on demand toward the capacity ceilings
   // above, so GPU memory tracks scene size instead of reserving for the maximum.
@@ -448,6 +487,16 @@ async function boot() {
         visibility: GPUShaderStage.FRAGMENT,
         sampler: { type: "filtering" },
       },
+      {
+        binding: 8,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: "read-only-storage" },
+      },
+      {
+        binding: 9,
+        visibility: GPUShaderStage.VERTEX,
+        buffer: { type: "read-only-storage" },
+      },
     ],
   });
   const pipelineLayout = device.createPipelineLayout({
@@ -489,6 +538,43 @@ async function boot() {
       format: depthFormat,
       depthWriteEnabled: true,
       depthCompare: "greater-equal",
+    },
+  });
+  const pathPipeline = device.createRenderPipeline({
+    label: "Blitz Path Pipeline",
+    layout: pipelineLayout,
+    vertex: {
+      module: shader,
+      entryPoint: "path_vertex_main",
+    },
+    fragment: {
+      module: shader,
+      entryPoint: "path_fragment_main",
+      targets: [
+        {
+          format,
+          blend: {
+            color: {
+              srcFactor: "src-alpha",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+            alpha: {
+              srcFactor: "one",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+          },
+        },
+      ],
+    },
+    primitive: {
+      topology: "triangle-list",
+    },
+    depthStencil: {
+      format: depthFormat,
+      depthWriteEnabled: true,
+      depthCompare: "greater",
     },
   });
   const cullShader = device.createShaderModule({
@@ -533,6 +619,11 @@ async function boot() {
         visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "storage" },
       },
+      {
+        binding: 7,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" },
+      },
     ],
   });
   const cullPipeline = device.createComputePipeline({
@@ -547,6 +638,8 @@ async function boot() {
   let rectCapacity = initialStorageCapacity;
   let triangleCapacity = initialStorageCapacity;
   let ovalCapacity = initialStorageCapacity;
+  let pathCapacity = initialStorageCapacity;
+  let pathPointCapacity = initialStorageCapacity;
   let textCapacity = initialStorageCapacity;
   let dynCommandCapacity = initialStorageCapacity;
   let dynRectCapacity = initialStorageCapacity;
@@ -569,6 +662,16 @@ async function boot() {
   let ovalStorageBuffer = device.createBuffer({
     label: "Blitz Oval Draw Storage",
     size: ovalCapacity * ovalDrawStride,
+    usage: storageDstUsage,
+  });
+  let pathStorageBuffer = device.createBuffer({
+    label: "Blitz Path Draw Storage",
+    size: pathCapacity * pathDrawStride,
+    usage: storageDstUsage,
+  });
+  let pathPointStorageBuffer = device.createBuffer({
+    label: "Blitz Path Vertex Storage",
+    size: pathPointCapacity * pathPointStride,
     usage: storageDstUsage,
   });
   let textStorageBuffer = device.createBuffer({
@@ -631,6 +734,7 @@ async function boot() {
         { binding: 4, resource: { buffer: ovalStorageBuffer } },
         { binding: 5, resource: { buffer: visibleCommandStorageBuffer } },
         { binding: 6, resource: { buffer: drawArgsBuffer } },
+        { binding: 7, resource: { buffer: pathStorageBuffer } },
       ],
     });
     staticRenderBindGroup = device.createBindGroup({
@@ -645,6 +749,8 @@ async function boot() {
         { binding: 5, resource: { buffer: textStorageBuffer } },
         { binding: 6, resource: fontAtlasView },
         { binding: 7, resource: fontSampler },
+        { binding: 8, resource: { buffer: pathStorageBuffer } },
+        { binding: 9, resource: { buffer: pathPointStorageBuffer } },
       ],
     });
     dynamicRenderBindGroup = device.createBindGroup({
@@ -659,6 +765,8 @@ async function boot() {
         { binding: 5, resource: { buffer: textStorageBuffer } },
         { binding: 6, resource: fontAtlasView },
         { binding: 7, resource: fontSampler },
+        { binding: 8, resource: { buffer: pathStorageBuffer } },
+        { binding: 9, resource: { buffer: pathPointStorageBuffer } },
       ],
     });
   };
@@ -694,12 +802,15 @@ async function boot() {
     rectCapacity * rectDrawStride +
     triangleCapacity * triangleDrawStride +
     ovalCapacity * ovalDrawStride +
+    pathCapacity * pathDrawStride +
+    pathPointCapacity * pathPointStride +
     textCapacity * textDrawStride +
     dynCommandCapacity * shapeCommandStride +
     dynRectCapacity * rectDrawStride +
     2 * 4 * Uint32Array.BYTES_PER_ELEMENT;
   let lastUploadedShapeCommandVersion = -1;
   let currentShapeCommandCount = 0;
+  let currentPathVertexCount = 0;
   let lastUploadedDynVersion = -1;
   let currentDynCommandCount = 0;
   let lastZoomPercent = -1;
@@ -736,8 +847,10 @@ async function boot() {
     const rectShapeCount = wasm.blitz_rect_draw_count();
     const triangleShapeCount = wasm.blitz_triangle_draw_count();
     const ovalShapeCount = wasm.blitz_oval_draw_count();
+    const pathShapeCount = wasm.blitz_path_shape_count();
+    const pathPointCount = wasm.blitz_path_point_count();
     const geometryShapeCount =
-      rectShapeCount + triangleShapeCount + ovalShapeCount;
+      rectShapeCount + triangleShapeCount + ovalShapeCount + pathShapeCount;
     const textShapeCount = Math.max(0, shapeCount - geometryShapeCount);
     const staticCommandCount = wasm.blitz_shape_command_count();
     const dynamicCommandCount = wasm.blitz_dyn_command_count();
@@ -757,12 +870,14 @@ async function boot() {
           ["Rect", formatNumber(rectShapeCount)],
           ["Tri", formatNumber(triangleShapeCount)],
           ["Oval", formatNumber(ovalShapeCount)],
+          ["Path", formatNumber(pathShapeCount)],
           ["Text", formatNumber(textShapeCount)],
         ])}
       </div>
       <div class="stats-section">
         ${metricRow("Static cmds", formatNumber(staticCommandCount))}
         ${metricRow("Dynamic cmds", formatNumber(dynamicCommandCount))}
+        ${metricRow("Path vertices", formatNumber(pathPointCount))}
         ${metricRow("Text glyphs", formatNumber(wasm.blitz_text_draw_count()))}
       </div>
       <div class="stats-section">
@@ -1893,11 +2008,117 @@ async function boot() {
     ui.redoButton.disabled = !sceneHistory.canRedo();
   };
   updateHistoryControls();
+  let penMode = false;
+  const penFill = { r: 0.08, g: 0.1, b: 0.13, a: 1 };
+  const penStroke = { r: 0.08, g: 0.1, b: 0.13, a: 0, width: 4 };
+  const setPenMode = (enabled: boolean) => {
+    penMode = enabled;
+    ui.penToolButton.setAttribute("aria-pressed", String(enabled));
+  };
+  const smoothPenPoints = (points: Array<{ x: number; y: number }>, capacity: number) => {
+    if (points.length < 3) {
+      return points.slice(0, capacity);
+    }
+    const smoothed: Array<{ x: number; y: number }> = [points[0]];
+    const catmull = (p0: number, p1: number, p2: number, p3: number, t: number) => {
+      const t2 = t * t;
+      const t3 = t2 * t;
+      return 0.5 * (
+        2 * p1 +
+        (-p0 + p2) * t +
+        (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+        (-p0 + 3 * p1 - 3 * p2 + p3) * t3
+      );
+    };
+    for (let i = 0; i < points.length - 1 && smoothed.length < capacity; i += 1) {
+      const p0 = points[Math.max(0, i - 1)];
+      const p1 = points[i];
+      const p2 = points[i + 1];
+      const p3 = points[Math.min(points.length - 1, i + 2)];
+      const distance = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+      const steps = Math.max(2, Math.min(10, Math.ceil(distance / 10)));
+      for (let step = 1; step <= steps && smoothed.length < capacity; step += 1) {
+        const t = step / steps;
+        smoothed.push({
+          x: catmull(p0.x, p1.x, p2.x, p3.x, t),
+          y: catmull(p0.y, p1.y, p2.y, p3.y, t),
+        });
+      }
+    }
+    return smoothed;
+  };
+  const writePathPoints = (points: Array<{ x: number; y: number }>) => {
+    const capacity = wasm.blitz_path_input_capacity();
+    const smoothed = smoothPenPoints(points, capacity);
+    const count = Math.min(smoothed.length, capacity);
+    if (count < 2) {
+      return 0;
+    }
+    new Float32Array(
+      wasm.memory.buffer,
+      wasm.blitz_path_input_ptr(),
+      count * 2,
+    ).set(smoothed.slice(0, count).flatMap((point) => [point.x, point.y]));
+    return count;
+  };
+  const updatePenDraft = (points: Array<{ x: number; y: number }>) => {
+    const count = writePathPoints(points);
+    if (count < 2) {
+      wasm.blitz_clear_path_draft();
+      return;
+    }
+    wasm.blitz_update_path_draft(
+      count,
+      penFill.r,
+      penFill.g,
+      penFill.b,
+      penFill.a,
+      penStroke.r,
+      penStroke.g,
+      penStroke.b,
+      penStroke.a,
+      penStroke.width,
+    );
+  };
+  const clearPenDraft = () => {
+    wasm.blitz_clear_path_draft();
+  };
+  const createPenStroke = (points: Array<{ x: number; y: number }>) => {
+    const count = writePathPoints(points);
+    if (count < 2) {
+      wasm.blitz_clear_path_draft();
+      return;
+    }
+    sceneHistory.transact(() => {
+      wasm.blitz_clear_path_draft();
+      wasm.blitz_create_path(
+        count,
+        penFill.r,
+        penFill.g,
+        penFill.b,
+        penFill.a,
+        penStroke.r,
+        penStroke.g,
+        penStroke.b,
+        penStroke.a,
+        penStroke.width,
+      );
+    });
+    updateSelectionState();
+    updateEmptyState();
+  };
+  ui.penToolButton.addEventListener("click", () => {
+    setPenMode(!penMode);
+  });
   stopDragging = setupCanvasInteractions(ui.canvas, wasm, {
     beginEdit: sceneHistory.begin,
     beginTextEdit,
     cancelEdit: sceneHistory.cancel,
     commitEdit: sceneHistory.commit,
+    createPenStroke,
+    updatePenDraft,
+    clearPenDraft,
+    isPenMode: () => penMode,
     onSelectionChanged: updateSelectionState,
   }).stopDragging;
   const deleteSelection = () => {
@@ -2182,7 +2403,12 @@ async function boot() {
       const triangleDrawCount = wasm.blitz_triangle_draw_count();
       const ovalDrawPtr = wasm.blitz_oval_draw_ptr();
       const ovalDrawCount = wasm.blitz_oval_draw_count();
+      const pathDrawPtr = wasm.blitz_path_draw_ptr();
+      const pathDrawCount = wasm.blitz_path_draw_count();
+      const pathPointPtr = wasm.blitz_path_point_ptr();
+      const pathPointCount = wasm.blitz_path_point_count();
       currentShapeCommandCount = shapeCommandCount;
+      currentPathVertexCount = pathPointCount;
       const eShape = ensureStorage(shapeCommandStorageBuffer, shapeCommandCapacity, shapeCommandCount, maxShapes, shapeCommandStride, storageDstUsage, "Blitz Shape Command Storage");
       shapeCommandStorageBuffer = eShape.buffer;
       shapeCommandCapacity = eShape.capacity;
@@ -2203,6 +2429,14 @@ async function boot() {
       ovalStorageBuffer = eOval.buffer;
       ovalCapacity = eOval.capacity;
       bindGroupsDirty ||= eOval.grew;
+      const ePath = ensureStorage(pathStorageBuffer, pathCapacity, pathDrawCount, maxShapes, pathDrawStride, storageDstUsage, "Blitz Path Draw Storage");
+      pathStorageBuffer = ePath.buffer;
+      pathCapacity = ePath.capacity;
+      bindGroupsDirty ||= ePath.grew;
+      const ePathPoint = ensureStorage(pathPointStorageBuffer, pathPointCapacity, pathPointCount, maxPathVertices, pathPointStride, storageDstUsage, "Blitz Path Vertex Storage");
+      pathPointStorageBuffer = ePathPoint.buffer;
+      pathPointCapacity = ePathPoint.capacity;
+      bindGroupsDirty ||= ePathPoint.grew;
       if (shapeCommandCount > 0) {
         device.queue.writeBuffer(
           shapeCommandStorageBuffer,
@@ -2244,6 +2478,28 @@ async function boot() {
             wasm.memory.buffer,
             ovalDrawPtr,
             ovalDrawCount * ovalDrawF32Count,
+          ),
+        );
+      }
+      if (pathDrawCount > 0) {
+        device.queue.writeBuffer(
+          pathStorageBuffer,
+          0,
+          new Float32Array(
+            wasm.memory.buffer,
+            pathDrawPtr,
+            pathDrawCount * pathDrawF32Count,
+          ),
+        );
+      }
+      if (pathPointCount > 0) {
+        device.queue.writeBuffer(
+          pathPointStorageBuffer,
+          0,
+          new Float32Array(
+            wasm.memory.buffer,
+            pathPointPtr,
+            pathPointCount * pathPointF32Count,
           ),
         );
       }
@@ -2357,7 +2613,13 @@ async function boot() {
       pass.setBindGroup(0, staticRenderBindGroup);
       pass.drawIndirect(drawArgsBuffer, 0);
     }
+    if (currentPathVertexCount > 0) {
+      pass.setPipeline(pathPipeline);
+      pass.setBindGroup(0, staticRenderBindGroup);
+      pass.draw(currentPathVertexCount);
+    }
     if (currentDynCommandCount > 0) {
+      pass.setPipeline(shapePipeline);
       pass.setBindGroup(0, dynamicRenderBindGroup);
       pass.draw(6, currentDynCommandCount);
     }

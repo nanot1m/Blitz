@@ -38,6 +38,18 @@ struct TextDraw {
   color: vec4f,
 };
 
+struct PathDraw {
+  bounds: vec4f,
+  fill_color: vec4f,
+  stroke_color: vec4f,
+  info: vec4f,
+};
+
+struct PathPoint {
+  position_order_drag: vec4f,
+  color: vec4f,
+};
+
 @group(0) @binding(0)
 var<uniform> u: BlitzUniforms;
 
@@ -56,6 +68,12 @@ var<storage, read> oval_draws: array<OvalDraw>;
 @group(0) @binding(5)
 var<storage, read> text_draws: array<TextDraw>;
 
+@group(0) @binding(8)
+var<storage, read> path_draws: array<PathDraw>;
+
+@group(0) @binding(9)
+var<storage, read> path_points: array<PathPoint>;
+
 @group(0) @binding(6)
 var font_atlas: texture_2d<f32>;
 
@@ -67,6 +85,11 @@ struct VertexOut {
   @location(0) world: vec2f,
   @location(1) @interpolate(flat) command_index: u32,
   @location(2) uv: vec2f,
+};
+
+struct PathVertexOut {
+  @builtin(position) position: vec4f,
+  @location(0) color: vec4f,
 };
 
 fn world_to_clip(world: vec2f) -> vec2f {
@@ -118,6 +141,10 @@ fn text_vertex(draw: TextDraw, vertex_index: u32) -> vec4f {
   return vec4f(world, uvs[vertex_index]);
 }
 
+fn path_vertex(draw: PathDraw, vertex_index: u32) -> vec2f {
+  return rect_bounds(draw.bounds, vertex_index);
+}
+
 @vertex
 fn shape_vertex_main(
   @builtin(vertex_index) shape_vertex_index: u32,
@@ -133,10 +160,12 @@ fn shape_vertex_main(
     world = triangle_bounds(triangle_draws[command.y], shape_vertex_index);
   } else if (command.x == 2u) {
     world = oval_bounds(oval_draws[command.y].oval, shape_vertex_index);
-  } else {
+  } else if (command.x == 3u) {
     let text_position = text_vertex(text_draws[command.y], shape_vertex_index);
     world = text_position.xy;
     uv = text_position.zw;
+  } else {
+    world = path_vertex(path_draws[command.y], shape_vertex_index);
   }
 
   // High bit of the order word flags a dragged command: translate the
@@ -165,6 +194,28 @@ fn shape_vertex_main(
   out.world = world;
   out.command_index = command_index;
   out.uv = uv;
+  return out;
+}
+
+@vertex
+fn path_vertex_main(@builtin(vertex_index) vertex_index: u32) -> PathVertexOut {
+  let vertex = path_points[vertex_index];
+  let position_order_drag = vertex.position_order_drag;
+  let world = position_order_drag.xy;
+  let order = position_order_drag.z;
+  let dragged = position_order_drag.w > 0.5;
+  var draw_world = world;
+  if (dragged) {
+    draw_world = world + u.interaction.xy;
+  }
+  var depth = (order + 1.0) / (u.style.w + 4.0);
+  if (dragged && u.interaction.w > 0.5) {
+    depth = (u.style.w + 2.0 + order / (u.style.w + 1.0)) / (u.style.w + 4.0);
+  }
+
+  var out: PathVertexOut;
+  out.position = vec4f(world_to_clip(draw_world), depth, 1.0);
+  out.color = vertex.color;
   return out;
 }
 
@@ -250,7 +301,6 @@ fn shape_fragment_main(in: VertexOut) -> @location(0) vec4f {
     }
     return vec4f(draw.color.rgb, draw.color.a * coverage);
   }
-
   let edge_alpha = 1.0 / max(u.style.x, 0.001);
   var coverage: f32;
   var stroke: f32;
@@ -296,4 +346,12 @@ fn shape_fragment_main(in: VertexOut) -> @location(0) vec4f {
 
   let color = mix(fill_color, stroke_color, stroke);
   return vec4f(color.rgb, color.a * coverage);
+}
+
+@fragment
+fn path_fragment_main(in: PathVertexOut) -> @location(0) vec4f {
+  if (in.color.a <= 0.001) {
+    discard;
+  }
+  return in.color;
 }

@@ -36,12 +36,14 @@ usize strlen(const char *text) {
 // scene (records + text); it is the load/restore size guard.
 #define BLITZ_SCENE_FILE_BUFFER_BYTES (512u * 1024u * 1024u)
 #define BLITZ_SCENE_FILE_MAGIC 0x5a544c42u
-#define BLITZ_SCENE_FILE_VERSION 7u
+#define BLITZ_SCENE_FILE_VERSION 8u
 #define BLITZ_SCENE_FILE_HEADER_BYTES 32u
 #define BLITZ_SCENE_FILE_LEGACY_RECORD_BYTES 80u
 #define BLITZ_SCENE_FILE_RECORD_BYTES 92u
 #define BLITZ_SCENE_FILE_V4_RECORD_BYTES 108u
 #define BLITZ_SCENE_FILE_V6_RECORD_BYTES 112u
+// v8 appends the parent's object_id (16B) + relative offset (8B) at +112.
+#define BLITZ_SCENE_FILE_V8_RECORD_BYTES 136u
 #define BLITZ_MAX_TEXT_LAYOUT_LINES 256u
 #define BLITZ_CONTAINER_RETARGET_SELECTION_LIMIT 32u
 #define BLITZ_PATH_INPUT_POINTS 8192u
@@ -150,7 +152,6 @@ typedef struct PathView {
   Vec2 *points;
   u32 point_count;
   Color fill_color;
-  Color stroke_color;
   float stroke_width;
 } PathView;
 
@@ -212,10 +213,8 @@ typedef struct TextDraw {
 typedef struct PathDraw {
   float bounds[4];
   float fill_color[4];
-  float stroke_color[4];
   float render[4];      // order, drag, stroke_width, point_count
-  float draw_params[4]; // base_vertex, fill_index_offset, fill_index_count,
-                        // stroke_index_count
+  float draw_params[4]; // base_vertex, fill_index_offset, fill_index_count, _
 } PathDraw;
 
 typedef struct PathVertex {
@@ -1549,15 +1548,13 @@ static void ecs_set_frame_view(u32 entity, const char *title, Color title_color,
 }
 
 static void ecs_set_path_view(u32 entity, Vec2 *points, u32 point_count,
-                              Color fill_color, Color stroke_color,
-                              float stroke_width) {
+                              Color fill_color, float stroke_width) {
   if (entity == BLITZ_INVALID_INDEX) {
     return;
   }
   world.path_views[entity].points = points;
   world.path_views[entity].point_count = point_count;
   world.path_views[entity].fill_color = fill_color;
-  world.path_views[entity].stroke_color = stroke_color;
   world.path_views[entity].stroke_width = stroke_width;
   world.masks[entity] |= BLITZ_COMPONENT_PATH_VIEW;
 }
@@ -1629,61 +1626,20 @@ static void push_path_quad_indices(u32 a, u32 b, u32 c, u32 d) {
   push_path_index(d);
 }
 
-static float path_border_width(PathView view) {
-  if (view.stroke_color.a <= 0.001f) {
-    return 0.0f;
-  }
-  float half_width = view.stroke_width * 0.5f;
-  float border_width = half_width * 0.25f;
-  if (border_width < 1.0f) {
-    border_width = 1.0f;
-  }
-  if (border_width > half_width) {
-    border_width = half_width;
-  }
-  return border_width;
-}
-
-// Ribbon corners emitted per centerline point: 4 when a visible border wraps a
-// visible fill (outer/inner on each side), 2 for a single ribbon, 0 when the
-// path is fully transparent. Fill and border share these corners; the draw call
-// picks the color, so a corner is never duplicated for color alone.
-static u32 path_verts_per_point(PathView view) {
-  if (view.fill_color.a <= 0.001f && view.stroke_color.a <= 0.001f) {
-    return 0u;
-  }
-  float half_width = view.stroke_width * 0.5f;
-  float border_width = path_border_width(view);
-  float fill_half_width = half_width - border_width;
-  if (fill_half_width > 0.001f && border_width > 0.001f) {
-    return 4u;
-  }
-  return 2u;
-}
-
+// Pens render as a single filled ribbon: two corners per centerline point, one
+// quad (two triangles) per segment.
 static u32 path_vertex_count(PathView view) {
-  if (!view.points || view.point_count < 2u) {
+  if (!view.points || view.point_count < 2u || view.fill_color.a <= 0.001f) {
     return 0u;
   }
-  return path_verts_per_point(view) * view.point_count;
+  return view.point_count * 2u;
 }
 
 static u32 path_index_count_for(PathView view) {
-  if (!view.points || view.point_count < 2u) {
+  if (!view.points || view.point_count < 2u || view.fill_color.a <= 0.001f) {
     return 0u;
   }
-  u32 segments = view.point_count - 1u;
-  float half_width = view.stroke_width * 0.5f;
-  float border_width = path_border_width(view);
-  float fill_half_width = half_width - border_width;
-  u32 fill_visible = view.fill_color.a > 0.001f;
-  if (fill_half_width > 0.001f && border_width > 0.001f) {
-    return (fill_visible ? segments * 6u : 0u) + segments * 12u;
-  }
-  if (fill_half_width <= 0.001f && border_width > 0.001f) {
-    return segments * 6u;
-  }
-  return fill_visible ? segments * 6u : 0u;
+  return (view.point_count - 1u) * 6u;
 }
 
 static void path_recompute_entity_bounds_preserve_world(u32 entity) {
@@ -2187,10 +2143,6 @@ static void push_path_view_draws(PathView view, Vec2 position, u32 entity,
   draw->fill_color[1] = view.fill_color.g;
   draw->fill_color[2] = view.fill_color.b;
   draw->fill_color[3] = view.fill_color.a;
-  draw->stroke_color[0] = view.stroke_color.r;
-  draw->stroke_color[1] = view.stroke_color.g;
-  draw->stroke_color[2] = view.stroke_color.b;
-  draw->stroke_color[3] = view.stroke_color.a;
   draw->render[0] = (float)(order & 0x7fffffffu);
   draw->render[1] = (order & BLITZ_DRAG_FLAG) ? 1.0f : 0.0f;
   draw->render[2] = view.stroke_width;
@@ -2198,80 +2150,30 @@ static void push_path_view_draws(PathView view, Vec2 position, u32 entity,
 
   u32 base_vertex = path_point_count;
   u32 fill_index_offset = path_index_count;
-
   float half_width = view.stroke_width * 0.5f;
-  float border_width = 0.0f;
-  if (view.stroke_color.a > 0.001f) {
-    border_width = path_border_width(view);
-  }
-  float fill_half_width = half_width - border_width;
-  if (fill_half_width < 0.0f) {
-    fill_half_width = 0.0f;
-  }
-  u32 fill_visible = view.fill_color.a > 0.001f;
 
-  if (path_verts_per_point(view) == 4u) {
-    // Visible border wrapping a visible-width fill. Four shared corners per
-    // point — outer_l, inner_l, inner_r, outer_r — indexed into a fill ribbon
-    // (inner pair) plus left/right border ribbons (outer/inner pairs).
-    for (u32 i = 0u; i < view.point_count; i += 1u) {
-      Vec2 center = path_point_world(view, position, i);
-      Vec2 tangent = path_tangent_at(view, position, i);
-      Vec2 normal = {-tangent.y, tangent.x};
-      push_path_vertex((Vec2){center.x + normal.x * half_width,
-                              center.y + normal.y * half_width});
-      push_path_vertex((Vec2){center.x + normal.x * fill_half_width,
-                              center.y + normal.y * fill_half_width});
-      push_path_vertex((Vec2){center.x - normal.x * fill_half_width,
-                              center.y - normal.y * fill_half_width});
-      push_path_vertex((Vec2){center.x - normal.x * half_width,
-                              center.y - normal.y * half_width});
-    }
-    if (fill_visible) {
-      for (u32 i = 1u; i < view.point_count; i += 1u) {
-        u32 s = (i - 1u) * 4u;
-        u32 e = i * 4u;
-        push_path_quad_indices(s + 1u, s + 2u, e + 1u, e + 2u);
-      }
-    }
-    u32 fill_count = path_index_count - fill_index_offset;
+  // Single filled ribbon: left/right corners per point, one quad per segment.
+  for (u32 i = 0u; i < view.point_count; i += 1u) {
+    Vec2 center = path_point_world(view, position, i);
+    Vec2 tangent = path_tangent_at(view, position, i);
+    Vec2 normal = {-tangent.y, tangent.x};
+    push_path_vertex((Vec2){center.x + normal.x * half_width,
+                            center.y + normal.y * half_width});
+    push_path_vertex((Vec2){center.x - normal.x * half_width,
+                            center.y - normal.y * half_width});
+  }
+  if (view.fill_color.a > 0.001f) {
     for (u32 i = 1u; i < view.point_count; i += 1u) {
-      u32 s = (i - 1u) * 4u;
-      u32 e = i * 4u;
+      u32 s = (i - 1u) * 2u;
+      u32 e = i * 2u;
       push_path_quad_indices(s + 0u, s + 1u, e + 0u, e + 1u);
-      push_path_quad_indices(s + 2u, s + 3u, e + 2u, e + 3u);
     }
-    draw->draw_params[2] = (float)fill_count;
-    draw->draw_params[3] =
-        (float)(path_index_count - fill_index_offset - fill_count);
-  } else {
-    // Single ribbon: plain fill, or a stroke that consumes the whole width.
-    float ribbon_half = fill_half_width > 0.001f ? fill_half_width : half_width;
-    u32 ribbon_is_stroke =
-        fill_half_width <= 0.001f && border_width > 0.001f;
-    for (u32 i = 0u; i < view.point_count; i += 1u) {
-      Vec2 center = path_point_world(view, position, i);
-      Vec2 tangent = path_tangent_at(view, position, i);
-      Vec2 normal = {-tangent.y, tangent.x};
-      push_path_vertex((Vec2){center.x + normal.x * ribbon_half,
-                              center.y + normal.y * ribbon_half});
-      push_path_vertex((Vec2){center.x - normal.x * ribbon_half,
-                              center.y - normal.y * ribbon_half});
-    }
-    if (ribbon_is_stroke || fill_visible) {
-      for (u32 i = 1u; i < view.point_count; i += 1u) {
-        u32 s = (i - 1u) * 2u;
-        u32 e = i * 2u;
-        push_path_quad_indices(s + 0u, s + 1u, e + 0u, e + 1u);
-      }
-    }
-    u32 emitted = path_index_count - fill_index_offset;
-    draw->draw_params[2] = ribbon_is_stroke ? 0.0f : (float)emitted;
-    draw->draw_params[3] = ribbon_is_stroke ? (float)emitted : 0.0f;
   }
 
   draw->draw_params[0] = (float)base_vertex;
   draw->draw_params[1] = (float)fill_index_offset;
+  draw->draw_params[2] = (float)(path_index_count - fill_index_offset);
+  draw->draw_params[3] = 0.0f;
   path_draw_count += 1u;
 }
 
@@ -3223,7 +3125,7 @@ static u32 create_base_triangle(float x, float y, float width, float height,
 }
 
 static u32 create_base_path(Vec2 *points, u32 point_count, Color fill,
-                            Color stroke, float stroke_width) {
+                            float stroke_width) {
   if (!points || point_count < 2u || stroke_width <= 0.0f) {
     return BLITZ_INVALID_INDEX;
   }
@@ -3242,7 +3144,7 @@ static u32 create_base_path(Vec2 *points, u32 point_count, Color fill,
   ecs_set_position(entity, position.x, position.y);
   ecs_set_size(entity, max.x - min.x + pad * 2.0f,
                max.y - min.y + pad * 2.0f);
-  ecs_set_path_view(entity, points, point_count, fill, stroke, stroke_width);
+  ecs_set_path_view(entity, points, point_count, fill, stroke_width);
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
   if (history_transaction_active) {
     history_record_created(entity);
@@ -3418,7 +3320,7 @@ static u32 clone_entity_for_duplicate(u32 source, float offset_x,
         points[i].y = position.y + view.points[i].y + offset_y;
       }
       clone = create_base_path(points, view.point_count, view.fill_color,
-                               view.stroke_color, view.stroke_width);
+                               view.stroke_width);
       if (clone == BLITZ_INVALID_INDEX) {
         blitz_free(points);
       }
@@ -3564,7 +3466,6 @@ void blitz_init(void) {
   path_draft_view.points = path_draft_points;
   path_draft_view.point_count = 0u;
   path_draft_view.fill_color = (Color){0.08f, 0.10f, 0.13f, 1.0f};
-  path_draft_view.stroke_color = (Color){0.08f, 0.10f, 0.13f, 1.0f};
   path_draft_view.stroke_width = 4.0f;
   path_point_count = 0u;
   text_draw_count = 0u;
@@ -4518,9 +4419,7 @@ u32 blitz_create_triangle(float x, float y, float width, float height,
 
 EXPORT("blitz_create_path")
 u32 blitz_create_path(u32 point_count, float fill_r, float fill_g,
-                      float fill_b, float fill_a, float stroke_r,
-                      float stroke_g, float stroke_b, float stroke_a,
-                      float stroke_width) {
+                      float fill_b, float fill_a, float stroke_width) {
   if (point_count < 2u || point_count > BLITZ_PATH_INPUT_POINTS ||
       stroke_width <= 0.0f) {
     return BLITZ_INVALID_INDEX;
@@ -4554,8 +4453,7 @@ u32 blitz_create_path(u32 point_count, float fill_r, float fill_g,
   }
   u32 history_owned = history_begin_owned();
   u32 entity = create_base_path(
-      points, kept, (Color){fill_r, fill_g, fill_b, fill_a},
-      (Color){stroke_r, stroke_g, stroke_b, stroke_a}, stroke_width);
+      points, kept, (Color){fill_r, fill_g, fill_b, fill_a}, stroke_width);
   if (entity == BLITZ_INVALID_INDEX) {
     blitz_free(points);
     if (history_owned) history_cancel();
@@ -4591,9 +4489,7 @@ u32 blitz_path_input_capacity(void) {
 
 EXPORT("blitz_update_path_draft")
 u32 blitz_update_path_draft(u32 point_count, float fill_r, float fill_g,
-                            float fill_b, float fill_a, float stroke_r,
-                            float stroke_g, float stroke_b, float stroke_a,
-                            float stroke_width) {
+                            float fill_b, float fill_a, float stroke_width) {
   if (point_count < 2u || point_count > BLITZ_PATH_INPUT_POINTS ||
       stroke_width <= 0.0f) {
     path_draft_active = 0u;
@@ -4612,7 +4508,6 @@ u32 blitz_update_path_draft(u32 point_count, float fill_r, float fill_g,
   path_draft_view.points = path_draft_points;
   path_draft_view.point_count = point_count;
   path_draft_view.fill_color = (Color){fill_r, fill_g, fill_b, fill_a};
-  path_draft_view.stroke_color = (Color){stroke_r, stroke_g, stroke_b, stroke_a};
   path_draft_view.stroke_width = stroke_width;
   path_draft_active = 1u;
   mark_static_dynamic_dirty();
@@ -4867,7 +4762,7 @@ u32 blitz_query_scene(float min_x, float min_y, float max_x, float max_y,
       PathView view = world.path_views[entity];
       kind = BLITZ_SHAPE_PATH;
       fill = view.fill_color;
-      stroke = view.stroke_color;
+      stroke = (Color){0.0f, 0.0f, 0.0f, 0.0f}; // pens have no stroke
       stroke_width = view.stroke_width;
     } else {
       continue;
@@ -5073,7 +4968,7 @@ u32 blitz_scene_serialize(void) {
       PathView view = world.path_views[entity];
       kind = BLITZ_SHAPE_PATH;
       fill = view.fill_color;
-      stroke = view.stroke_color;
+      stroke = (Color){0.0f, 0.0f, 0.0f, 0.0f}; // pens have no stroke
       stroke_width = view.stroke_width;
       text_length = view.point_count;
     } else {
@@ -5083,7 +4978,7 @@ u32 blitz_scene_serialize(void) {
     u32 payload_bytes =
         kind == BLITZ_SHAPE_PATH ? text_length * 2u * sizeof(float)
                                  : align4(text_length);
-    u32 record_bytes = BLITZ_SCENE_FILE_V6_RECORD_BYTES + payload_bytes;
+    u32 record_bytes = BLITZ_SCENE_FILE_V8_RECORD_BYTES + payload_bytes;
     if (offset + record_bytes > BLITZ_SCENE_FILE_BUFFER_BYTES) {
       return 0u;
     }
@@ -5123,19 +5018,35 @@ u32 blitz_scene_serialize(void) {
     write_u32(scene_file_buffer, offset + 104u, align);
     write_u32(scene_file_buffer, offset + 108u,
               mask & BLITZ_COMPONENT_CONTAINER);
+    ObjectId parent_id = object_id_zero();
+    float parent_offset_x = 0.0f;
+    float parent_offset_y = 0.0f;
+    if ((mask & BLITZ_COMPONENT_RELATIVE_TRANSFORM) &&
+        world.relative_transforms[entity].parent != BLITZ_INVALID_INDEX) {
+      u32 parent_entity = world.relative_transforms[entity].parent;
+      parent_id = world.object_ids[parent_entity];
+      parent_offset_x = world.relative_transforms[entity].offset_x;
+      parent_offset_y = world.relative_transforms[entity].offset_y;
+    }
+    write_u32(scene_file_buffer, offset + 112u, parent_id.actor_hi);
+    write_u32(scene_file_buffer, offset + 116u, parent_id.actor_lo);
+    write_u32(scene_file_buffer, offset + 120u, parent_id.sequence_hi);
+    write_u32(scene_file_buffer, offset + 124u, parent_id.sequence_lo);
+    write_f32(scene_file_buffer, offset + 128u, parent_offset_x);
+    write_f32(scene_file_buffer, offset + 132u, parent_offset_y);
     if (kind == BLITZ_SHAPE_PATH) {
       PathView view = world.path_views[entity];
       for (u32 i = 0u; i < view.point_count; i += 1u) {
         write_f32(scene_file_buffer,
-                  offset + BLITZ_SCENE_FILE_V6_RECORD_BYTES + i * 8u,
+                  offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES + i * 8u,
                   view.points[i].x);
         write_f32(scene_file_buffer,
-                  offset + BLITZ_SCENE_FILE_V6_RECORD_BYTES + i * 8u + 4u,
+                  offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES + i * 8u + 4u,
                   view.points[i].y);
       }
     } else {
       for (u32 i = 0u; i < align4(text_length); i += 1u) {
-        scene_file_buffer[offset + BLITZ_SCENE_FILE_V6_RECORD_BYTES + i] =
+        scene_file_buffer[offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES + i] =
             i < text_length ? (unsigned char)text[i] : 0u;
       }
     }
@@ -5188,7 +5099,9 @@ u32 blitz_scene_deserialize(u32 byte_count) {
   u32 offset = BLITZ_SCENE_FILE_HEADER_BYTES;
   u32 required_text_bytes = 0u;
   u32 fixed_record_bytes =
-      file_version >= 6u
+      file_version >= 8u
+          ? BLITZ_SCENE_FILE_V8_RECORD_BYTES
+          : file_version >= 6u
           ? BLITZ_SCENE_FILE_V6_RECORD_BYTES
           : file_version >= 4u
           ? BLITZ_SCENE_FILE_V4_RECORD_BYTES
@@ -5340,7 +5253,7 @@ u32 blitz_scene_deserialize(u32 byte_count) {
         points[i].y = read_f32(scene_file_buffer,
                                offset + fixed_record_bytes + i * 8u + 4u);
       }
-      ecs_set_path_view(entity, points, text_length, fill, stroke, stroke_width);
+      ecs_set_path_view(entity, points, text_length, fill, stroke_width);
     } else {
       if (!text_pool_ensure(text_length + 1u)) {
         clear_scene_state();
@@ -5365,6 +5278,31 @@ u32 blitz_scene_deserialize(u32 byte_count) {
     world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
     world.selected[entity] = 0u;
     offset += record_bytes;
+  }
+
+  // Second pass: every entity now exists, so parent object_ids resolve and the
+  // relative-transform hierarchy can be re-established.
+  if (file_version >= 8u) {
+    offset = BLITZ_SCENE_FILE_HEADER_BYTES;
+    for (u32 index = 0u; index < object_count; index += 1u) {
+      u32 record_bytes = read_u32(scene_file_buffer, offset + 4u);
+      ObjectId parent_id = {read_u32(scene_file_buffer, offset + 112u),
+                            read_u32(scene_file_buffer, offset + 116u),
+                            read_u32(scene_file_buffer, offset + 120u),
+                            read_u32(scene_file_buffer, offset + 124u)};
+      if (!object_id_is_zero(parent_id)) {
+        ObjectId child_id = {read_u32(scene_file_buffer, offset + 80u),
+                             read_u32(scene_file_buffer, offset + 84u),
+                             read_u32(scene_file_buffer, offset + 88u),
+                             read_u32(scene_file_buffer, offset + 8u)};
+        u32 child = entity_for_object_id(child_id);
+        u32 parent = entity_for_object_id(parent_id);
+        attach_relative_transform(child, parent,
+                                  read_f32(scene_file_buffer, offset + 128u),
+                                  read_f32(scene_file_buffer, offset + 132u));
+      }
+      offset += record_bytes;
+    }
   }
 
   uniforms.viewport_camera[2] = camera_x;
@@ -5506,7 +5444,7 @@ u32 blitz_selected_debug_ptr(void) {
     PathView view = world.path_views[entity];
     kind = BLITZ_SHAPE_PATH;
     fill = view.fill_color;
-    stroke = view.stroke_color;
+    stroke = (Color){0.0f, 0.0f, 0.0f, 0.0f}; // pens have no stroke
     stroke_width = view.stroke_width;
   }
   selected_debug_item.object_id = world.object_ids[entity];
@@ -5650,7 +5588,7 @@ u32 blitz_selected_style_ptr(void) {
       } else {
         PathView view = world.path_views[entity];
         fill = view.fill_color;
-        stroke = view.stroke_color;
+        stroke = (Color){0.0f, 0.0f, 0.0f, 0.0f}; // pens have no stroke
         stroke_width = view.stroke_width;
       }
     }
@@ -5783,11 +5721,6 @@ void blitz_set_selected_stroke(float r, float g, float b) {
       world.oval_views[entity].stroke_color.g = g;
       world.oval_views[entity].stroke_color.b = b;
       changed = 1u;
-    } else if (world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) {
-      world.path_views[entity].stroke_color.r = r;
-      world.path_views[entity].stroke_color.g = g;
-      world.path_views[entity].stroke_color.b = b;
-      changed = 1u;
     }
   }
   if (changed) {
@@ -5814,9 +5747,6 @@ void blitz_set_selected_stroke_opacity(float opacity) {
       changed = 1u;
     } else if (world.masks[entity] & BLITZ_COMPONENT_OVAL_VIEW) {
       world.oval_views[entity].stroke_color.a = opacity;
-      changed = 1u;
-    } else if (world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) {
-      world.path_views[entity].stroke_color.a = opacity;
       changed = 1u;
     }
   }

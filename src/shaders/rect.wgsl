@@ -41,9 +41,8 @@ struct TextDraw {
 struct PathDraw {
   bounds: vec4f,
   fill_color: vec4f,
-  stroke_color: vec4f,
   render: vec4f, // order, drag, stroke_width, point_count
-  draw: vec4f,   // base_vertex, fill_index_offset, fill_index_count, stroke_index_count
+  draw: vec4f,   // base_vertex, fill_index_offset, fill_index_count, _
 };
 
 struct PathPoint {
@@ -200,11 +199,8 @@ fn shape_vertex_main(
 @vertex
 fn path_vertex_main(@builtin(vertex_index) vertex_index: u32,
                     @builtin(instance_index) instance_index: u32) -> PathVertexOut {
-  // firstInstance packs the draw index and a stroke/fill selector: the renderer
-  // issues one drawIndexed per ribbon with firstInstance = draw_index * 2 + is_stroke.
-  let draw_index = instance_index >> 1u;
-  let is_stroke = (instance_index & 1u) == 1u;
-  let draw = path_draws[draw_index];
+  // firstInstance carries the draw index; the renderer issues one fill drawIndexed per path.
+  let draw = path_draws[instance_index];
   let world = path_points[vertex_index].position;
   let order = draw.render.x;
   let dragged = draw.render.y > 0.5;
@@ -219,7 +215,7 @@ fn path_vertex_main(@builtin(vertex_index) vertex_index: u32,
 
   var out: PathVertexOut;
   out.position = vec4f(world_to_clip(draw_world), depth, 1.0);
-  out.color = select(draw.fill_color, draw.stroke_color, is_stroke);
+  out.color = draw.fill_color;
   return out;
 }
 

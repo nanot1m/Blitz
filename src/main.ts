@@ -152,10 +152,6 @@ type BlitzExports = {
     fillG: number,
     fillB: number,
     fillA: number,
-    strokeR: number,
-    strokeG: number,
-    strokeB: number,
-    strokeA: number,
     strokeWidth: number,
   ): number;
   blitz_text_input_ptr(): number;
@@ -168,10 +164,6 @@ type BlitzExports = {
     fillG: number,
     fillB: number,
     fillA: number,
-    strokeR: number,
-    strokeG: number,
-    strokeB: number,
-    strokeA: number,
     strokeWidth: number,
   ): number;
   blitz_clear_path_draft(): void;
@@ -823,12 +815,11 @@ async function boot() {
   let lastUploadedShapeCommandVersion = -1;
   let currentShapeCommandCount = 0;
   // One entry per path draw record, cached on upload and replayed every frame as
-  // indexed draws (fill ribbon, then stroke ribbon) against the shared vertices.
+  // an indexed fill draw against the shared ribbon vertices.
   type PathDrawCommand = {
     baseVertex: number;
     fillIndexOffset: number;
     fillIndexCount: number;
-    strokeIndexCount: number;
   };
   let pathDrawCommands: PathDrawCommand[] = [];
   let lastUploadedDynVersion = -1;
@@ -2077,16 +2068,10 @@ async function boot() {
       ? storedColor
       : DEFAULT_PEN_COLOR;
   const storedWidth = Number(readStored(PEN_WIDTH_STORAGE_KEY));
-  // Pens have a fill and a width but no stroke; stroke stays transparent so they
-  // tessellate as the cheap fill-only ribbon.
+  // Pens have a fill color and a line width, no stroke.
   const penFill = { ...hexToRgb(penColorHex), a: 1 };
-  const penStroke = {
-    r: 0,
-    g: 0,
-    b: 0,
-    a: 0,
-    width: Number.isFinite(storedWidth) && storedWidth > 0 ? storedWidth : DEFAULT_PEN_WIDTH,
-  };
+  let penWidth =
+    Number.isFinite(storedWidth) && storedWidth > 0 ? storedWidth : DEFAULT_PEN_WIDTH;
   const applyPenColor = (hex: string) => {
     penColorHex = hex;
     const { r, g, b } = hexToRgb(hex);
@@ -2096,31 +2081,29 @@ async function boot() {
     persist(PEN_COLOR_STORAGE_KEY, hex);
   };
   const applyPenWidth = (width: number) => {
-    penStroke.width = width;
+    penWidth = width;
     persist(PEN_WIDTH_STORAGE_KEY, String(width));
   };
-  // Stroke-width slider appended below the color section in the pen dropdown.
+  // Width number input appended below the color section in the pen dropdown.
   const buildPenWidthControl = (popover: HTMLDivElement) => {
     const row = document.createElement("label");
     row.className = "pen-width-control";
     const label = document.createElement("span");
     label.textContent = "Width";
-    const range = document.createElement("input");
-    range.type = "range";
-    range.min = "1";
-    range.max = "64";
-    range.step = "0.5";
-    range.value = String(penStroke.width);
-    range.setAttribute("aria-label", "Stroke width");
-    const value = document.createElement("span");
-    value.className = "pen-width-value";
-    value.textContent = String(penStroke.width);
-    range.addEventListener("input", () => {
-      const width = Number(range.value);
-      applyPenWidth(width);
-      value.textContent = String(width);
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "1";
+    input.max = "64";
+    input.step = "0.5";
+    input.value = String(penWidth);
+    input.setAttribute("aria-label", "Stroke width");
+    input.addEventListener("input", () => {
+      const width = Number(input.value);
+      if (Number.isFinite(width) && width > 0) {
+        applyPenWidth(width);
+      }
     });
-    row.append(label, range, value);
+    row.append(label, input);
     popover.append(row);
   };
   const penPopover = attachColorPopover(ui.penToolButton, {
@@ -2194,11 +2177,7 @@ async function boot() {
       penFill.g,
       penFill.b,
       penFill.a,
-      penStroke.r,
-      penStroke.g,
-      penStroke.b,
-      penStroke.a,
-      penStroke.width,
+      penWidth,
     );
   };
   const clearPenDraft = () => {
@@ -2218,11 +2197,7 @@ async function boot() {
         penFill.g,
         penFill.b,
         penFill.a,
-        penStroke.r,
-        penStroke.g,
-        penStroke.b,
-        penStroke.a,
-        penStroke.width,
+        penWidth,
       );
     });
     updateSelectionState();
@@ -2656,7 +2631,6 @@ async function boot() {
             baseVertex: records[o],
             fillIndexOffset: records[o + 1],
             fillIndexCount: records[o + 2],
-            strokeIndexCount: records[o + 3],
           });
         }
       }
@@ -2777,16 +2751,7 @@ async function boot() {
       for (let p = 0; p < pathDrawCommands.length; p += 1) {
         const c = pathDrawCommands[p];
         if (c.fillIndexCount > 0) {
-          pass.drawIndexed(c.fillIndexCount, 1, c.fillIndexOffset, c.baseVertex, p * 2);
-        }
-        if (c.strokeIndexCount > 0) {
-          pass.drawIndexed(
-            c.strokeIndexCount,
-            1,
-            c.fillIndexOffset + c.fillIndexCount,
-            c.baseVertex,
-            p * 2 + 1,
-          );
+          pass.drawIndexed(c.fillIndexCount, 1, c.fillIndexOffset, c.baseVertex, p);
         }
       }
     }

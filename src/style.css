@@ -432,25 +432,22 @@ dialog {
 .pen-width-control {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
   margin-top: 7px;
   color: #475569;
   font: 650 10px/1 inherit;
 }
 
-.pen-width-control input[type="range"] {
-  flex: 1;
-  min-width: 0;
-  height: 18px;
-  accent-color: #155bd7;
-  cursor: pointer;
-}
-
-.pen-width-value {
-  min-width: 22px;
+.pen-width-control input[type="number"] {
+  width: 56px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid #d4d9e1;
+  border-radius: 6px;
+  background: #fff;
   color: #313b48;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
+  font: 650 11px/1 inherit;
 }
 
 .style-opacity {

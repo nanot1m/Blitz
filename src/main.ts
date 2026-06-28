@@ -636,11 +636,6 @@ async function boot() {
         visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "storage" },
       },
-      {
-        binding: 7,
-        visibility: GPUShaderStage.COMPUTE,
-        buffer: { type: "read-only-storage" },
-      },
     ],
   });
   const cullPipeline = device.createComputePipeline({
@@ -765,7 +760,6 @@ async function boot() {
         { binding: 4, resource: { buffer: ovalStorageBuffer } },
         { binding: 5, resource: { buffer: visibleCommandStorageBuffer } },
         { binding: 6, resource: { buffer: drawArgsBuffer } },
-        { binding: 7, resource: { buffer: pathStorageBuffer } },
       ],
     });
     staticRenderBindGroup = device.createBindGroup({

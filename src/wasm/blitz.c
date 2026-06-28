@@ -2654,7 +2654,6 @@ static void extract_static_shapes(void) {
     }
   }
 
-  uniforms.style[1] = (float)path_segment_count;
   uniforms.style[2] = (float)shape_command_count;
   uniforms.style[3] = (float)world.draw_order_count;
   shape_command_version += 1u;

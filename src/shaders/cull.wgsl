@@ -32,13 +32,6 @@ struct OvalDraw {
   stroke_width_pad: vec4f,
 };
 
-struct PathDraw {
-  bounds: vec4f,
-  fill_color: vec4f,
-  stroke_color: vec4f,
-  info: vec4f,
-};
-
 struct DrawArgs {
   vertex_count: u32,
   instance_count: atomic<u32>,
@@ -61,9 +54,6 @@ var<storage, read> triangle_draws: array<TriangleDraw>;
 @group(0) @binding(4)
 var<storage, read> oval_draws: array<OvalDraw>;
 
-@group(0) @binding(7)
-var<storage, read> path_draws: array<PathDraw>;
-
 @group(0) @binding(5)
 var<storage, read_write> visible_commands: array<ShapeCommand>;
 
@@ -80,12 +70,11 @@ fn shape_bounds(command: vec4u) -> vec4f {
     let bounds_min = min(d.points_a.xy, min(d.points_a.zw, d.points_b.xy));
     let bounds_max = max(d.points_a.xy, max(d.points_a.zw, d.points_b.xy));
     return vec4f(bounds_min, bounds_max);
-  } else if (command.x == 2u) {
-    let c = oval_draws[command.y].oval;
-    return vec4f(c.xy - c.zw, c.xy + c.zw);
   }
-  let p = path_draws[command.y];
-  return vec4f(p.bounds.xy, p.bounds.xy + p.bounds.zw);
+  // Only rects/triangles/ovals reach the cull (paths render via their own
+  // pipeline), so command.x == 2u here.
+  let c = oval_draws[command.y].oval;
+  return vec4f(c.xy - c.zw, c.xy + c.zw);
 }
 
 @compute @workgroup_size(64)

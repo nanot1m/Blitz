@@ -45,8 +45,11 @@ struct PathDraw {
   draw: vec4f,   // base_vertex, fill_index_offset, fill_index_count, _
 };
 
-struct PathPoint {
-  position: vec2f,
+struct PathSegment {
+  a: vec2f,
+  b: vec2f,
+  color: vec4f,
+  params: vec4f, // half_width, order, drag, _
 };
 
 @group(0) @binding(0)
@@ -71,7 +74,7 @@ var<storage, read> text_draws: array<TextDraw>;
 var<storage, read> path_draws: array<PathDraw>;
 
 @group(0) @binding(9)
-var<storage, read> path_points: array<PathPoint>;
+var<storage, read> path_segments: array<PathSegment>;
 
 @group(0) @binding(6)
 var font_atlas: texture_2d<f32>;
@@ -89,6 +92,10 @@ struct VertexOut {
 struct PathVertexOut {
   @builtin(position) position: vec4f,
   @location(0) color: vec4f,
+  @location(1) world: vec2f,
+  @location(2) @interpolate(flat) seg_a: vec2f,
+  @location(3) @interpolate(flat) seg_b: vec2f,
+  @location(4) @interpolate(flat) half_width: f32,
 };
 
 fn world_to_clip(world: vec2f) -> vec2f {
@@ -199,23 +206,42 @@ fn shape_vertex_main(
 @vertex
 fn path_vertex_main(@builtin(vertex_index) vertex_index: u32,
                     @builtin(instance_index) instance_index: u32) -> PathVertexOut {
-  // firstInstance carries the draw index; the renderer issues one fill drawIndexed per path.
-  let draw = path_draws[instance_index];
-  let world = path_points[vertex_index].position;
-  let order = draw.render.x;
-  let dragged = draw.render.y > 0.5;
-  var draw_world = world;
-  if (dragged) {
-    draw_world = world + u.interaction.xy;
-  }
+  // One instance per segment; expand it into the capsule's bounding quad and let
+  // the fragment shade a distance field, giving round joins + caps + AA.
+  let seg = path_segments[instance_index];
+  let half_width = seg.params.x;
+  let order = seg.params.y;
+  let dragged = seg.params.z > 0.5;
+  let drag_offset = select(vec2f(0.0, 0.0), u.interaction.xy, dragged);
+  let a = seg.a + drag_offset;
+  let b = seg.b + drag_offset;
+  let delta = b - a;
+  let len = length(delta);
+  let dir = select(vec2f(1.0, 0.0), delta / len, len > 0.0001);
+  let nrm = vec2f(-dir.y, dir.x);
+  let ea = a - dir * half_width;
+  let eb = b + dir * half_width;
+  var corners = array<vec2f, 4>(
+    ea + nrm * half_width,
+    ea - nrm * half_width,
+    eb + nrm * half_width,
+    eb - nrm * half_width,
+  );
+  var order_index = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
+  let corner = corners[order_index[vertex_index]];
+
   var depth = (order + 1.0) / (u.style.w + 4.0);
   if (dragged && u.interaction.w > 0.5) {
     depth = (u.style.w + 2.0 + order / (u.style.w + 1.0)) / (u.style.w + 4.0);
   }
 
   var out: PathVertexOut;
-  out.position = vec4f(world_to_clip(draw_world), depth, 1.0);
-  out.color = draw.fill_color;
+  out.position = vec4f(world_to_clip(corner), depth, 1.0);
+  out.color = seg.color;
+  out.world = corner;
+  out.seg_a = a;
+  out.seg_b = b;
+  out.half_width = half_width;
   return out;
 }
 
@@ -350,8 +376,11 @@ fn shape_fragment_main(in: VertexOut) -> @location(0) vec4f {
 
 @fragment
 fn path_fragment_main(in: PathVertexOut) -> @location(0) vec4f {
-  if (in.color.a <= 0.001) {
+  let distance = segment_distance(in.world, in.seg_a, in.seg_b);
+  let edge_alpha = 1.0 / max(u.style.x, 0.001); // one pixel in world units
+  let coverage = clamp((in.half_width - distance) / edge_alpha + 0.5, 0.0, 1.0);
+  if (in.color.a * coverage <= 0.001) {
     discard;
   }
-  return in.color;
+  return vec4f(in.color.rgb, in.color.a * coverage);
 }

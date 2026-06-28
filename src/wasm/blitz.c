@@ -217,10 +217,14 @@ typedef struct PathDraw {
   float draw_params[4]; // base_vertex, fill_index_offset, fill_index_count, _
 } PathDraw;
 
-typedef struct PathVertex {
-  float x;
-  float y;
-} PathVertex;
+// One capsule per pen segment: the GPU expands it to a rounded-rect quad and
+// shades it with a distance field, so joins are round and ends are capped.
+typedef struct PathSegment {
+  float a[2];      // segment start (world)
+  float b[2];      // segment end (world)
+  float color[4];  // fill rgba
+  float params[4]; // half_width, order, drag, _
+} PathSegment;
 
 typedef struct SceneItem {
   ObjectId object_id;
@@ -273,8 +277,7 @@ static TriangleDraw *triangle_draws;
 static OvalDraw *oval_draws;
 static TextDraw *text_draws;
 static PathDraw *path_draws;
-static PathVertex *path_points;
-static u16 *path_indices;
+static PathSegment *path_segments;
 static ShapeCommand *dyn_commands;
 static RectDraw *dyn_rects;
 // Grown-on-demand capacities for the buffers above.
@@ -284,8 +287,7 @@ static u32 triangle_draws_cap;
 static u32 oval_draws_cap;
 static u32 text_draws_cap;
 static u32 path_draws_cap;
-static u32 path_points_cap;
-static u32 path_indices_cap;
+static u32 path_segments_cap;
 static u32 dyn_commands_cap;
 static u32 dyn_rects_cap;
 // Input staging: JS writes text / pen points here before create/update.
@@ -323,8 +325,7 @@ static u32 rect_draw_count;
 static u32 triangle_draw_count;
 static u32 oval_draw_count;
 static u32 path_draw_count;
-static u32 path_point_count;
-static u32 path_index_count;
+static u32 path_segment_count;
 static u32 path_draft_active;
 static u32 text_draw_count;
 static u32 visible_text_shape_count;
@@ -773,8 +774,7 @@ static void ecs_storage_init(void) {
   oval_draws = 0;
   text_draws = 0;
   path_draws = 0;
-  path_points = 0;
-  path_indices = 0;
+  path_segments = 0;
   dyn_commands = 0;
   dyn_rects = 0;
   scene_file_buffer = 0;
@@ -789,8 +789,7 @@ static void ecs_storage_init(void) {
   oval_draws_cap = 0u;
   text_draws_cap = 0u;
   path_draws_cap = 0u;
-  path_points_cap = 0u;
-  path_indices_cap = 0u;
+  path_segments_cap = 0u;
   dyn_commands_cap = 0u;
   dyn_rects_cap = 0u;
   ecs_block = 0;
@@ -1603,43 +1602,13 @@ static Vec2 path_tangent_at(PathView view, Vec2 position, u32 index) {
 }
 
 // --- Path geometry & tessellation ------------------------------------------
-static void push_path_vertex(Vec2 position) {
-  PathVertex *vertex = &path_points[path_point_count];
-  vertex->x = position.x;
-  vertex->y = position.y;
-  path_point_count += 1u;
-}
-
-static void push_path_index(u32 local) {
-  path_indices[path_index_count] = (u16)local;
-  path_index_count += 1u;
-}
-
-// Two triangles (a,b,c)+(c,b,d) over four ribbon corners, addressed by their
-// offsets relative to the path's base vertex.
-static void push_path_quad_indices(u32 a, u32 b, u32 c, u32 d) {
-  push_path_index(a);
-  push_path_index(b);
-  push_path_index(c);
-  push_path_index(c);
-  push_path_index(b);
-  push_path_index(d);
-}
-
-// Pens render as a single filled ribbon: two corners per centerline point, one
-// quad (two triangles) per segment.
-static u32 path_vertex_count(PathView view) {
+// Pens render as one GPU capsule per segment, so the geometry is just the
+// segment count (one PathSegment each); the shader builds the quads.
+static u32 path_segment_count_for(PathView view) {
   if (!view.points || view.point_count < 2u || view.fill_color.a <= 0.001f) {
     return 0u;
   }
-  return view.point_count * 2u;
-}
-
-static u32 path_index_count_for(PathView view) {
-  if (!view.points || view.point_count < 2u || view.fill_color.a <= 0.001f) {
-    return 0u;
-  }
-  return (view.point_count - 1u) * 6u;
+  return view.point_count - 1u;
 }
 
 static void path_recompute_entity_bounds_preserve_world(u32 entity) {
@@ -2148,33 +2117,40 @@ static void push_path_view_draws(PathView view, Vec2 position, u32 entity,
   draw->render[2] = view.stroke_width;
   draw->render[3] = (float)view.point_count;
 
-  u32 base_vertex = path_point_count;
-  u32 fill_index_offset = path_index_count;
-  float half_width = view.stroke_width * 0.5f;
-
-  // Single filled ribbon: left/right corners per point, one quad per segment.
-  for (u32 i = 0u; i < view.point_count; i += 1u) {
-    Vec2 center = path_point_world(view, position, i);
-    Vec2 tangent = path_tangent_at(view, position, i);
-    Vec2 normal = {-tangent.y, tangent.x};
-    push_path_vertex((Vec2){center.x + normal.x * half_width,
-                            center.y + normal.y * half_width});
-    push_path_vertex((Vec2){center.x - normal.x * half_width,
-                            center.y - normal.y * half_width});
-  }
-  if (view.fill_color.a > 0.001f) {
-    for (u32 i = 1u; i < view.point_count; i += 1u) {
-      u32 s = (i - 1u) * 2u;
-      u32 e = i * 2u;
-      push_path_quad_indices(s + 0u, s + 1u, e + 0u, e + 1u);
-    }
-  }
-
-  draw->draw_params[0] = (float)base_vertex;
-  draw->draw_params[1] = (float)fill_index_offset;
-  draw->draw_params[2] = (float)(path_index_count - fill_index_offset);
+  // draw_params: first segment index, segment count (for per-path viewport cull).
+  u32 segment_offset = path_segment_count;
+  draw->draw_params[0] = (float)segment_offset;
+  draw->draw_params[1] = 0.0f;
+  draw->draw_params[2] = 0.0f;
   draw->draw_params[3] = 0.0f;
   path_draw_count += 1u;
+
+  // One capsule per segment; the shader rounds the joins and caps.
+  if (view.fill_color.a <= 0.001f) {
+    return;
+  }
+  float half_width = view.stroke_width * 0.5f;
+  float drag_flag = (order & BLITZ_DRAG_FLAG) ? 1.0f : 0.0f;
+  float order_value = (float)(order & 0x7fffffffu);
+  for (u32 i = 1u; i < view.point_count; i += 1u) {
+    Vec2 a = path_point_world(view, position, i - 1u);
+    Vec2 b = path_point_world(view, position, i);
+    PathSegment *seg = &path_segments[path_segment_count];
+    seg->a[0] = a.x;
+    seg->a[1] = a.y;
+    seg->b[0] = b.x;
+    seg->b[1] = b.y;
+    seg->color[0] = view.fill_color.r;
+    seg->color[1] = view.fill_color.g;
+    seg->color[2] = view.fill_color.b;
+    seg->color[3] = view.fill_color.a;
+    seg->params[0] = half_width;
+    seg->params[1] = order_value;
+    seg->params[2] = drag_flag;
+    seg->params[3] = 0.0f;
+    path_segment_count += 1u;
+  }
+  draw->draw_params[1] = (float)(path_segment_count - segment_offset);
 }
 
 static void push_path_draws(u32 entity, u32 order) {
@@ -2555,25 +2531,21 @@ static void extract_static_shapes(void) {
   triangle_draw_count = 0u;
   oval_draw_count = 0u;
   path_draw_count = 0u;
-  path_point_count = 0u;
-  path_index_count = 0u;
+  path_segment_count = 0u;
   u32 draw_need = world.draw_order_count;
   u32 path_draw_need = 0u;
-  u32 path_point_need = 0u;
-  u32 path_index_need = 0u;
+  u32 path_segment_need = 0u;
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
     u32 entity = world.draw_order[i];
     if ((world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) &&
         world.path_views[entity].point_count > 1u) {
       path_draw_need += 1u;
-      path_point_need += path_vertex_count(world.path_views[entity]);
-      path_index_need += path_index_count_for(world.path_views[entity]);
+      path_segment_need += path_segment_count_for(world.path_views[entity]);
     }
   }
   if (path_draft_active && path_draft_view.point_count > 1u) {
     path_draw_need += 1u;
-    path_point_need += path_vertex_count(path_draft_view);
-    path_index_need += path_index_count_for(path_draft_view);
+    path_segment_need += path_segment_count_for(path_draft_view);
   }
   u32 command_need = draw_need + (path_draft_active ? 1u : 0u);
   shape_commands = draw_reserve(shape_commands, &shape_commands_cap, command_need,
@@ -2586,14 +2558,12 @@ static void extract_static_shapes(void) {
       draw_reserve(oval_draws, &oval_draws_cap, draw_need, sizeof(OvalDraw));
   path_draws =
       draw_reserve(path_draws, &path_draws_cap, path_draw_need, sizeof(PathDraw));
-  path_points = draw_reserve(path_points, &path_points_cap, path_point_need,
-                             sizeof(PathVertex));
-  path_indices = draw_reserve(path_indices, &path_indices_cap, path_index_need,
-                              sizeof(u16));
+  path_segments = draw_reserve(path_segments, &path_segments_cap,
+                               path_segment_need, sizeof(PathSegment));
   if ((command_need && !shape_commands) ||
       (draw_need && (!rect_draws || !triangle_draws || !oval_draws)) ||
-      (path_draw_need && !path_draws) || (path_point_need && !path_points) ||
-      (path_index_need && !path_indices)) {
+      (path_draw_need && !path_draws) ||
+      (path_segment_need && !path_segments)) {
     static_dirty = 0u;
     return;
   }
@@ -3467,7 +3437,7 @@ void blitz_init(void) {
   path_draft_view.point_count = 0u;
   path_draft_view.fill_color = (Color){0.08f, 0.10f, 0.13f, 1.0f};
   path_draft_view.stroke_width = 4.0f;
-  path_point_count = 0u;
+  path_segment_count = 0u;
   text_draw_count = 0u;
   visible_text_shape_count = 0u;
   container_entity_count = 0u;
@@ -5480,16 +5450,14 @@ u32 blitz_selected_debug_ptr(void) {
                  : 0.0f);
   selected_debug_item.style[3] =
       kind == BLITZ_SHAPE_PATH
-          ? (float)path_vertex_count(world.path_views[entity])
+          ? (float)(path_segment_count_for(world.path_views[entity]) * 2u)
       : kind == BLITZ_SHAPE_TEXT
           ? world.text_views[entity].line_height
           : (kind == BLITZ_SHAPE_FRAME
                  ? world.frame_views[entity].title_color.g
                  : 0.0f);
   selected_debug_item.style[4] =
-      kind == BLITZ_SHAPE_PATH
-          ? (float)path_index_count_for(world.path_views[entity])
-      : kind == BLITZ_SHAPE_TEXT
+      kind == BLITZ_SHAPE_TEXT
           ? (float)world.text_views[entity].max_lines
           : (kind == BLITZ_SHAPE_FRAME
                  ? world.frame_views[entity].title_color.b
@@ -6101,31 +6069,20 @@ u32 blitz_path_draw_count(void) {
   return path_draw_count;
 }
 
-EXPORT("blitz_path_point_ptr")
-u32 blitz_path_point_ptr(void) {
+EXPORT("blitz_path_segment_ptr")
+u32 blitz_path_segment_ptr(void) {
   world_update_for_frame();
-  return (u32)&path_points[0];
+  return (u32)&path_segments[0];
 }
 
-EXPORT("blitz_path_point_f32_count")
-u32 blitz_path_point_f32_count(void) {
-  return sizeof(PathVertex) / sizeof(float);
+EXPORT("blitz_path_segment_f32_count")
+u32 blitz_path_segment_f32_count(void) {
+  return sizeof(PathSegment) / sizeof(float);
 }
 
-EXPORT("blitz_path_point_count")
-u32 blitz_path_point_count(void) {
-  return path_point_count;
-}
-
-EXPORT("blitz_path_index_ptr")
-u32 blitz_path_index_ptr(void) {
-  world_update_for_frame();
-  return (u32)&path_indices[0];
-}
-
-EXPORT("blitz_path_index_count")
-u32 blitz_path_index_count(void) {
-  return path_index_count;
+EXPORT("blitz_path_segment_count")
+u32 blitz_path_segment_count(void) {
+  return path_segment_count;
 }
 
 EXPORT("blitz_path_shape_count")

@@ -272,11 +272,9 @@ type BlitzExports = {
   blitz_path_draw_ptr(): number;
   blitz_path_draw_f32_count(): number;
   blitz_path_draw_count(): number;
-  blitz_path_point_ptr(): number;
-  blitz_path_point_f32_count(): number;
-  blitz_path_point_count(): number;
-  blitz_path_index_ptr(): number;
-  blitz_path_index_count(): number;
+  blitz_path_segment_ptr(): number;
+  blitz_path_segment_f32_count(): number;
+  blitz_path_segment_count(): number;
   blitz_path_shape_count(): number;
   blitz_text_draw_ptr(): number;
   blitz_text_draw_f32_count(): number;
@@ -323,7 +321,18 @@ async function boot() {
   const actorId = getOrCreateActorId();
   wasm.blitz_set_actor_id(actorId.hi, actorId.lo);
   const adapter = await navigator.gpu.requestAdapter();
-  const device = await adapter?.requestDevice();
+  // Raise buffer limits to the adapter's max (the default cap is 128 MiB, which
+  // a scene with many pen strokes can exceed).
+  const device = await adapter?.requestDevice(
+    adapter
+      ? {
+          requiredLimits: {
+            maxBufferSize: adapter.limits.maxBufferSize,
+            maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+          },
+        }
+      : undefined,
+  );
   if (!device) {
     ui.showFallback("No WebGPU adapter is available.");
     return;
@@ -349,8 +358,7 @@ async function boot() {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   const maxShapes = wasm.blitz_render_max_shapes();
-  const maxPathVertices = maxShapes * 18;
-  const maxPathIndices = maxShapes * 18;
+  const maxPathSegments = maxShapes * 18;
   const maxTextDraws = wasm.blitz_render_max_text_draws();
   const maxDynCommands = wasm.blitz_render_max_dyn_commands();
   const maxDynRects = wasm.blitz_render_max_dyn_rects();
@@ -359,15 +367,14 @@ async function boot() {
   const triangleDrawF32Count = wasm.blitz_triangle_draw_f32_count();
   const ovalDrawF32Count = wasm.blitz_oval_draw_f32_count();
   const pathDrawF32Count = wasm.blitz_path_draw_f32_count();
-  const pathPointF32Count = wasm.blitz_path_point_f32_count();
+  const pathSegmentF32Count = wasm.blitz_path_segment_f32_count();
   const textDrawF32Count = wasm.blitz_text_draw_f32_count();
   const shapeCommandStride = shapeCommandU32Count * Uint32Array.BYTES_PER_ELEMENT;
   const rectDrawStride = rectDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const triangleDrawStride = triangleDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const ovalDrawStride = ovalDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const pathDrawStride = pathDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
-  const pathPointStride = pathPointF32Count * Float32Array.BYTES_PER_ELEMENT;
-  const pathIndexStride = Uint16Array.BYTES_PER_ELEMENT;
+  const pathSegmentStride = pathSegmentF32Count * Float32Array.BYTES_PER_ELEMENT;
   const textDrawStride = textDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   // Storage buffers start small and grow on demand toward the capacity ceilings
   // above, so GPU memory tracks scene size instead of reserving for the maximum.
@@ -569,8 +576,11 @@ async function boot() {
       topology: "triangle-list",
     },
     depthStencil: {
+      // Pens are opaque and drawn in z-order, so segments paint over each other
+      // cleanly (C over C = C). Writing depth would make each capsule's AA edge
+      // occlude the next, leaving visible rings; test-only against shapes.
       format: depthFormat,
-      depthWriteEnabled: true,
+      depthWriteEnabled: false,
       depthCompare: "greater",
     },
   });
@@ -636,8 +646,7 @@ async function boot() {
   let triangleCapacity = initialStorageCapacity;
   let ovalCapacity = initialStorageCapacity;
   let pathCapacity = initialStorageCapacity;
-  let pathPointCapacity = initialStorageCapacity;
-  let pathIndexCapacity = initialStorageCapacity;
+  let pathSegmentCapacity = initialStorageCapacity;
   let textCapacity = initialStorageCapacity;
   let dynCommandCapacity = initialStorageCapacity;
   let dynRectCapacity = initialStorageCapacity;
@@ -667,15 +676,10 @@ async function boot() {
     size: pathCapacity * pathDrawStride,
     usage: storageDstUsage,
   });
-  let pathPointStorageBuffer = device.createBuffer({
-    label: "Blitz Path Vertex Storage",
-    size: pathPointCapacity * pathPointStride,
+  let pathSegmentStorageBuffer = device.createBuffer({
+    label: "Blitz Path Segment Storage",
+    size: pathSegmentCapacity * pathSegmentStride,
     usage: storageDstUsage,
-  });
-  let pathIndexBuffer = device.createBuffer({
-    label: "Blitz Path Index Buffer",
-    size: pathIndexCapacity * pathIndexStride,
-    usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
   });
   let textStorageBuffer = device.createBuffer({
     label: "Blitz Text Draw Storage",
@@ -753,7 +757,7 @@ async function boot() {
         { binding: 6, resource: fontAtlasView },
         { binding: 7, resource: fontSampler },
         { binding: 8, resource: { buffer: pathStorageBuffer } },
-        { binding: 9, resource: { buffer: pathPointStorageBuffer } },
+        { binding: 9, resource: { buffer: pathSegmentStorageBuffer } },
       ],
     });
     dynamicRenderBindGroup = device.createBindGroup({
@@ -769,7 +773,7 @@ async function boot() {
         { binding: 6, resource: fontAtlasView },
         { binding: 7, resource: fontSampler },
         { binding: 8, resource: { buffer: pathStorageBuffer } },
-        { binding: 9, resource: { buffer: pathPointStorageBuffer } },
+        { binding: 9, resource: { buffer: pathSegmentStorageBuffer } },
       ],
     });
   };
@@ -777,6 +781,15 @@ async function boot() {
   // Grow a storage buffer (destroy + recreate larger) when a draw count exceeds
   // its capacity. WebGPU defers the actual free until in-flight work referencing
   // the old buffer completes, so destroying immediately is safe.
+  // Hard ceiling so a single buffer never exceeds what the device can bind,
+  // even if the scene wants more — callers clamp draw/upload counts to capacity.
+  const maxStorageElements = (stride: number) =>
+    Math.floor(
+      Math.min(
+        device.limits.maxBufferSize,
+        device.limits.maxStorageBufferBindingSize,
+      ) / stride,
+    );
   const ensureStorage = (
     buffer: GPUBuffer,
     capacity: number,
@@ -789,7 +802,7 @@ async function boot() {
     if (needed <= capacity) return { buffer, capacity, grew: false };
     let next = capacity;
     while (next < needed) next *= 2;
-    if (next > ceiling) next = ceiling;
+    next = Math.min(next, ceiling, maxStorageElements(stride));
     buffer.destroy();
     return {
       buffer: device.createBuffer({ label, size: next * stride, usage }),
@@ -806,22 +819,25 @@ async function boot() {
     triangleCapacity * triangleDrawStride +
     ovalCapacity * ovalDrawStride +
     pathCapacity * pathDrawStride +
-    pathPointCapacity * pathPointStride +
-    pathIndexCapacity * pathIndexStride +
+    pathSegmentCapacity * pathSegmentStride +
     textCapacity * textDrawStride +
     dynCommandCapacity * shapeCommandStride +
     dynRectCapacity * rectDrawStride +
     2 * 4 * Uint32Array.BYTES_PER_ELEMENT;
   let lastUploadedShapeCommandVersion = -1;
   let currentShapeCommandCount = 0;
-  // One entry per path draw record, cached on upload and replayed every frame as
-  // an indexed fill draw against the shared ribbon vertices.
-  type PathDrawCommand = {
-    baseVertex: number;
-    fillIndexOffset: number;
-    fillIndexCount: number;
+  // Per-path segment ranges + world AABB, rebuilt on upload; the draw loop
+  // viewport-culls these so only on-screen strokes issue an instanced draw.
+  type PathDrawCull = {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+    segOffset: number;
+    segCount: number;
+    dragged: boolean;
   };
-  let pathDrawCommands: PathDrawCommand[] = [];
+  let pathDrawList: PathDrawCull[] = [];
   let lastUploadedDynVersion = -1;
   let currentDynCommandCount = 0;
   let lastZoomPercent = -1;
@@ -859,7 +875,7 @@ async function boot() {
     const triangleShapeCount = wasm.blitz_triangle_draw_count();
     const ovalShapeCount = wasm.blitz_oval_draw_count();
     const pathShapeCount = wasm.blitz_path_shape_count();
-    const pathPointCount = wasm.blitz_path_point_count();
+    const pathSegmentCount = wasm.blitz_path_segment_count();
     const geometryShapeCount =
       rectShapeCount + triangleShapeCount + ovalShapeCount + pathShapeCount;
     const textShapeCount = Math.max(0, shapeCount - geometryShapeCount);
@@ -888,7 +904,7 @@ async function boot() {
       <div class="stats-section">
         ${metricRow("Static cmds", formatNumber(staticCommandCount))}
         ${metricRow("Dynamic cmds", formatNumber(dynamicCommandCount))}
-        ${metricRow("Path vertices", formatNumber(pathPointCount))}
+        ${metricRow("Path segments", formatNumber(pathSegmentCount))}
         ${metricRow("Text glyphs", formatNumber(wasm.blitz_text_draw_count()))}
       </div>
       <div class="stats-section">
@@ -1126,19 +1142,15 @@ async function boot() {
       );
     }
     if (kind === 5) {
-      const vertices = view.getFloat32(ptr + 100, true);
-      const indices = view.getFloat32(ptr + 104, true);
+      const segments = view.getFloat32(ptr + 96, true);
+      const triangles = view.getFloat32(ptr + 100, true);
       ui.debuggerComponents.append(
         debugComponent("PenGeometry", {
           points: view.getFloat32(ptr + 92, true),
-          segments: view.getFloat32(ptr + 96, true),
-          vertices,
-          indices,
-          triangles: indices / 3,
-          vertexStride: `${pathPointStride} B`,
-          vertexBytes: vertices * pathPointStride,
-          indexBytes: indices * pathIndexStride,
-          drawRecords: 1,
+          segments,
+          triangles,
+          segmentStride: `${pathSegmentStride} B`,
+          segmentBytes: segments * pathSegmentStride,
         }),
       );
     }
@@ -2151,10 +2163,53 @@ async function boot() {
     }
     return smoothed;
   };
+  // Ramer–Douglas–Peucker: drop points within ~0.5px of the chord. The smoothing
+  // above oversamples straight runs with collinear points; this collapses them
+  // (fewer segments → less memory/overdraw) while keeping curve detail.
+  const PEN_SIMPLIFY_EPSILON = 0.5;
+  const simplifyStroke = (points: Array<{ x: number; y: number }>) => {
+    if (points.length < 3) {
+      return points;
+    }
+    const keep = new Uint8Array(points.length);
+    keep[0] = 1;
+    keep[points.length - 1] = 1;
+    const eps2 = PEN_SIMPLIFY_EPSILON * PEN_SIMPLIFY_EPSILON;
+    const stack: Array<[number, number]> = [[0, points.length - 1]];
+    while (stack.length > 0) {
+      const [first, last] = stack.pop()!;
+      const ax = points[first].x;
+      const ay = points[first].y;
+      const dx = points[last].x - ax;
+      const dy = points[last].y - ay;
+      const len2 = dx * dx + dy * dy;
+      let maxD2 = 0;
+      let index = -1;
+      for (let i = first + 1; i < last; i += 1) {
+        const px = points[i].x - ax;
+        const py = points[i].y - ay;
+        const cross = px * dy - py * dx;
+        const d2 = len2 > 1e-12 ? (cross * cross) / len2 : px * px + py * py;
+        if (d2 > maxD2) {
+          maxD2 = d2;
+          index = i;
+        }
+      }
+      if (index !== -1 && maxD2 > eps2) {
+        keep[index] = 1;
+        stack.push([first, index], [index, last]);
+      }
+    }
+    const out: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i < points.length; i += 1) {
+      if (keep[i]) out.push(points[i]);
+    }
+    return out;
+  };
   const writePathPoints = (points: Array<{ x: number; y: number }>) => {
     const capacity = wasm.blitz_path_input_capacity();
-    const smoothed = smoothPenPoints(points, capacity);
-    const count = Math.min(smoothed.length, capacity);
+    const simplified = simplifyStroke(smoothPenPoints(points, capacity));
+    const count = Math.min(simplified.length, capacity);
     if (count < 2) {
       return 0;
     }
@@ -2162,7 +2217,7 @@ async function boot() {
       wasm.memory.buffer,
       wasm.blitz_path_input_ptr(),
       count * 2,
-    ).set(smoothed.slice(0, count).flatMap((point) => [point.x, point.y]));
+    ).set(simplified.slice(0, count).flatMap((point) => [point.x, point.y]));
     return count;
   };
   const updatePenDraft = (points: Array<{ x: number; y: number }>) => {
@@ -2508,10 +2563,8 @@ async function boot() {
       const ovalDrawCount = wasm.blitz_oval_draw_count();
       const pathDrawPtr = wasm.blitz_path_draw_ptr();
       const pathDrawCount = wasm.blitz_path_draw_count();
-      const pathPointPtr = wasm.blitz_path_point_ptr();
-      const pathPointCount = wasm.blitz_path_point_count();
-      const pathIndexPtr = wasm.blitz_path_index_ptr();
-      const pathIndexCount = wasm.blitz_path_index_count();
+      const pathSegmentPtr = wasm.blitz_path_segment_ptr();
+      const pathSegmentCount = wasm.blitz_path_segment_count();
       currentShapeCommandCount = shapeCommandCount;
       const eShape = ensureStorage(shapeCommandStorageBuffer, shapeCommandCapacity, shapeCommandCount, maxShapes, shapeCommandStride, storageDstUsage, "Blitz Shape Command Storage");
       shapeCommandStorageBuffer = eShape.buffer;
@@ -2537,13 +2590,10 @@ async function boot() {
       pathStorageBuffer = ePath.buffer;
       pathCapacity = ePath.capacity;
       bindGroupsDirty ||= ePath.grew;
-      const ePathPoint = ensureStorage(pathPointStorageBuffer, pathPointCapacity, pathPointCount, maxPathVertices, pathPointStride, storageDstUsage, "Blitz Path Vertex Storage");
-      pathPointStorageBuffer = ePathPoint.buffer;
-      pathPointCapacity = ePathPoint.capacity;
-      bindGroupsDirty ||= ePathPoint.grew;
-      const ePathIndex = ensureStorage(pathIndexBuffer, pathIndexCapacity, pathIndexCount, maxPathIndices, pathIndexStride, GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST, "Blitz Path Index Buffer");
-      pathIndexBuffer = ePathIndex.buffer;
-      pathIndexCapacity = ePathIndex.capacity;
+      const ePathSegment = ensureStorage(pathSegmentStorageBuffer, pathSegmentCapacity, pathSegmentCount, maxPathSegments, pathSegmentStride, storageDstUsage, "Blitz Path Segment Storage");
+      pathSegmentStorageBuffer = ePathSegment.buffer;
+      pathSegmentCapacity = ePathSegment.capacity;
+      bindGroupsDirty ||= ePathSegment.grew;
       if (shapeCommandCount > 0) {
         device.queue.writeBuffer(
           shapeCommandStorageBuffer,
@@ -2599,38 +2649,40 @@ async function boot() {
           ),
         );
       }
-      if (pathPointCount > 0) {
+      // Clamp to what the (limit-capped) buffer can hold; excess strokes are
+      // dropped rather than crashing on an over-limit write.
+      const uploadableSegments = Math.min(pathSegmentCount, pathSegmentCapacity);
+      if (uploadableSegments > 0) {
         device.queue.writeBuffer(
-          pathPointStorageBuffer,
+          pathSegmentStorageBuffer,
           0,
           new Float32Array(
             wasm.memory.buffer,
-            pathPointPtr,
-            pathPointCount * pathPointF32Count,
+            pathSegmentPtr,
+            uploadableSegments * pathSegmentF32Count,
           ),
         );
       }
-      if (pathIndexCount > 0) {
-        device.queue.writeBuffer(
-          pathIndexBuffer,
-          0,
-          new Uint16Array(wasm.memory.buffer, pathIndexPtr, pathIndexCount),
-        );
-      }
-      pathDrawCommands = [];
+      pathDrawList = [];
       if (pathDrawCount > 0) {
-        const drawParams = pathDrawF32Count - 4;
         const records = new Float32Array(
           wasm.memory.buffer,
           pathDrawPtr,
           pathDrawCount * pathDrawF32Count,
         );
         for (let p = 0; p < pathDrawCount; p += 1) {
-          const o = p * pathDrawF32Count + drawParams;
-          pathDrawCommands.push({
-            baseVertex: records[o],
-            fillIndexOffset: records[o + 1],
-            fillIndexCount: records[o + 2],
+          const o = p * pathDrawF32Count;
+          const segOffset = records[o + 12];
+          const segCount = records[o + 13];
+          if (segCount <= 0 || segOffset >= uploadableSegments) continue;
+          pathDrawList.push({
+            minX: records[o],
+            minY: records[o + 1],
+            maxX: records[o] + records[o + 2],
+            maxY: records[o + 1] + records[o + 3],
+            segOffset,
+            segCount: Math.min(segCount, uploadableSegments - segOffset),
+            dragged: records[o + 9] > 0.5,
           });
         }
       }
@@ -2744,15 +2796,34 @@ async function boot() {
       pass.setBindGroup(0, staticRenderBindGroup);
       pass.drawIndirect(drawArgsBuffer, 0);
     }
-    if (pathDrawCommands.length > 0) {
+    if (pathDrawList.length > 0) {
+      // Viewport-cull per stroke; each visible one draws its segments (6 verts
+      // each) as an instanced capsule draw, with firstInstance = its segment offset.
       pass.setPipeline(pathPipeline);
       pass.setBindGroup(0, staticRenderBindGroup);
-      pass.setIndexBuffer(pathIndexBuffer, "uint16");
-      for (let p = 0; p < pathDrawCommands.length; p += 1) {
-        const c = pathDrawCommands[p];
-        if (c.fillIndexCount > 0) {
-          pass.drawIndexed(c.fillIndexCount, 1, c.fillIndexOffset, c.baseVertex, p);
+      const scale = uniforms[4];
+      const halfW = (uniforms[0] * 0.5) / scale;
+      const halfH = (uniforms[1] * 0.5) / scale;
+      const viewMinX = uniforms[2] - halfW;
+      const viewMaxX = uniforms[2] + halfW;
+      const viewMinY = uniforms[3] - halfH;
+      const viewMaxY = uniforms[3] + halfH;
+      for (let p = 0; p < pathDrawList.length; p += 1) {
+        const d = pathDrawList[p];
+        if (!d.dragged) {
+          if (
+            d.maxX < viewMinX ||
+            d.minX > viewMaxX ||
+            d.maxY < viewMinY ||
+            d.minY > viewMaxY
+          ) {
+            continue;
+          }
+          if ((d.maxX - d.minX) * scale < 1 && (d.maxY - d.minY) * scale < 1) {
+            continue;
+          }
         }
+        pass.draw(6, d.segCount, 0, d.segOffset);
       }
     }
     if (currentDynCommandCount > 0) {

@@ -1323,6 +1323,15 @@ async function boot() {
       dpr,
     };
   };
+  const visualViewportRect = () => {
+    const viewport = window.visualViewport;
+    return {
+      left: 0,
+      top: 0,
+      width: viewport?.width ?? window.innerWidth,
+      height: viewport?.height ?? window.innerHeight,
+    };
+  };
   const positionTextEditor = () => {
     if (!textEditSession) {
       return;
@@ -1424,18 +1433,20 @@ async function boot() {
     };
     let panX = 0;
     let panY = 0;
-    if (caretRect.left < textCaretViewportMargin) {
-      panX = textCaretViewportMargin - caretRect.left;
-    } else if (caretRect.right > window.innerWidth - textCaretViewportMargin) {
-      panX = window.innerWidth - textCaretViewportMargin - caretRect.right;
+    const viewport = visualViewportRect();
+    const minX = viewport.left + textCaretViewportMargin;
+    const minY = viewport.top + textCaretViewportMargin;
+    const maxX = viewport.left + viewport.width - textCaretViewportMargin;
+    const maxY = viewport.top + viewport.height - textCaretViewportMargin;
+    if (caretRect.left < minX) {
+      panX = minX - caretRect.left;
+    } else if (caretRect.right > maxX) {
+      panX = maxX - caretRect.right;
     }
-    if (caretRect.top < textCaretViewportMargin) {
-      panY = textCaretViewportMargin - caretRect.top;
-    } else if (
-      caretRect.bottom >
-      window.innerHeight - textCaretViewportMargin
-    ) {
-      panY = window.innerHeight - textCaretViewportMargin - caretRect.bottom;
+    if (caretRect.top < minY) {
+      panY = minY - caretRect.top;
+    } else if (caretRect.bottom > maxY) {
+      panY = maxY - caretRect.bottom;
     }
     if (panX !== 0 || panY !== 0) {
       const dpr = window.devicePixelRatio || 1;
@@ -1579,6 +1590,20 @@ async function boot() {
     if (!closingTextEditor && textEditSession) {
       commitTextEdit();
     }
+  });
+  window.visualViewport?.addEventListener("resize", () => {
+    if (!textEditSession) {
+      return;
+    }
+    positionTextEditor();
+    scheduleTextCaretVisibility();
+  });
+  window.visualViewport?.addEventListener("scroll", () => {
+    if (!textEditSession) {
+      return;
+    }
+    positionTextEditor();
+    scheduleTextCaretVisibility();
   });
   document.addEventListener(
     "pointerdown",

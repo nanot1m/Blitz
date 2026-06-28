@@ -958,26 +958,30 @@ export function attachColorPopover(
     popover.style.left = `${left}px`;
     popover.style.top = `${Math.max(8, Math.min(window.innerHeight - popoverRect.height - 8, top))}px`;
     button.setAttribute("aria-expanded", "true");
-    // Ignore clicks on the anchor so its own handler owns the toggle; any other
-    // outside click (e.g. starting to draw) dismisses the popover.
-    onDocumentPointerDown = (event) => {
-      if (event.target instanceof Node && button.contains(event.target)) {
-        return;
-      }
-      close();
-    };
-    onDocumentKeyDown = (event) => {
-      if (event.key === "Escape") {
+    // manualToggle popovers (the pen styles dropdown) stay open for the whole
+    // session — the caller closes them; auto-dismiss is only for the style pickers.
+    if (!options.manualToggle) {
+      // Ignore clicks on the anchor so its own handler owns the toggle; any other
+      // outside click (e.g. starting to draw) dismisses the popover.
+      onDocumentPointerDown = (event) => {
+        if (event.target instanceof Node && button.contains(event.target)) {
+          return;
+        }
         close();
-      }
-    };
-    setTimeout(() => {
-      if (!popover) {
-        return;
-      }
-      document.addEventListener("pointerdown", onDocumentPointerDown!);
-      document.addEventListener("keydown", onDocumentKeyDown!);
-    }, 0);
+      };
+      onDocumentKeyDown = (event) => {
+        if (event.key === "Escape") {
+          close();
+        }
+      };
+      setTimeout(() => {
+        if (!popover) {
+          return;
+        }
+        document.addEventListener("pointerdown", onDocumentPointerDown!);
+        document.addEventListener("keydown", onDocumentKeyDown!);
+      }, 0);
+    }
   };
   if (!options.manualToggle) {
     button.addEventListener("click", () => {

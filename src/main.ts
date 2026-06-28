@@ -2127,7 +2127,10 @@ async function boot() {
   const setPenMode = (enabled: boolean) => {
     penMode = enabled;
     ui.penToolButton.setAttribute("aria-pressed", String(enabled));
-    if (!enabled) {
+    // The styles dropdown stays open for the whole drawing session.
+    if (enabled) {
+      penPopover.open();
+    } else {
       penPopover.close();
     }
   };
@@ -2259,14 +2262,7 @@ async function boot() {
     updateEmptyState();
   };
   ui.penToolButton.addEventListener("click", () => {
-    if (!penMode) {
-      setPenMode(true);
-      penPopover.open();
-    } else if (penPopover.isOpen()) {
-      setPenMode(false);
-    } else {
-      penPopover.open();
-    }
+    setPenMode(!penMode);
   });
   stopDragging = setupCanvasInteractions(ui.canvas, wasm, {
     beginEdit: sceneHistory.begin,
@@ -2389,11 +2385,26 @@ async function boot() {
       toggleStatsButton: ui.toggleStatsButton,
     },
     {
-      addCircle: () => runSceneAction(wasm.blitz_add_circle),
-      addFrame: () => runSceneAction(wasm.blitz_add_frame),
-      addRect: () => runSceneAction(wasm.blitz_add_rect),
-      addText: () => runSceneAction(wasm.blitz_add_text),
-      addTriangle: () => runSceneAction(wasm.blitz_add_triangle),
+      addCircle: () => {
+        setPenMode(false);
+        runSceneAction(wasm.blitz_add_circle);
+      },
+      addFrame: () => {
+        setPenMode(false);
+        runSceneAction(wasm.blitz_add_frame);
+      },
+      addRect: () => {
+        setPenMode(false);
+        runSceneAction(wasm.blitz_add_rect);
+      },
+      addText: () => {
+        setPenMode(false);
+        runSceneAction(wasm.blitz_add_text);
+      },
+      addTriangle: () => {
+        setPenMode(false);
+        runSceneAction(wasm.blitz_add_triangle);
+      },
       bringToFront: () => {
         sceneHistory.transact(wasm.blitz_bring_to_front);
       },

@@ -296,27 +296,23 @@ static u32 resize_handle;
 static u32 hidden_text_entity;
 // Per-entity scratch arrays: pointers into the ECS block, bound by
 // ecs_bind_pointers alongside the World components.
-#define BLITZ_ENTITY_ARRAY(name) static u32 *name
-BLITZ_ENTITY_ARRAY(transform_dirty);
-BLITZ_ENTITY_ARRAY(transform_dirty_entities);
+static u32 *transform_dirty;
+static u32 *transform_dirty_entities;
 static u32 transform_dirty_count;
-BLITZ_ENTITY_ARRAY(draw_order_seen);
-BLITZ_ENTITY_ARRAY(draw_order_child_head);
-BLITZ_ENTITY_ARRAY(draw_order_child_tail);
-BLITZ_ENTITY_ARRAY(draw_order_next_child);
+static u32 *draw_order_seen;
 static u32 draw_order_normalization_deferred;
 static u32 draw_order_normalization_pending;
-BLITZ_ENTITY_ARRAY(duplicate_entity_map);
-BLITZ_ENTITY_ARRAY(internal_clipboard_sources);
+static u32 *duplicate_entity_map;
+static u32 *internal_clipboard_sources;
 static u32 internal_clipboard_count;
 static float internal_clipboard_bounds[4];
 static Vec2 resize_start_position;
 static Vec2 resize_start_size;
 // Selection state captured when a marquee starts, so each marquee move can
 // recompute live selection as base ∪ (entities inside the current box).
-BLITZ_ENTITY_ARRAY(marquee_base_selected);
+static u32 *marquee_base_selected;
 // Reclaimed entity slots (stack) and the count of currently-live entities.
-BLITZ_ENTITY_ARRAY(free_slots);
+static u32 *free_slots;
 static u32 free_count;
 static u32 live_count;
 
@@ -595,9 +591,6 @@ static const u32 ecs_strides[] = {
     sizeof(u32),               // transform_dirty
     sizeof(u32),               // transform_dirty_entities
     sizeof(u32),               // draw_order_seen
-    sizeof(u32),               // draw_order_child_head
-    sizeof(u32),               // draw_order_child_tail
-    sizeof(u32),               // draw_order_next_child
     sizeof(u32),               // duplicate_entity_map
     sizeof(u32),               // internal_clipboard_sources
     sizeof(u32),               // marquee_base_selected
@@ -643,13 +636,10 @@ static void ecs_bind_pointers(u32 capacity) {
   transform_dirty = (u32 *)(ecs_block + ecs_offset(16u, capacity));
   transform_dirty_entities = (u32 *)(ecs_block + ecs_offset(17u, capacity));
   draw_order_seen = (u32 *)(ecs_block + ecs_offset(18u, capacity));
-  draw_order_child_head = (u32 *)(ecs_block + ecs_offset(19u, capacity));
-  draw_order_child_tail = (u32 *)(ecs_block + ecs_offset(20u, capacity));
-  draw_order_next_child = (u32 *)(ecs_block + ecs_offset(21u, capacity));
-  duplicate_entity_map = (u32 *)(ecs_block + ecs_offset(22u, capacity));
-  internal_clipboard_sources = (u32 *)(ecs_block + ecs_offset(23u, capacity));
-  marquee_base_selected = (u32 *)(ecs_block + ecs_offset(24u, capacity));
-  free_slots = (u32 *)(ecs_block + ecs_offset(25u, capacity));
+  duplicate_entity_map = (u32 *)(ecs_block + ecs_offset(19u, capacity));
+  internal_clipboard_sources = (u32 *)(ecs_block + ecs_offset(20u, capacity));
+  marquee_base_selected = (u32 *)(ecs_block + ecs_offset(21u, capacity));
+  free_slots = (u32 *)(ecs_block + ecs_offset(22u, capacity));
 }
 
 // Grow the per-entity block to hold `count` slots. If the block is the last
@@ -756,9 +746,6 @@ static void ecs_storage_init(void) {
   transform_dirty = 0;
   transform_dirty_entities = 0;
   draw_order_seen = 0;
-  draw_order_child_head = 0;
-  draw_order_child_tail = 0;
-  draw_order_next_child = 0;
   duplicate_entity_map = 0;
   internal_clipboard_sources = 0;
   marquee_base_selected = 0;
@@ -1503,25 +1490,10 @@ static void marquee_apply_live(void) {
   selected_count = count;
 }
 
-static void append_draw_order_hierarchy(u32 entity, u32 *output) {
-  if (entity == BLITZ_INVALID_INDEX || world.masks[entity] == 0u ||
-      draw_order_seen[entity]) {
-    return;
-  }
-  draw_order_seen[entity] = 1u;
-  world.draw_order_scratch[*output] = entity;
-  *output += 1u;
-
-  for (u32 child = draw_order_child_head[entity];
-       child != BLITZ_INVALID_INDEX; child = draw_order_next_child[child]) {
-    append_draw_order_hierarchy(child, output);
-  }
-}
-
 // Draw order is no longer continuously normalized into parent-then-children
 // runs. Entities keep their own z-order; the single rule (a child must not
 // render below the container it was dropped onto) is enforced only at drop time
-// by lift_entity_above_container.
+// by lift_selection_above_container.
 static void normalize_draw_order_hierarchy(void) {}
 
 // True when `container` is an ancestor of `entity` in the relative-transform
@@ -1543,26 +1515,28 @@ static u32 entity_in_container(u32 entity, u32 container) {
   return 0u;
 }
 
-// Lift `entity` and everything nested inside it above the rest of `container`
-// in z. The dropped subtree moves together, keeping its internal order, to just
-// above the highest-ordered member of the container that is not part of the
-// subtree — so a dropped container keeps its own children above itself. No-op
-// when the subtree already sits entirely above the container's other contents.
-static void lift_entity_above_container(u32 entity, u32 container) {
-  // Flag the dropped subtree: the entity plus everything nested inside it.
+// Lift the dragged selection (and everything nested inside it) above the rest
+// of `container` in z, in a single pass over the draw order. Called once after
+// a drop, so attaching a large multi-selection to a container stays linear
+// rather than quadratic. The selection moves together keeping its internal
+// order — a dropped container keeps its own children above itself — and it is a
+// no-op when the selection already sits entirely above the container's other
+// contents.
+static void lift_selection_above_container(u32 container) {
+  // Flag the dropped set: every selected shape plus everything nested in one.
   u32 lifted = 0u;
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
     u32 current = world.draw_order[i];
-    u32 in_subtree =
-        (current == entity) || entity_in_container(current, entity);
-    draw_order_seen[current] = in_subtree;
-    lifted += in_subtree;
+    u32 in_set =
+        world.selected[current] || entity_has_selected_ancestor(current);
+    draw_order_seen[current] = in_set;
+    lifted += in_set;
   }
   if (lifted == 0u) {
     return;
   }
   // Highest-ordered container member that is not being lifted, plus the lowest
-  // position the lifted subtree currently occupies.
+  // position the lifted set currently occupies.
   u32 top_index = BLITZ_INVALID_INDEX;
   u32 top_member = BLITZ_INVALID_INDEX;
   u32 lowest_lifted = BLITZ_INVALID_INDEX;
@@ -3359,6 +3333,7 @@ void blitz_pointer_up(void) {
   if (drag_active) {
     u32 drop_container = hit_test_drop_container(drag_last_world.x,
                                                 drag_last_world.y);
+    u32 any_reparented = 0u;
     for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
       if (world.selected[entity] && !entity_has_selected_ancestor(entity)) {
         float next_x = world.positions[entity].x + drag_offset.x;
@@ -3372,16 +3347,21 @@ void blitz_pointer_up(void) {
           attach_relative_transform(entity, drop_container,
                                     next_x - world.positions[drop_container].x,
                                     next_y - world.positions[drop_container].y);
-          // Dropping onto a new container makes the shape its topmost child;
-          // re-dropping within the same container leaves z-order untouched.
           if (previous_parent != drop_container) {
-            lift_entity_above_container(entity, drop_container);
+            any_reparented = 1u;
           }
         } else {
           detach_from_parent(entity);
           mark_transform_subtree_dirty(entity);
         }
       }
+    }
+    // Dropping onto a new container makes the whole dropped selection the
+    // topmost contents of that container. Done once for the entire selection
+    // (re-dropping within the same container leaves z-order untouched), so
+    // attaching a large multi-selection stays linear rather than quadratic.
+    if (drop_container != BLITZ_INVALID_INDEX && any_reparented) {
+      lift_selection_above_container(drop_container);
     }
     drag_offset.x = 0.0f;
     drag_offset.y = 0.0f;

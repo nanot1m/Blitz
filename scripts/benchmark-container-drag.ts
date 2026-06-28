@@ -77,6 +77,24 @@ const bulkResult = runDrag(510, 510, 540, 540);
 printResult(`${containerCount} container trees`, bulkResult);
 assertUnder("Bulk container pointer_up", bulkResult.pointerUp.duration, 250);
 
+// Attaching a large multi-selection to a single container must stay linear: the
+// drop's lift-to-top runs once for the whole selection, not once per shape.
+wasm.blitz_clear_scene();
+wasm.blitz_set_camera(0, 0, 1);
+const attachCount = 10_000;
+for (let index = 0; index < attachCount; index += 1) {
+  wasm.blitz_create_rect(100 + (index % 100) * 2, 100 + Math.floor(index / 100) * 2, 10, 10, 1, 0, 0, 1, 0, 0, 0, 1, 1);
+}
+wasm.blitz_select_all(); // selects the shapes; the frame below is created after, so it stays a drop target
+wasm.blitz_create_rect(-400, -400, 200, 200, 0.5, 0.5, 0.5, 1, 0, 0, 0, 1, 1);
+const attachFrameId = readLastCreatedObjectId();
+if (wasm.blitz_set_container(...attachFrameId, 1) !== 1) {
+  throw new Error("Failed to create the attach-target frame.");
+}
+const attachResult = runDrag(600, 600, 200, 200);
+printResult(`attach ${attachCount} shapes to a container`, attachResult);
+assertUnder("Bulk attach-to-container pointer_up", attachResult.pointerUp.duration, 250);
+
 wasm.blitz_clear_scene();
 const stressSetup = time("stress_setup", () => {
   wasm.blitz_stress_test();

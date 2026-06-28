@@ -126,11 +126,10 @@
         <div id="selected-geometry-controls" class="selected-style-group">
           <label class="style-control">
             <span>Fill</span>
-            <input id="selected-fill" type="color" aria-label="Fill color" />
+            <button id="selected-fill" class="style-color-button" type="button" aria-label="Fill color"></button>
             <input
               id="selected-fill-opacity"
-              class="style-opacity"
-              type="range"
+              type="hidden"
               min="0"
               max="1"
               step="0.01"
@@ -141,14 +140,13 @@
           <div class="selected-stroke-controls">
             <label class="style-control">
               <span>Stroke</span>
-              <input id="selected-stroke" type="color" aria-label="Stroke color" />
+              <button id="selected-stroke" class="style-color-button" type="button" aria-label="Stroke color"></button>
               <input
-                id="selected-stroke-opacity"
-                class="style-opacity"
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
+              id="selected-stroke-opacity"
+              type="hidden"
+              min="0"
+              max="1"
+              step="0.01"
                 aria-label="Stroke opacity"
               />
             </label>
@@ -175,11 +173,10 @@
         <div id="selected-text-controls" class="selected-style-group" hidden>
           <label class="style-control">
             <span>Text</span>
-            <input id="selected-text-color" type="color" aria-label="Text color" />
+            <button id="selected-text-color" class="style-color-button" type="button" aria-label="Text color"></button>
             <input
               id="selected-text-opacity"
-              class="style-opacity"
-              type="range"
+              type="hidden"
               min="0"
               max="1"
               step="0.01"
@@ -246,6 +243,9 @@
         <i data-lucide="redo-2" aria-hidden="true"></i>
       </button>
     </div>
+    <button id="toggle-properties" type="button" aria-label="Toggle properties" title="Properties" aria-pressed="false">
+      <i data-lucide="sliders-horizontal" aria-hidden="true"></i>
+    </button>
     <div id="zoom-indicator" role="status" aria-label="Zoom level"></div>
     <dialog id="mcp-settings-dialog" aria-labelledby="mcp-settings-title">
       <form id="mcp-settings-form">

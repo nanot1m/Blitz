@@ -34,11 +34,12 @@ usize strlen(const char *text) {
 // scene (records + text); it is the load/restore size guard.
 #define BLITZ_SCENE_FILE_BUFFER_BYTES (512u * 1024u * 1024u)
 #define BLITZ_SCENE_FILE_MAGIC 0x5a544c42u
-#define BLITZ_SCENE_FILE_VERSION 5u
+#define BLITZ_SCENE_FILE_VERSION 6u
 #define BLITZ_SCENE_FILE_HEADER_BYTES 32u
 #define BLITZ_SCENE_FILE_LEGACY_RECORD_BYTES 80u
 #define BLITZ_SCENE_FILE_RECORD_BYTES 92u
 #define BLITZ_SCENE_FILE_V4_RECORD_BYTES 108u
+#define BLITZ_SCENE_FILE_V6_RECORD_BYTES 112u
 #define BLITZ_MAX_TEXT_LAYOUT_LINES 256u
 #define BLITZ_CONTAINER_RETARGET_SELECTION_LIMIT 32u
 
@@ -1151,9 +1152,6 @@ static u32 set_entity_container(u32 entity, u32 enabled) {
   if (entity == BLITZ_INVALID_INDEX || world.masks[entity] == 0u) {
     return 0u;
   }
-  if (!enabled && (world.masks[entity] & BLITZ_COMPONENT_FRAME_VIEW)) {
-    return 0u;
-  }
   if (enabled) {
     if (world.masks[entity] & BLITZ_COMPONENT_CONTAINER) {
       return 0u;
@@ -1431,8 +1429,7 @@ static void ecs_set_frame_view(u32 entity, const char *title, Color title_color,
   world.frame_views[entity].title = title;
   world.frame_views[entity].title_color = title_color;
   world.frame_views[entity].title_font_size = title_font_size;
-  world.masks[entity] |= BLITZ_COMPONENT_FRAME_VIEW |
-                         BLITZ_COMPONENT_CONTAINER;
+  world.masks[entity] |= BLITZ_COMPONENT_FRAME_VIEW;
 }
 
 static void clear_selection(void) {
@@ -2710,6 +2707,7 @@ static u32 create_base_frame(float x, float y, float width, float height,
     return entity;
   }
   ecs_set_frame_view(entity, title, title_color, title_font_size);
+  world.masks[entity] |= BLITZ_COMPONENT_CONTAINER;
   return entity;
 }
 
@@ -2909,6 +2907,8 @@ static u32 clone_entity_for_duplicate(u32 source, float offset_x,
   if (clone != BLITZ_INVALID_INDEX &&
       (mask & BLITZ_COMPONENT_CONTAINER)) {
     world.masks[clone] |= BLITZ_COMPONENT_CONTAINER;
+  } else if (clone != BLITZ_INVALID_INDEX) {
+    world.masks[clone] &= ~BLITZ_COMPONENT_CONTAINER;
   }
   return clone;
 }
@@ -4410,7 +4410,7 @@ u32 blitz_scene_serialize(void) {
       continue;
     }
 
-    u32 record_bytes = BLITZ_SCENE_FILE_V4_RECORD_BYTES + align4(text_length);
+    u32 record_bytes = BLITZ_SCENE_FILE_V6_RECORD_BYTES + align4(text_length);
     if (offset + record_bytes > BLITZ_SCENE_FILE_BUFFER_BYTES) {
       return 0u;
     }
@@ -4448,8 +4448,10 @@ u32 blitz_scene_serialize(void) {
     write_f32(scene_file_buffer, offset + 96u, line_height);
     write_u32(scene_file_buffer, offset + 100u, max_lines);
     write_u32(scene_file_buffer, offset + 104u, align);
+    write_u32(scene_file_buffer, offset + 108u,
+              mask & BLITZ_COMPONENT_CONTAINER);
     for (u32 i = 0u; i < align4(text_length); i += 1u) {
-      scene_file_buffer[offset + BLITZ_SCENE_FILE_V4_RECORD_BYTES + i] =
+      scene_file_buffer[offset + BLITZ_SCENE_FILE_V6_RECORD_BYTES + i] =
           i < text_length ? (unsigned char)text[i] : 0u;
     }
     offset += record_bytes;
@@ -4501,7 +4503,9 @@ u32 blitz_scene_deserialize(u32 byte_count) {
   u32 offset = BLITZ_SCENE_FILE_HEADER_BYTES;
   u32 required_text_bytes = 0u;
   u32 fixed_record_bytes =
-      file_version >= 4u
+      file_version >= 6u
+          ? BLITZ_SCENE_FILE_V6_RECORD_BYTES
+          : file_version >= 4u
           ? BLITZ_SCENE_FILE_V4_RECORD_BYTES
           : (file_version >= 3u ? BLITZ_SCENE_FILE_RECORD_BYTES
                                 : BLITZ_SCENE_FILE_LEGACY_RECORD_BYTES);
@@ -4585,6 +4589,8 @@ u32 blitz_scene_deserialize(u32 byte_count) {
         file_version >= 4u ? read_u32(scene_file_buffer, offset + 100u) : 0u;
     u32 align =
         file_version >= 4u ? read_u32(scene_file_buffer, offset + 104u) : 0u;
+    u32 stored_component_mask =
+        file_version >= 6u ? read_u32(scene_file_buffer, offset + 108u) : 0u;
 
     u32 entity = ecs_create_entity();
     if (entity == BLITZ_INVALID_INDEX) {
@@ -4618,6 +4624,9 @@ u32 blitz_scene_deserialize(u32 byte_count) {
       float title_font_size = font_size > 0.0f ? font_size : 18.0f;
       ecs_set_rect_view(entity, fill, stroke, stroke_width);
       ecs_set_frame_view(entity, title, title_color, title_font_size);
+      if (file_version < 6u) {
+        world.masks[entity] |= BLITZ_COMPONENT_CONTAINER;
+      }
       ecs_set_resizable(entity, 1u, 1u);
     } else if (kind == BLITZ_SHAPE_TRIANGLE) {
       ecs_set_triangle_view(entity, fill, stroke, stroke_width);
@@ -4641,6 +4650,10 @@ u32 blitz_scene_deserialize(u32 byte_count) {
                         baseline_offset, max_width, line_height, max_lines,
                         align);
       ecs_set_resizable(entity, 1u, 0u);
+    }
+    if (file_version >= 6u &&
+        (stored_component_mask & BLITZ_COMPONENT_CONTAINER)) {
+      world.masks[entity] |= BLITZ_COMPONENT_CONTAINER;
     }
     world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
     world.selected[entity] = 0u;

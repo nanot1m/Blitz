@@ -805,10 +805,34 @@ async function boot() {
           .padStart(2, "0"),
       )
       .join("")}`;
+  const setColorButtonValue = (button: HTMLButtonElement, value: string) => {
+    button.value = value;
+    button.style.setProperty("--style-color", value);
+  };
+  let propertiesPanelOpen = false;
+  const updateSidePanelOpen = () => {
+    document.documentElement.dataset.sidePanelOpen =
+      propertiesPanelOpen || statsVisible ? "true" : "false";
+  };
+  const setPropertiesPanelOpen = (open: boolean) => {
+    propertiesPanelOpen = open;
+    updateSidePanelOpen();
+    ui.togglePropertiesButton.setAttribute("aria-pressed", String(open));
+  };
+  ui.togglePropertiesButton.disabled = true;
+  setPropertiesPanelOpen(false);
+  ui.togglePropertiesButton.addEventListener("click", () => {
+    if (ui.togglePropertiesButton.disabled) {
+      return;
+    }
+    setPropertiesPanelOpen(!propertiesPanelOpen);
+  });
   const updateStyleIsland = () => {
     const kind = wasm.blitz_selected_style_kind();
     ui.styleIsland.hidden = kind === 0;
+    ui.togglePropertiesButton.disabled = kind === 0;
     if (kind === 0) {
+      setPropertiesPanelOpen(false);
       return;
     }
     const style = new Float32Array(
@@ -831,17 +855,22 @@ async function boot() {
     ui.selectedTextControls.hidden = !text;
     ui.selectedMixedDivider.hidden = !(geometric && text);
     if (geometric) {
-      ui.selectedFillInput.value = colorHex(style[0], style[1], style[2]);
+      setColorButtonValue(
+        ui.selectedFillInput,
+        colorHex(style[0], style[1], style[2]),
+      );
       ui.selectedFillOpacityInput.value = String(style[3]);
-      ui.selectedStrokeInput.value = colorHex(style[4], style[5], style[6]);
+      setColorButtonValue(
+        ui.selectedStrokeInput,
+        colorHex(style[4], style[5], style[6]),
+      );
       ui.selectedStrokeOpacityInput.value = String(style[7]);
       ui.selectedStrokeWidthInput.value = String(Number(style[8].toFixed(2)));
     }
     if (text) {
-      ui.selectedTextColorInput.value = colorHex(
-        style[9],
-        style[10],
-        style[11],
+      setColorButtonValue(
+        ui.selectedTextColorInput,
+        colorHex(style[9], style[10], style[11]),
       );
       ui.selectedTextOpacityInput.value = String(style[12]);
       ui.selectedTextAutoWidthButton.disabled = !(style[13] > 0);
@@ -1707,9 +1736,7 @@ async function boot() {
       return null;
     }
     const id = readLastCreatedObjectId();
-    if (shape.container && shape.type !== "frame") {
-      wasm.blitz_set_container(id[0], id[1], id[2], id[3], 1);
-    }
+    wasm.blitz_set_container(id[0], id[1], id[2], id[3], shape.container ? 1 : 0);
     return id;
   };
   const insertClipboardShapes = (
@@ -2011,6 +2038,7 @@ async function boot() {
       toggleStats() {
         statsVisible = !statsVisible;
         ui.statsPanel.hidden = !statsVisible;
+        updateSidePanelOpen();
         ui.toggleStatsButton.setAttribute(
           "aria-pressed",
           statsVisible ? "true" : "false",

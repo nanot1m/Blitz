@@ -71,13 +71,13 @@ type UiActions = {
 type StyleControlElements = {
   containerInput: HTMLInputElement;
   frameTitleInput: HTMLInputElement;
-  fillInput: HTMLInputElement;
+  fillInput: HTMLButtonElement;
   fillOpacityInput: HTMLInputElement;
-  strokeInput: HTMLInputElement;
+  strokeInput: HTMLButtonElement;
   strokeOpacityInput: HTMLInputElement;
   strokeWidthInput: HTMLInputElement;
   textAutoWidthButton: HTMLButtonElement;
-  textColorInput: HTMLInputElement;
+  textColorInput: HTMLButtonElement;
   textFontSizeInput: HTMLInputElement;
   textOpacityInput: HTMLInputElement;
 };
@@ -743,6 +743,150 @@ function colorChannels(value: string): [number, number, number] {
   ];
 }
 
+function setColorButtonValue(button: HTMLButtonElement, value: string): void {
+  button.value = value;
+  button.style.setProperty("--style-color", value);
+}
+
+function setupColorPickerButton(
+  button: HTMLButtonElement,
+  opacityInput: HTMLInputElement,
+  onColor: (red: number, green: number, blue: number) => void,
+  onOpacity: (opacity: number) => void,
+  actions: StyleActions,
+): void {
+  const palette = [
+    "#111827",
+    "#4b5563",
+    "#ffffff",
+    "#ef4444",
+    "#f97316",
+    "#f59e0b",
+    "#22c55e",
+    "#14b8a6",
+    "#3b82f6",
+    "#6366f1",
+    "#a855f7",
+    "#ec4899",
+  ];
+  let popover: HTMLDivElement | null = null;
+  const isHexColor = (value: string) => /^#[0-9a-f]{6}$/i.test(value);
+  const commitColor = makeTransactionable((value: string) => {
+    if (!isHexColor(value)) {
+      return;
+    }
+    setColorButtonValue(button, value);
+    onColor(...colorChannels(value));
+  }, actions);
+  const commitOpacity = makeTransactionable((value: number) => {
+    opacityInput.value = String(value);
+    onOpacity(value);
+  }, actions);
+  const close = () => {
+    popover?.remove();
+    popover = null;
+    button.setAttribute("aria-expanded", "false");
+  };
+  const open = () => {
+    close();
+    popover = document.createElement("div");
+    popover.className = "color-picker-popover";
+    popover.addEventListener("pointerdown", (event) => event.stopPropagation());
+    const swatches = document.createElement("div");
+    swatches.className = "color-picker-swatches";
+    const currentValue = button.value || "#000000";
+    const valueRow = document.createElement("div");
+    valueRow.className = "color-picker-value";
+    const nativePicker = document.createElement("span");
+    nativePicker.className = "color-picker-native-control";
+    const nativeInput = document.createElement("input");
+    nativeInput.type = "color";
+    nativeInput.value = currentValue;
+    nativeInput.setAttribute("aria-label", "Custom color");
+    nativePicker.append(nativeInput);
+    const hexInput = document.createElement("input");
+    hexInput.type = "text";
+    hexInput.inputMode = "text";
+    hexInput.spellcheck = false;
+    hexInput.value = currentValue;
+    hexInput.setAttribute("aria-label", "Hex color");
+    for (const value of palette) {
+      const swatch = document.createElement("button");
+      swatch.type = "button";
+      swatch.className = "color-picker-swatch";
+      swatch.style.setProperty("--style-color", value);
+      swatch.setAttribute("aria-label", value);
+      swatch.setAttribute("aria-pressed", String(value.toLowerCase() === currentValue.toLowerCase()));
+      swatch.addEventListener("click", () => {
+        commitColor(value);
+        nativeInput.value = value;
+        hexInput.value = value;
+        for (const item of swatches.querySelectorAll(".color-picker-swatch")) {
+          item.setAttribute("aria-pressed", String(item === swatch));
+        }
+      });
+      swatches.append(swatch);
+    }
+    hexInput.addEventListener("input", () => {
+      const value = hexInput.value.trim();
+      if (!isHexColor(value)) {
+        return;
+      }
+      nativeInput.value = value;
+      commitColor(value);
+    });
+    nativeInput.addEventListener("input", () => {
+      commitColor(nativeInput.value);
+      hexInput.value = nativeInput.value;
+      for (const item of swatches.querySelectorAll(".color-picker-swatch")) {
+        item.setAttribute("aria-pressed", "false");
+      }
+    });
+    valueRow.append(nativePicker, hexInput);
+    const alpha = document.createElement("input");
+    alpha.type = "range";
+    alpha.min = "0";
+    alpha.max = "1";
+    alpha.step = "0.01";
+    alpha.value = opacityInput.value || "1";
+    alpha.className = "color-picker-alpha";
+    alpha.setAttribute("aria-label", "Alpha");
+    alpha.addEventListener("input", () => commitOpacity(Number(alpha.value)));
+    popover.append(swatches, valueRow, alpha);
+    document.body.append(popover);
+    const rect = button.getBoundingClientRect();
+    const popoverRect = popover.getBoundingClientRect();
+    const left = Math.min(
+      window.innerWidth - popoverRect.width - 8,
+      Math.max(8, rect.left),
+    );
+    const top =
+      rect.top > popoverRect.height + 12
+        ? rect.top - popoverRect.height - 8
+        : rect.bottom + 8;
+    popover.style.left = `${left}px`;
+    popover.style.top = `${Math.max(8, Math.min(window.innerHeight - popoverRect.height - 8, top))}px`;
+    button.setAttribute("aria-expanded", "true");
+    setTimeout(() => {
+      document.addEventListener("pointerdown", close, { once: true });
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          close();
+        }
+      }, { once: true });
+    }, 0);
+  };
+  button.addEventListener("click", () => {
+    if (popover) {
+      close();
+    } else {
+      open();
+    }
+  });
+  button.setAttribute("aria-haspopup", "dialog");
+  button.setAttribute("aria-expanded", "false");
+}
+
 function debounce<T extends (...args: any[]) => void>(func: T, wait: number): T {
   let timeout: number | undefined;
   return function (this: any, ...args: any[]) {
@@ -780,15 +924,15 @@ export function setupStyleControls(
   elements.frameTitleInput.addEventListener("change", () => {
     actions.setFrameTitle(elements.frameTitleInput.value);
   });
-  elements.fillInput.addEventListener("input", makeTransactionable(() => {
-    actions.setFill(...colorChannels(elements.fillInput.value));
-  }, actions));
+  setupColorPickerButton(elements.fillInput, elements.fillOpacityInput, (...color) => {
+    actions.setFill(...color);
+  }, (opacity) => actions.setFillOpacity(opacity), actions);
   elements.fillOpacityInput.addEventListener("input", makeTransactionable(() => {
     actions.setFillOpacity(Number(elements.fillOpacityInput.value));
   }, actions));
-  elements.strokeInput.addEventListener("input", makeTransactionable(() => {
-    actions.setStroke(...colorChannels(elements.strokeInput.value));
-  }, actions));
+  setupColorPickerButton(elements.strokeInput, elements.strokeOpacityInput, (...color) => {
+    actions.setStroke(...color);
+  }, (opacity) => actions.setStrokeOpacity(opacity), actions);
   elements.strokeOpacityInput.addEventListener("input", makeTransactionable(() => {
     actions.setStrokeOpacity(Number(elements.strokeOpacityInput.value));
   }, actions));
@@ -798,9 +942,9 @@ export function setupStyleControls(
       actions.setStrokeWidth(width);
     }
   }, actions));
-  elements.textColorInput.addEventListener("input", makeTransactionable(() => {
-    actions.setTextColor(...colorChannels(elements.textColorInput.value));
-  }, actions));
+  setupColorPickerButton(elements.textColorInput, elements.textOpacityInput, (...color) => {
+    actions.setTextColor(...color);
+  }, (opacity) => actions.setTextOpacity(opacity), actions);
   elements.textOpacityInput.addEventListener("input", makeTransactionable(() => {
     actions.setTextOpacity(Number(elements.textOpacityInput.value));
   }, actions));

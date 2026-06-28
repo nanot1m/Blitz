@@ -235,10 +235,13 @@ if (wasm.blitz_selected_style_kind() !== 3) {
   throw new Error("A selected frame did not expose both geometric and title text styles.");
 }
 if (wasm.blitz_selected_container_state() !== 2) {
-  throw new Error("A frame should always be tagged as a container.");
+  throw new Error("A new frame should default to a container.");
 }
-if (wasm.blitz_set_selected_container(0) !== 0 || wasm.blitz_selected_container_state() !== 2) {
-  throw new Error("A frame allowed its required container component to be removed.");
+if (wasm.blitz_set_selected_container(0) !== 1 || wasm.blitz_selected_container_state() !== 1) {
+  throw new Error("A frame container component could not be disabled.");
+}
+if (wasm.blitz_set_selected_container(1) !== 1 || wasm.blitz_selected_container_state() !== 2) {
+  throw new Error("A frame container component could not be re-enabled.");
 }
 wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 1);
 const frameItem = new DataView(
@@ -572,6 +575,9 @@ wasm.blitz_create_frame(
   frameRoundTripTitleLength,
 );
 const frameRoundTripId = readLastCreatedObjectId();
+if (wasm.blitz_set_selected_container(0) !== 1) {
+  throw new Error("Failed to disable a frame container before round trip.");
+}
 if (wasm.blitz_scene_revision() === emptyRevision) {
   throw new Error("Scene mutations did not advance the revision.");
 }
@@ -706,8 +712,8 @@ wasm.blitz_select_object(
   frameRoundTripId[3],
   0,
 );
-if (wasm.blitz_selected_container_state() !== 2) {
-  throw new Error("A restored frame did not keep its required container component.");
+if (wasm.blitz_selected_container_state() !== 1) {
+  throw new Error("A restored frame did not keep its disabled container state.");
 }
 const restoredFrameTitlePtr = wasm.blitz_selected_frame_title_ptr();
 if (

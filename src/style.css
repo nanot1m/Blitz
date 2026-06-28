@@ -143,7 +143,7 @@ dialog {
 
 #tool-island {
   position: fixed;
-  top: 16px;
+  bottom: max(16px, env(safe-area-inset-bottom));
   left: 50%;
   /* Above the other fixed panels (z-index 2) and the text editor (4) so the
      toolbar's dropdown popups are never covered. The MCP settings dialog uses
@@ -171,17 +171,46 @@ dialog {
   display: grid;
   gap: 8px;
   align-content: start;
-  width: min(310px, calc(100vw - 32px));
+  width: min(236px, calc(100vw - 32px));
   max-height: calc(100vh - 88px);
   overflow: auto;
 }
 
+#toggle-properties {
+  position: fixed;
+  right: 16px;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  z-index: 10;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid #d4d9e1;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+  color: #18202b;
+  cursor: pointer;
+}
+
+#toggle-properties[aria-pressed="true"] {
+  background: #edf3ff;
+  color: #155bd7;
+}
+
+#toggle-properties:disabled {
+  color: #a5adba;
+  cursor: default;
+  opacity: 0.72;
+}
+
 #style-island {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   width: 100%;
   box-sizing: border-box;
-  padding: 9px;
+  padding: 8px;
   border: 1px solid #d4d9e1;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.96);
@@ -262,9 +291,9 @@ dialog {
 }
 
 .style-panel-heading {
-  padding: 0 2px 2px;
+  padding: 0 1px 1px;
   color: #657080;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 760;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -273,38 +302,131 @@ dialog {
 .selected-style-group,
 .selected-stroke-controls {
   display: grid;
-  gap: 6px;
+  gap: 5px;
 }
 
 .style-control {
   display: grid;
-  grid-template-columns: 48px 28px minmax(0, 1fr);
+  grid-template-columns: 42px 24px;
   align-items: center;
-  gap: 6px;
-  min-height: 28px;
+  gap: 5px;
+  min-height: 24px;
   color: #657080;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 650;
   white-space: nowrap;
 }
 
-.style-control input[type="color"] {
-  width: 28px;
-  height: 28px;
-  padding: 2px;
+.style-color-button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
   border: 1px solid #c8ced8;
   border-radius: 6px;
-  background: #fff;
+  background:
+    linear-gradient(var(--style-color, #000), var(--style-color, #000)) padding-box,
+    conic-gradient(#fff 25%, #d8dee8 0 50%, #fff 0 75%, #d8dee8 0) border-box;
+  background-size:
+    auto,
+    8px 8px;
   cursor: pointer;
 }
 
-.style-control input[type="color"]::-webkit-color-swatch-wrapper {
-  padding: 0;
+.style-color-button:hover,
+.style-color-button[aria-expanded="true"] {
+  border-color: #155bd7;
+  box-shadow: 0 0 0 2px rgba(21, 91, 215, 0.14);
 }
 
-.style-control input[type="color"]::-webkit-color-swatch {
+.color-picker-popover {
+  position: fixed;
+  z-index: 20;
+  width: 124px;
+  padding: 7px;
+  border: 1px solid #cfd5df;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.99);
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.22);
+}
+
+.color-picker-swatches {
+  display: grid;
+  grid-template-columns: repeat(4, 24px);
+  gap: 4px;
+  margin-bottom: 7px;
+}
+
+.color-picker-swatch {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid rgba(24, 32, 43, 0.08);
+  border-radius: 6px;
+  background: var(--style-color, #000);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  cursor: pointer;
+}
+
+.color-picker-swatch[aria-pressed="true"] {
+  border-color: #18202b;
+  box-shadow:
+    0 0 0 1px #fff,
+    0 0 0 3px #18202b;
+}
+
+.color-picker-value {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 2px;
+  border: 1px solid #d4d9e1;
+  border-radius: 7px;
+  background: #fff;
+}
+
+.color-picker-native-control {
+  position: relative;
+  display: block;
+  width: 24px;
+  height: 24px;
+  overflow: hidden;
+  border: 1px solid rgba(24, 32, 43, 0.14);
+  border-radius: 6px;
+  background:
+    conic-gradient(from 90deg, #ef4444, #f59e0b, #22c55e, #3b82f6, #a855f7, #ef4444);
+  cursor: pointer;
+}
+
+.color-picker-native-control input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   border: 0;
-  border-radius: 3px;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.color-picker-value input {
+  width: 100%;
+  min-width: 0;
+  height: 22px;
+  padding: 0 2px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #313b48;
+  font: 650 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-transform: uppercase;
+}
+
+.color-picker-alpha {
+  width: 100%;
+  height: 18px;
+  margin: 7px 0 0;
+  accent-color: #155bd7;
 }
 
 .style-opacity {
@@ -315,17 +437,17 @@ dialog {
 }
 
 .style-width-control {
-  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-columns: 42px minmax(0, 1fr);
 }
 
 .style-title-control {
-  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-columns: 42px minmax(0, 1fr);
 }
 
 .style-title-control input {
   width: 100%;
   min-width: 0;
-  height: 28px;
+  height: 24px;
   border: 1px solid #c8ced8;
   border-radius: 6px;
   padding: 0 7px;
@@ -348,7 +470,7 @@ dialog {
 
 .style-width-control input {
   width: 100%;
-  height: 28px;
+  height: 24px;
   padding: 0 6px;
   border: 1px solid #c8ced8;
   border-radius: 6px;
@@ -365,7 +487,7 @@ dialog {
 
 .style-compact-button {
   width: 100%;
-  height: 28px;
+  height: 24px;
   padding: 0 8px;
   border: 1px solid #c8ced8;
   border-radius: 6px;
@@ -1152,14 +1274,19 @@ dialog::backdrop {
   right: 16px;
   bottom: 16px;
   z-index: 2;
-  padding: 6px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 66px;
+  height: 44px;
+  padding: 0 12px;
   border: 1px solid #d4d9e1;
-  border-radius: 6px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
   color: #18202b;
   font:
-    600 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    650 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
   pointer-events: none;
   user-select: none;
@@ -1167,14 +1294,40 @@ dialog::backdrop {
 
 @media (max-width: 720px) {
   #side-panel-stack {
-    top: 62px;
-    right: max(10px, env(safe-area-inset-right));
-    width: min(310px, calc(100vw - 20px));
-    max-height: calc(100vh - 72px);
+    top: auto;
+    right: max(14px, env(safe-area-inset-right));
+    bottom: calc(148px + env(safe-area-inset-bottom));
+    left: auto;
+    display: none;
+    width: min(320px, calc(100vw - 28px));
+    max-height: min(48vh, calc(100vh - 112px));
   }
 
-  #style-island {
-    padding: 8px;
+  :root[data-side-panel-open="true"] #side-panel-stack {
+    display: grid;
+  }
+
+  #toggle-properties {
+    display: inline-flex;
+  }
+
+  #toggle-properties {
+    right: max(14px, env(safe-area-inset-right));
+    bottom: max(14px, env(safe-area-inset-bottom));
+    width: 56px;
+    height: 56px;
+    border-radius: 10px;
+  }
+
+  #toggle-properties svg {
+    width: 25px;
+    height: 25px;
+    stroke-width: 2.35;
+  }
+
+  #style-island,
+  #stats-panel {
+    max-width: 320px;
   }
 
   .empty-state {
@@ -1197,24 +1350,47 @@ dialog::backdrop {
   }
 
   #tool-island {
-    top: max(10px, env(safe-area-inset-top));
+    top: auto;
+    bottom: max(14px, env(safe-area-inset-bottom));
     right: auto;
-    left: 50%;
+    left: max(14px, env(safe-area-inset-left));
     width: max-content;
     max-width: calc(
-      100vw - 20px - env(safe-area-inset-left) - env(safe-area-inset-right)
+      100vw - 98px - env(safe-area-inset-left) - env(safe-area-inset-right)
     );
-    gap: 2px;
-    padding: 5px 4px;
-    transform: translateX(-50%);
+    height: 56px;
+    gap: 3px;
+    overflow: visible;
+    padding: 7px;
+    border-radius: 10px;
+    transform: none;
+  }
+
+  #tool-island button,
+  #tool-island summary {
+    min-width: 36px;
+    width: 36px;
+    height: 40px;
+    border-radius: 7px;
+  }
+
+  #tool-island svg {
+    width: 19px;
+    height: 19px;
+  }
+
+  .tool-divider {
+    height: 28px;
+    margin: 0 4px;
   }
 
   #file-menu,
   #shape-menu,
   #view-menu {
     position: relative;
-    display: block;
-    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    height: 40px;
   }
 
   #file-menu > summary,
@@ -1233,10 +1409,12 @@ dialog::backdrop {
   .shape-menu-content,
   .view-menu-content {
     position: absolute;
-    top: calc(100% + 8px);
+    top: auto;
+    bottom: calc(100% + 8px);
     left: 0;
+    z-index: 12;
     display: grid;
-    grid-template-columns: repeat(2, 34px);
+    grid-template-columns: repeat(2, 36px);
     gap: 4px;
     padding: 5px;
     border: 1px solid #d4d9e1;
@@ -1246,17 +1424,39 @@ dialog::backdrop {
   }
 
   .file-menu-content {
-    grid-template-columns: repeat(2, 34px);
+    grid-template-columns: repeat(2, 36px);
   }
 
   .view-menu-content {
     right: 0;
     left: auto;
-    grid-template-columns: repeat(4, 34px);
+    grid-template-columns: repeat(4, 36px);
+  }
+
+  #history-controls {
+    bottom: calc(84px + env(safe-area-inset-bottom));
+    left: max(14px, env(safe-area-inset-left));
+    border-radius: 10px;
+  }
+
+  #history-controls button {
+    width: 40px;
+    height: 40px;
+    border-radius: 7px;
+  }
+
+  #zoom-indicator {
+    top: max(14px, env(safe-area-inset-top));
+    right: max(14px, env(safe-area-inset-right));
+    bottom: auto;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 14px;
   }
 
   .scene-action-popup {
-    top: calc(100% + 8px);
+    top: auto;
+    bottom: calc(100% + 8px);
     left: -5px;
   }
 
@@ -1270,13 +1470,14 @@ dialog::backdrop {
 
 @media (max-width: 420px) {
   #side-panel-stack {
-    top: 64px;
-    right: 10px;
-    width: calc(100vw - 20px);
+    right: 14px;
+    left: auto;
+    bottom: calc(148px + env(safe-area-inset-bottom));
+    width: min(320px, calc(100vw - 28px));
   }
 
   #history-controls {
-    bottom: max(10px, env(safe-area-inset-bottom));
-    left: max(10px, env(safe-area-inset-left));
+    bottom: calc(84px + env(safe-area-inset-bottom));
+    left: max(14px, env(safe-area-inset-left));
   }
 }

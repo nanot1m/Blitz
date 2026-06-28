@@ -165,14 +165,14 @@ dialog {
 
 #side-panel-stack {
   position: fixed;
-  top: 72px;
+  top: 16px;
   right: 16px;
   z-index: 2;
   display: grid;
   gap: 8px;
   align-content: start;
   width: min(236px, calc(100vw - 32px));
-  max-height: calc(100vh - 88px);
+  max-height: calc(100vh - 32px);
   overflow: auto;
 }
 
@@ -437,7 +437,8 @@ dialog {
 }
 
 .style-width-control {
-  grid-template-columns: 42px minmax(0, 1fr);
+  grid-template-columns: 76px 72px;
+  justify-content: start;
 }
 
 .style-title-control {
@@ -469,7 +470,7 @@ dialog {
 }
 
 .style-width-control input {
-  width: 100%;
+  width: 72px;
   height: 24px;
   padding: 0 6px;
   border: 1px solid #c8ced8;

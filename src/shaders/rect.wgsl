@@ -46,10 +46,11 @@ struct PathDraw {
 };
 
 struct PathSegment {
-  a: vec2f,
-  b: vec2f,
-  color: vec4f,
-  params: vec4f, // half_width, order, drag, _
+  ax: f32,
+  ay: f32,
+  bx: f32,
+  by: f32,
+  draw_index: u32,
 };
 
 @group(0) @binding(0)
@@ -75,6 +76,9 @@ var<storage, read> path_draws: array<PathDraw>;
 
 @group(0) @binding(9)
 var<storage, read> path_segments: array<PathSegment>;
+
+@group(0) @binding(10)
+var<storage, read> visible_path_segments: array<u32>;
 
 @group(0) @binding(6)
 var font_atlas: texture_2d<f32>;
@@ -206,15 +210,16 @@ fn shape_vertex_main(
 @vertex
 fn path_vertex_main(@builtin(vertex_index) vertex_index: u32,
                     @builtin(instance_index) instance_index: u32) -> PathVertexOut {
-  // One instance per segment; expand it into the capsule's bounding quad and let
-  // the fragment shade a distance field, giving round joins + caps + AA.
-  let seg = path_segments[instance_index];
-  let half_width = seg.params.x;
-  let order = seg.params.y;
-  let dragged = seg.params.z > 0.5;
+  // Instances index the cull's visible list; expand each segment into the
+  // capsule's bounding quad and let the fragment shade a distance field.
+  let seg = path_segments[visible_path_segments[instance_index]];
+  let draw = path_draws[seg.draw_index];
+  let half_width = draw.render.z * 0.5;
+  let order = draw.render.x;
+  let dragged = draw.render.y > 0.5;
   let drag_offset = select(vec2f(0.0, 0.0), u.interaction.xy, dragged);
-  let a = seg.a + drag_offset;
-  let b = seg.b + drag_offset;
+  let a = vec2f(seg.ax, seg.ay) + drag_offset;
+  let b = vec2f(seg.bx, seg.by) + drag_offset;
   let delta = b - a;
   let len = length(delta);
   let dir = select(vec2f(1.0, 0.0), delta / len, len > 0.0001);
@@ -237,7 +242,7 @@ fn path_vertex_main(@builtin(vertex_index) vertex_index: u32,
 
   var out: PathVertexOut;
   out.position = vec4f(world_to_clip(corner), depth, 1.0);
-  out.color = seg.color;
+  out.color = draw.fill_color;
   out.world = corner;
   out.seg_a = a;
   out.seg_b = b;
@@ -376,11 +381,10 @@ fn shape_fragment_main(in: VertexOut) -> @location(0) vec4f {
 
 @fragment
 fn path_fragment_main(in: PathVertexOut) -> @location(0) vec4f {
-  let distance = segment_distance(in.world, in.seg_a, in.seg_b);
-  let edge_alpha = 1.0 / max(u.style.x, 0.001); // one pixel in world units
-  let coverage = clamp((in.half_width - distance) / edge_alpha + 0.5, 0.0, 1.0);
-  if (in.color.a * coverage <= 0.001) {
+  // Binary coverage: MSAA antialiases the silhouette across samples, and
+  // depth-write stops overlapping capsules within a stroke from blending twice.
+  if (segment_distance(in.world, in.seg_a, in.seg_b) > in.half_width) {
     discard;
   }
-  return vec4f(in.color.rgb, in.color.a * coverage);
+  return in.color;
 }

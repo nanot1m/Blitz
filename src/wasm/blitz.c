@@ -219,11 +219,14 @@ typedef struct PathDraw {
 
 // One capsule per pen segment: the GPU expands it to a rounded-rect quad and
 // shades it with a distance field, so joins are round and ends are capped.
+// Color/width/order are shared across a stroke, so they live in the PathDraw
+// referenced by draw_index rather than being duplicated on every segment.
 typedef struct PathSegment {
-  float a[2];      // segment start (world)
-  float b[2];      // segment end (world)
-  float color[4];  // fill rgba
-  float params[4]; // half_width, order, drag, _
+  float ax;
+  float ay;
+  float bx;
+  float by;
+  u32 draw_index;
 } PathSegment;
 
 typedef struct SceneItem {
@@ -1809,7 +1812,9 @@ static void reorder_selection(u32 selected_first) {
     u32 want_selected = selected_first ? pass == 0u : pass == 1u;
     for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
       u32 entity = world.draw_order[i];
-      if (world.selected[entity] == want_selected) {
+      // Move the whole selected subtree together so a container keeps its
+      // children (entity_is_dragged == selected or under a selected ancestor).
+      if (entity_is_dragged(entity) == want_selected) {
         world.draw_order_scratch[output] = entity;
         output += 1u;
       }
@@ -2119,35 +2124,26 @@ static void push_path_view_draws(PathView view, Vec2 position, u32 entity,
 
   // draw_params: first segment index, segment count (for per-path viewport cull).
   u32 segment_offset = path_segment_count;
+  u32 this_draw = path_draw_count;
   draw->draw_params[0] = (float)segment_offset;
   draw->draw_params[1] = 0.0f;
   draw->draw_params[2] = 0.0f;
   draw->draw_params[3] = 0.0f;
   path_draw_count += 1u;
 
-  // One capsule per segment; the shader rounds the joins and caps.
+  // One capsule per segment; color/width/order come from path_draws[draw_index].
   if (view.fill_color.a <= 0.001f) {
     return;
   }
-  float half_width = view.stroke_width * 0.5f;
-  float drag_flag = (order & BLITZ_DRAG_FLAG) ? 1.0f : 0.0f;
-  float order_value = (float)(order & 0x7fffffffu);
   for (u32 i = 1u; i < view.point_count; i += 1u) {
     Vec2 a = path_point_world(view, position, i - 1u);
     Vec2 b = path_point_world(view, position, i);
     PathSegment *seg = &path_segments[path_segment_count];
-    seg->a[0] = a.x;
-    seg->a[1] = a.y;
-    seg->b[0] = b.x;
-    seg->b[1] = b.y;
-    seg->color[0] = view.fill_color.r;
-    seg->color[1] = view.fill_color.g;
-    seg->color[2] = view.fill_color.b;
-    seg->color[3] = view.fill_color.a;
-    seg->params[0] = half_width;
-    seg->params[1] = order_value;
-    seg->params[2] = drag_flag;
-    seg->params[3] = 0.0f;
+    seg->ax = a.x;
+    seg->ay = a.y;
+    seg->bx = b.x;
+    seg->by = b.y;
+    seg->draw_index = this_draw;
     path_segment_count += 1u;
   }
   draw->draw_params[1] = (float)(path_segment_count - segment_offset);
@@ -2594,6 +2590,7 @@ static void extract_static_shapes(void) {
                          BLITZ_INVALID_INDEX, world.draw_order_count);
   }
 
+  uniforms.style[1] = (float)path_segment_count;
   uniforms.style[2] = (float)shape_command_count;
   uniforms.style[3] = (float)world.draw_order_count;
   shape_command_version += 1u;

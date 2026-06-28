@@ -9,6 +9,7 @@ import {
 } from "./input/user-events";
 import shaderSource from "./shaders/rect.wgsl?raw";
 import cullSource from "./shaders/cull.wgsl?raw";
+import pathCullSource from "./shaders/path-cull.wgsl?raw";
 import backgroundSource from "./shaders/background.wgsl?raw";
 import { setupSceneFileStorage } from "./storage/scene-file";
 import { getOrCreateActorId } from "./storage/actor-id";
@@ -344,6 +345,9 @@ async function boot() {
   }
   const format = navigator.gpu.getPreferredCanvasFormat();
   const depthFormat: GPUTextureFormat = "depth32float";
+  // 4x MSAA: pens render with binary coverage + depth-write (clean union, correct
+  // z-order, single-blend translucency); MSAA supplies the smooth edges.
+  const SAMPLE_COUNT = 4;
   context.configure({
     device,
     format,
@@ -447,6 +451,7 @@ async function boot() {
       depthWriteEnabled: false,
       depthCompare: "always",
     },
+    multisample: { count: SAMPLE_COUNT },
   });
   const bindGroupLayout = device.createBindGroupLayout({
     label: "Blitz Shape Bind Group Layout",
@@ -501,6 +506,11 @@ async function boot() {
         visibility: GPUShaderStage.VERTEX,
         buffer: { type: "read-only-storage" },
       },
+      {
+        binding: 10,
+        visibility: GPUShaderStage.VERTEX,
+        buffer: { type: "read-only-storage" },
+      },
     ],
   });
   const pipelineLayout = device.createPipelineLayout({
@@ -543,6 +553,7 @@ async function boot() {
       depthWriteEnabled: true,
       depthCompare: "greater-equal",
     },
+    multisample: { count: SAMPLE_COUNT },
   });
   const pathPipeline = device.createRenderPipeline({
     label: "Blitz Path Pipeline",
@@ -576,13 +587,14 @@ async function boot() {
       topology: "triangle-list",
     },
     depthStencil: {
-      // Pens are opaque and drawn in z-order, so segments paint over each other
-      // cleanly (C over C = C). Writing depth would make each capsule's AA edge
-      // occlude the next, leaving visible rings; test-only against shapes.
+      // Depth-write on: binary coverage + MSAA means each pixel is owned by one
+      // capsule (first writer wins), so the union is clean, translucency blends
+      // once, and pens z-order correctly against shapes and text.
       format: depthFormat,
-      depthWriteEnabled: false,
+      depthWriteEnabled: true,
       depthCompare: "greater",
     },
+    multisample: { count: SAMPLE_COUNT },
   });
   const cullShader = device.createShaderModule({
     label: "Blitz Cull Shader",
@@ -639,6 +651,27 @@ async function boot() {
       bindGroupLayouts: [cullBindGroupLayout],
     }),
     compute: { module: cullShader, entryPoint: "cull_main" },
+  });
+  const pathCullShader = device.createShaderModule({
+    label: "Blitz Path Cull Shader",
+    code: pathCullSource,
+  });
+  const pathCullBindGroupLayout = device.createBindGroupLayout({
+    label: "Blitz Path Cull Bind Group Layout",
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+    ],
+  });
+  const pathCullPipeline = device.createComputePipeline({
+    label: "Blitz Path Cull Pipeline",
+    layout: device.createPipelineLayout({
+      bindGroupLayouts: [pathCullBindGroupLayout],
+    }),
+    compute: { module: pathCullShader, entryPoint: "cull_path_main" },
   });
   let shapeCommandCapacity = initialStorageCapacity;
   let visibleCommandCapacity = initialStorageCapacity;
@@ -701,6 +734,20 @@ async function boot() {
       GPUBufferUsage.COPY_DST |
       GPUBufferUsage.COPY_SRC,
   });
+  // Path cull outputs: compacted visible segment indices + its indirect draw args.
+  const pathSegmentIndexStride = Uint32Array.BYTES_PER_ELEMENT;
+  let visiblePathSegmentCapacity = initialStorageCapacity;
+  let visiblePathSegmentBuffer = device.createBuffer({
+    label: "Blitz Visible Path Segment Storage",
+    size: visiblePathSegmentCapacity * pathSegmentIndexStride,
+    usage: GPUBufferUsage.STORAGE,
+  });
+  const pathDrawArgsBuffer = device.createBuffer({
+    label: "Blitz Path Draw Args",
+    size: 4 * Uint32Array.BYTES_PER_ELEMENT,
+    usage:
+      GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+  });
   // Reads back the post-cull visible instance count for the stats panel.
   const drawArgsReadback = device.createBuffer({
     label: "Blitz Draw Args Readback",
@@ -724,6 +771,7 @@ async function boot() {
   });
   const fontAtlasView = fontAtlasTexture.createView();
   let cullBindGroup!: GPUBindGroup;
+  let pathCullBindGroup!: GPUBindGroup;
   let staticRenderBindGroup!: GPUBindGroup;
   let dynamicRenderBindGroup!: GPUBindGroup;
   // Bind groups capture the specific buffer objects they reference, so they are
@@ -744,6 +792,17 @@ async function boot() {
         { binding: 7, resource: { buffer: pathStorageBuffer } },
       ],
     });
+    pathCullBindGroup = device.createBindGroup({
+      label: "Blitz Path Cull Bind Group",
+      layout: pathCullBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuffer } },
+        { binding: 1, resource: { buffer: pathSegmentStorageBuffer } },
+        { binding: 2, resource: { buffer: pathStorageBuffer } },
+        { binding: 3, resource: { buffer: visiblePathSegmentBuffer } },
+        { binding: 4, resource: { buffer: pathDrawArgsBuffer } },
+      ],
+    });
     staticRenderBindGroup = device.createBindGroup({
       label: "Blitz Static Render Bind Group",
       layout: bindGroupLayout,
@@ -758,6 +817,7 @@ async function boot() {
         { binding: 7, resource: fontSampler },
         { binding: 8, resource: { buffer: pathStorageBuffer } },
         { binding: 9, resource: { buffer: pathSegmentStorageBuffer } },
+        { binding: 10, resource: { buffer: visiblePathSegmentBuffer } },
       ],
     });
     dynamicRenderBindGroup = device.createBindGroup({
@@ -774,6 +834,7 @@ async function boot() {
         { binding: 7, resource: fontSampler },
         { binding: 8, resource: { buffer: pathStorageBuffer } },
         { binding: 9, resource: { buffer: pathSegmentStorageBuffer } },
+        { binding: 10, resource: { buffer: visiblePathSegmentBuffer } },
       ],
     });
   };
@@ -826,18 +887,9 @@ async function boot() {
     2 * 4 * Uint32Array.BYTES_PER_ELEMENT;
   let lastUploadedShapeCommandVersion = -1;
   let currentShapeCommandCount = 0;
-  // Per-path segment ranges + world AABB, rebuilt on upload; the draw loop
-  // viewport-culls these so only on-screen strokes issue an instanced draw.
-  type PathDrawCull = {
-    minX: number;
-    minY: number;
-    maxX: number;
-    maxY: number;
-    segOffset: number;
-    segCount: number;
-    dragged: boolean;
-  };
-  let pathDrawList: PathDrawCull[] = [];
+  // Segments uploaded this version (clamped to capacity); the GPU cull compacts
+  // the on-screen ones each frame into the indirect draw.
+  let currentPathSegmentCount = 0;
   let lastUploadedDynVersion = -1;
   let currentDynCommandCount = 0;
   let lastZoomPercent = -1;
@@ -911,12 +963,14 @@ async function boot() {
         ${metricRow("WASM reserved", formatBytes(wasm.memory.buffer.byteLength))}
         ${metricRow("WASM live", formatBytes(wasm.blitz_wasm_live_bytes()))}
         ${metricRow("GPU buffers", formatBytes(gpuBufferBytes()))}
-        ${metricRow("Depth texture", formatBytes(ui.canvas.width * ui.canvas.height * 4))}
+        ${metricRow("MSAA targets", formatBytes(ui.canvas.width * ui.canvas.height * 4 * SAMPLE_COUNT * 2))}
       </div>
     `;
   };
   let depthTexture: GPUTexture | null = null;
   let depthView: GPUTextureView | null = null;
+  let msaaColorTexture: GPUTexture | null = null;
+  let msaaColorView: GPUTextureView | null = null;
   const resize = () => {
     const dpr = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.floor(ui.canvas.clientWidth * dpr));
@@ -934,9 +988,19 @@ async function boot() {
         label: "Blitz Depth Texture",
         size: [width, height],
         format: depthFormat,
+        sampleCount: SAMPLE_COUNT,
         usage: GPUTextureUsage.RENDER_ATTACHMENT,
       });
       depthView = depthTexture.createView();
+      msaaColorTexture?.destroy();
+      msaaColorTexture = device.createTexture({
+        label: "Blitz MSAA Color Texture",
+        size: [width, height],
+        format,
+        sampleCount: SAMPLE_COUNT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      msaaColorView = msaaColorTexture.createView();
     }
   };
   const colorHex = (red: number, green: number, blue: number) =>
@@ -2605,6 +2669,10 @@ async function boot() {
       pathSegmentStorageBuffer = ePathSegment.buffer;
       pathSegmentCapacity = ePathSegment.capacity;
       bindGroupsDirty ||= ePathSegment.grew;
+      const eVisiblePath = ensureStorage(visiblePathSegmentBuffer, visiblePathSegmentCapacity, pathSegmentCount, maxPathSegments, pathSegmentIndexStride, GPUBufferUsage.STORAGE, "Blitz Visible Path Segment Storage");
+      visiblePathSegmentBuffer = eVisiblePath.buffer;
+      visiblePathSegmentCapacity = eVisiblePath.capacity;
+      bindGroupsDirty ||= eVisiblePath.grew;
       if (shapeCommandCount > 0) {
         device.queue.writeBuffer(
           shapeCommandStorageBuffer,
@@ -2674,29 +2742,7 @@ async function boot() {
           ),
         );
       }
-      pathDrawList = [];
-      if (pathDrawCount > 0) {
-        const records = new Float32Array(
-          wasm.memory.buffer,
-          pathDrawPtr,
-          pathDrawCount * pathDrawF32Count,
-        );
-        for (let p = 0; p < pathDrawCount; p += 1) {
-          const o = p * pathDrawF32Count;
-          const segOffset = records[o + 12];
-          const segCount = records[o + 13];
-          if (segCount <= 0 || segOffset >= uploadableSegments) continue;
-          pathDrawList.push({
-            minX: records[o],
-            minY: records[o + 1],
-            maxX: records[o] + records[o + 2],
-            maxY: records[o + 1] + records[o + 3],
-            segOffset,
-            segCount: Math.min(segCount, uploadableSegments - segOffset),
-            dragged: records[o + 9] > 0.5,
-          });
-        }
-      }
+      currentPathSegmentCount = uploadableSegments;
       lastUploadedShapeCommandVersion = shapeCommandVersion;
     }
     const dynCommandPtr = wasm.blitz_dyn_command_ptr();
@@ -2761,6 +2807,8 @@ async function boot() {
       wasm.blitz_uniform_f32_count(),
     );
     uniforms[18] = gridVisible ? 1 : 0;
+    // style.y is the path-cull segment total; clamp to what was uploaded.
+    uniforms[5] = currentPathSegmentCount;
     device.queue.writeBuffer(uniformBuffer, 0, uniforms);
     positionTextEditor();
     const zoomPercent = Math.round(uniforms[4] * 100);
@@ -2772,24 +2820,33 @@ async function boot() {
       rebuildBindGroups();
     }
     device.queue.writeBuffer(drawArgsBuffer, 0, drawArgsReset);
+    device.queue.writeBuffer(pathDrawArgsBuffer, 0, drawArgsReset);
     const encoder = device.createCommandEncoder({
       label: "Blitz Render Encoder",
     });
-    if (currentShapeCommandCount > 0) {
+    if (currentShapeCommandCount > 0 || currentPathSegmentCount > 0) {
       const cullPass = encoder.beginComputePass({ label: "Blitz Cull Pass" });
-      cullPass.setPipeline(cullPipeline);
-      cullPass.setBindGroup(0, cullBindGroup);
-      cullPass.dispatchWorkgroups(Math.ceil(currentShapeCommandCount / 64));
+      if (currentShapeCommandCount > 0) {
+        cullPass.setPipeline(cullPipeline);
+        cullPass.setBindGroup(0, cullBindGroup);
+        cullPass.dispatchWorkgroups(Math.ceil(currentShapeCommandCount / 64));
+      }
+      if (currentPathSegmentCount > 0) {
+        cullPass.setPipeline(pathCullPipeline);
+        cullPass.setBindGroup(0, pathCullBindGroup);
+        cullPass.dispatchWorkgroups(Math.ceil(currentPathSegmentCount / 64));
+      }
       cullPass.end();
     }
     const pass = encoder.beginRenderPass({
       label: "Blitz Render Pass",
       colorAttachments: [
         {
-          view: context.getCurrentTexture().createView(),
+          view: msaaColorView!,
+          resolveTarget: context.getCurrentTexture().createView(),
           clearValue: { r: 0, g: 0, b: 0, a: 1 },
           loadOp: "clear",
-          storeOp: "store",
+          storeOp: "discard",
         },
       ],
       depthStencilAttachment: {
@@ -2807,35 +2864,12 @@ async function boot() {
       pass.setBindGroup(0, staticRenderBindGroup);
       pass.drawIndirect(drawArgsBuffer, 0);
     }
-    if (pathDrawList.length > 0) {
-      // Viewport-cull per stroke; each visible one draws its segments (6 verts
-      // each) as an instanced capsule draw, with firstInstance = its segment offset.
+    if (currentPathSegmentCount > 0) {
+      // The compute cull compacted the visible segments + their instance count;
+      // one indirect draw renders just those capsules.
       pass.setPipeline(pathPipeline);
       pass.setBindGroup(0, staticRenderBindGroup);
-      const scale = uniforms[4];
-      const halfW = (uniforms[0] * 0.5) / scale;
-      const halfH = (uniforms[1] * 0.5) / scale;
-      const viewMinX = uniforms[2] - halfW;
-      const viewMaxX = uniforms[2] + halfW;
-      const viewMinY = uniforms[3] - halfH;
-      const viewMaxY = uniforms[3] + halfH;
-      for (let p = 0; p < pathDrawList.length; p += 1) {
-        const d = pathDrawList[p];
-        if (!d.dragged) {
-          if (
-            d.maxX < viewMinX ||
-            d.minX > viewMaxX ||
-            d.maxY < viewMinY ||
-            d.minY > viewMaxY
-          ) {
-            continue;
-          }
-          if ((d.maxX - d.minX) * scale < 1 && (d.maxY - d.minY) * scale < 1) {
-            continue;
-          }
-        }
-        pass.draw(6, d.segCount, 0, d.segOffset);
-      }
+      pass.drawIndirect(pathDrawArgsBuffer, 0);
     }
     if (currentDynCommandCount > 0) {
       pass.setPipeline(shapePipeline);

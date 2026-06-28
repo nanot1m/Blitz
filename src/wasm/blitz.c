@@ -1,4 +1,5 @@
 typedef unsigned int u32;
+typedef unsigned short u16;
 typedef unsigned long usize;
 
 #include "font.generated.h"
@@ -207,12 +208,14 @@ typedef struct PathDraw {
   float bounds[4];
   float fill_color[4];
   float stroke_color[4];
-  float info[4];
+  float render[4];      // order, drag, stroke_width, point_count
+  float draw_params[4]; // base_vertex, fill_index_offset, fill_index_count,
+                        // stroke_index_count
 } PathDraw;
 
 typedef struct PathVertex {
-  float position_order_drag[4];
-  float color[4];
+  float x;
+  float y;
 } PathVertex;
 
 typedef struct SceneItem {
@@ -265,6 +268,7 @@ static OvalDraw *oval_draws;
 static TextDraw *text_draws;
 static PathDraw *path_draws;
 static PathVertex *path_points;
+static u16 *path_indices;
 static ShapeCommand *dyn_commands;
 static RectDraw *dyn_rects;
 static u32 shape_commands_cap;
@@ -274,6 +278,7 @@ static u32 oval_draws_cap;
 static u32 text_draws_cap;
 static u32 path_draws_cap;
 static u32 path_points_cap;
+static u32 path_indices_cap;
 static u32 dyn_commands_cap;
 static u32 dyn_rects_cap;
 static char text_input[BLITZ_TEXT_INPUT_BYTES];
@@ -305,6 +310,7 @@ static u32 triangle_draw_count;
 static u32 oval_draw_count;
 static u32 path_draw_count;
 static u32 path_point_count;
+static u32 path_index_count;
 static u32 path_draft_active;
 static u32 text_draw_count;
 static u32 visible_text_shape_count;
@@ -750,6 +756,7 @@ static void ecs_storage_init(void) {
   text_draws = 0;
   path_draws = 0;
   path_points = 0;
+  path_indices = 0;
   dyn_commands = 0;
   dyn_rects = 0;
   scene_file_buffer = 0;
@@ -765,6 +772,7 @@ static void ecs_storage_init(void) {
   text_draws_cap = 0u;
   path_draws_cap = 0u;
   path_points_cap = 0u;
+  path_indices_cap = 0u;
   dyn_commands_cap = 0u;
   dyn_rects_cap = 0u;
   ecs_block = 0;
@@ -1571,33 +1579,84 @@ static Vec2 path_tangent_at(PathView view, Vec2 position, u32 index) {
   return (Vec2){x / length, y / length};
 }
 
-static void push_path_vertex(Vec2 position, Color color, u32 order) {
+static void push_path_vertex(Vec2 position) {
   PathVertex *vertex = &path_points[path_point_count];
-  vertex->position_order_drag[0] = position.x;
-  vertex->position_order_drag[1] = position.y;
-  vertex->position_order_drag[2] = (float)(order & 0x7fffffffu);
-  vertex->position_order_drag[3] = (order & BLITZ_DRAG_FLAG) ? 1.0f : 0.0f;
-  vertex->color[0] = color.r;
-  vertex->color[1] = color.g;
-  vertex->color[2] = color.b;
-  vertex->color[3] = color.a;
+  vertex->x = position.x;
+  vertex->y = position.y;
   path_point_count += 1u;
 }
 
-static void push_path_triangle(Vec2 a, Vec2 b, Vec2 c, Color color,
-                               u32 order) {
-  push_path_vertex(a, color, order);
-  push_path_vertex(b, color, order);
-  push_path_vertex(c, color, order);
+static void push_path_index(u32 local) {
+  path_indices[path_index_count] = (u16)local;
+  path_index_count += 1u;
 }
 
-static void push_path_quad(Vec2 a, Vec2 b, Vec2 c, Vec2 d, Color color,
-                           u32 order) {
-  if (color.a <= 0.001f) {
-    return;
+// Two triangles (a,b,c)+(c,b,d) over four ribbon corners, addressed by their
+// offsets relative to the path's base vertex.
+static void push_path_quad_indices(u32 a, u32 b, u32 c, u32 d) {
+  push_path_index(a);
+  push_path_index(b);
+  push_path_index(c);
+  push_path_index(c);
+  push_path_index(b);
+  push_path_index(d);
+}
+
+static float path_border_width(PathView view) {
+  if (view.stroke_color.a <= 0.001f) {
+    return 0.0f;
   }
-  push_path_triangle(a, b, c, color, order);
-  push_path_triangle(c, b, d, color, order);
+  float half_width = view.stroke_width * 0.5f;
+  float border_width = half_width * 0.25f;
+  if (border_width < 1.0f) {
+    border_width = 1.0f;
+  }
+  if (border_width > half_width) {
+    border_width = half_width;
+  }
+  return border_width;
+}
+
+// Ribbon corners emitted per centerline point: 4 when a visible border wraps a
+// visible fill (outer/inner on each side), 2 for a single ribbon, 0 when the
+// path is fully transparent. Fill and border share these corners; the draw call
+// picks the color, so a corner is never duplicated for color alone.
+static u32 path_verts_per_point(PathView view) {
+  if (view.fill_color.a <= 0.001f && view.stroke_color.a <= 0.001f) {
+    return 0u;
+  }
+  float half_width = view.stroke_width * 0.5f;
+  float border_width = path_border_width(view);
+  float fill_half_width = half_width - border_width;
+  if (fill_half_width > 0.001f && border_width > 0.001f) {
+    return 4u;
+  }
+  return 2u;
+}
+
+static u32 path_vertex_count(PathView view) {
+  if (!view.points || view.point_count < 2u) {
+    return 0u;
+  }
+  return path_verts_per_point(view) * view.point_count;
+}
+
+static u32 path_index_count_for(PathView view) {
+  if (!view.points || view.point_count < 2u) {
+    return 0u;
+  }
+  u32 segments = view.point_count - 1u;
+  float half_width = view.stroke_width * 0.5f;
+  float border_width = path_border_width(view);
+  float fill_half_width = half_width - border_width;
+  u32 fill_visible = view.fill_color.a > 0.001f;
+  if (fill_half_width > 0.001f && border_width > 0.001f) {
+    return (fill_visible ? segments * 6u : 0u) + segments * 12u;
+  }
+  if (fill_half_width <= 0.001f && border_width > 0.001f) {
+    return segments * 6u;
+  }
+  return fill_visible ? segments * 6u : 0u;
 }
 
 static void path_recompute_entity_bounds_preserve_world(u32 entity) {
@@ -2102,68 +2161,87 @@ static void push_path_view_draws(PathView view, Vec2 position, u32 entity,
   draw->stroke_color[1] = view.stroke_color.g;
   draw->stroke_color[2] = view.stroke_color.b;
   draw->stroke_color[3] = view.stroke_color.a;
-  draw->info[0] = view.stroke_width;
-  draw->info[1] = (float)path_point_count;
-  draw->info[2] = (float)view.point_count;
-  draw->info[3] = 0.0f;
+  draw->render[0] = (float)(order & 0x7fffffffu);
+  draw->render[1] = (order & BLITZ_DRAG_FLAG) ? 1.0f : 0.0f;
+  draw->render[2] = view.stroke_width;
+  draw->render[3] = (float)view.point_count;
+
+  u32 base_vertex = path_point_count;
+  u32 fill_index_offset = path_index_count;
 
   float half_width = view.stroke_width * 0.5f;
   float border_width = 0.0f;
   if (view.stroke_color.a > 0.001f) {
-    border_width = half_width * 0.25f;
-    if (border_width < 1.0f) {
-      border_width = 1.0f;
-    }
-    if (border_width > half_width) {
-      border_width = half_width;
-    }
+    border_width = path_border_width(view);
   }
   float fill_half_width = half_width - border_width;
   if (fill_half_width < 0.0f) {
     fill_half_width = 0.0f;
   }
+  u32 fill_visible = view.fill_color.a > 0.001f;
 
-  for (u32 i = 1u; i < view.point_count; i += 1u) {
-    Vec2 start = path_point_world(view, position, i - 1u);
-    Vec2 end = path_point_world(view, position, i);
-    Vec2 start_tangent = path_tangent_at(view, position, i - 1u);
-    Vec2 end_tangent = path_tangent_at(view, position, i);
-    Vec2 start_normal = {-start_tangent.y, start_tangent.x};
-    Vec2 end_normal = {-end_tangent.y, end_tangent.x};
-
-    Vec2 start_outer_l = {start.x + start_normal.x * half_width,
-                          start.y + start_normal.y * half_width};
-    Vec2 start_outer_r = {start.x - start_normal.x * half_width,
-                          start.y - start_normal.y * half_width};
-    Vec2 end_outer_l = {end.x + end_normal.x * half_width,
-                        end.y + end_normal.y * half_width};
-    Vec2 end_outer_r = {end.x - end_normal.x * half_width,
-                        end.y - end_normal.y * half_width};
-
-    if (fill_half_width > 0.001f) {
-      Vec2 start_inner_l = {start.x + start_normal.x * fill_half_width,
-                            start.y + start_normal.y * fill_half_width};
-      Vec2 start_inner_r = {start.x - start_normal.x * fill_half_width,
-                            start.y - start_normal.y * fill_half_width};
-      Vec2 end_inner_l = {end.x + end_normal.x * fill_half_width,
-                          end.y + end_normal.y * fill_half_width};
-      Vec2 end_inner_r = {end.x - end_normal.x * fill_half_width,
-                          end.y - end_normal.y * fill_half_width};
-      push_path_quad(start_inner_l, start_inner_r, end_inner_l, end_inner_r,
-                     view.fill_color, order);
-      if (border_width > 0.001f) {
-        push_path_quad(start_outer_l, start_inner_l, end_outer_l, end_inner_l,
-                       view.stroke_color, order);
-        push_path_quad(start_inner_r, start_outer_r, end_inner_r, end_outer_r,
-                       view.stroke_color, order);
-      }
-    } else {
-      push_path_quad(start_outer_l, start_outer_r, end_outer_l, end_outer_r,
-                     border_width > 0.001f ? view.stroke_color
-                                           : view.fill_color,
-                     order);
+  if (path_verts_per_point(view) == 4u) {
+    // Visible border wrapping a visible-width fill. Four shared corners per
+    // point — outer_l, inner_l, inner_r, outer_r — indexed into a fill ribbon
+    // (inner pair) plus left/right border ribbons (outer/inner pairs).
+    for (u32 i = 0u; i < view.point_count; i += 1u) {
+      Vec2 center = path_point_world(view, position, i);
+      Vec2 tangent = path_tangent_at(view, position, i);
+      Vec2 normal = {-tangent.y, tangent.x};
+      push_path_vertex((Vec2){center.x + normal.x * half_width,
+                              center.y + normal.y * half_width});
+      push_path_vertex((Vec2){center.x + normal.x * fill_half_width,
+                              center.y + normal.y * fill_half_width});
+      push_path_vertex((Vec2){center.x - normal.x * fill_half_width,
+                              center.y - normal.y * fill_half_width});
+      push_path_vertex((Vec2){center.x - normal.x * half_width,
+                              center.y - normal.y * half_width});
     }
+    if (fill_visible) {
+      for (u32 i = 1u; i < view.point_count; i += 1u) {
+        u32 s = (i - 1u) * 4u;
+        u32 e = i * 4u;
+        push_path_quad_indices(s + 1u, s + 2u, e + 1u, e + 2u);
+      }
+    }
+    u32 fill_count = path_index_count - fill_index_offset;
+    for (u32 i = 1u; i < view.point_count; i += 1u) {
+      u32 s = (i - 1u) * 4u;
+      u32 e = i * 4u;
+      push_path_quad_indices(s + 0u, s + 1u, e + 0u, e + 1u);
+      push_path_quad_indices(s + 2u, s + 3u, e + 2u, e + 3u);
+    }
+    draw->draw_params[2] = (float)fill_count;
+    draw->draw_params[3] =
+        (float)(path_index_count - fill_index_offset - fill_count);
+  } else {
+    // Single ribbon: plain fill, or a stroke that consumes the whole width.
+    float ribbon_half = fill_half_width > 0.001f ? fill_half_width : half_width;
+    u32 ribbon_is_stroke =
+        fill_half_width <= 0.001f && border_width > 0.001f;
+    for (u32 i = 0u; i < view.point_count; i += 1u) {
+      Vec2 center = path_point_world(view, position, i);
+      Vec2 tangent = path_tangent_at(view, position, i);
+      Vec2 normal = {-tangent.y, tangent.x};
+      push_path_vertex((Vec2){center.x + normal.x * ribbon_half,
+                              center.y + normal.y * ribbon_half});
+      push_path_vertex((Vec2){center.x - normal.x * ribbon_half,
+                              center.y - normal.y * ribbon_half});
+    }
+    if (ribbon_is_stroke || fill_visible) {
+      for (u32 i = 1u; i < view.point_count; i += 1u) {
+        u32 s = (i - 1u) * 2u;
+        u32 e = i * 2u;
+        push_path_quad_indices(s + 0u, s + 1u, e + 0u, e + 1u);
+      }
+    }
+    u32 emitted = path_index_count - fill_index_offset;
+    draw->draw_params[2] = ribbon_is_stroke ? 0.0f : (float)emitted;
+    draw->draw_params[3] = ribbon_is_stroke ? (float)emitted : 0.0f;
   }
+
+  draw->draw_params[0] = (float)base_vertex;
+  draw->draw_params[1] = (float)fill_index_offset;
   path_draw_count += 1u;
 }
 
@@ -2543,20 +2621,24 @@ static void extract_static_shapes(void) {
   oval_draw_count = 0u;
   path_draw_count = 0u;
   path_point_count = 0u;
+  path_index_count = 0u;
   u32 draw_need = world.draw_order_count;
   u32 path_draw_need = 0u;
   u32 path_point_need = 0u;
+  u32 path_index_need = 0u;
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
     u32 entity = world.draw_order[i];
     if ((world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) &&
         world.path_views[entity].point_count > 1u) {
       path_draw_need += 1u;
-      path_point_need += (world.path_views[entity].point_count - 1u) * 18u;
+      path_point_need += path_vertex_count(world.path_views[entity]);
+      path_index_need += path_index_count_for(world.path_views[entity]);
     }
   }
   if (path_draft_active && path_draft_view.point_count > 1u) {
     path_draw_need += 1u;
-    path_point_need += (path_draft_view.point_count - 1u) * 18u;
+    path_point_need += path_vertex_count(path_draft_view);
+    path_index_need += path_index_count_for(path_draft_view);
   }
   u32 command_need = draw_need + (path_draft_active ? 1u : 0u);
   shape_commands = draw_reserve(shape_commands, &shape_commands_cap, command_need,
@@ -2571,9 +2653,12 @@ static void extract_static_shapes(void) {
       draw_reserve(path_draws, &path_draws_cap, path_draw_need, sizeof(PathDraw));
   path_points = draw_reserve(path_points, &path_points_cap, path_point_need,
                              sizeof(PathVertex));
+  path_indices = draw_reserve(path_indices, &path_indices_cap, path_index_need,
+                              sizeof(u16));
   if ((command_need && !shape_commands) ||
       (draw_need && (!rect_draws || !triangle_draws || !oval_draws)) ||
-      (path_draw_need && !path_draws) || (path_point_need && !path_points)) {
+      (path_draw_need && !path_draws) || (path_point_need && !path_points) ||
+      (path_index_need && !path_indices)) {
     static_dirty = 0u;
     return;
   }
@@ -5397,19 +5482,27 @@ u32 blitz_selected_debug_ptr(void) {
   selected_debug_item.style[0] = stroke_width;
   selected_debug_item.style[1] = font_size;
   selected_debug_item.style[2] =
-      kind == BLITZ_SHAPE_TEXT
+      kind == BLITZ_SHAPE_PATH
+          ? (float)(world.path_views[entity].point_count > 0u
+                        ? world.path_views[entity].point_count - 1u
+                        : 0u)
+      : kind == BLITZ_SHAPE_TEXT
           ? world.text_views[entity].max_width
           : (kind == BLITZ_SHAPE_FRAME
                  ? world.frame_views[entity].title_color.r
                  : 0.0f);
   selected_debug_item.style[3] =
-      kind == BLITZ_SHAPE_TEXT
+      kind == BLITZ_SHAPE_PATH
+          ? (float)path_vertex_count(world.path_views[entity])
+      : kind == BLITZ_SHAPE_TEXT
           ? world.text_views[entity].line_height
           : (kind == BLITZ_SHAPE_FRAME
                  ? world.frame_views[entity].title_color.g
                  : 0.0f);
   selected_debug_item.style[4] =
-      kind == BLITZ_SHAPE_TEXT
+      kind == BLITZ_SHAPE_PATH
+          ? (float)path_index_count_for(world.path_views[entity])
+      : kind == BLITZ_SHAPE_TEXT
           ? (float)world.text_views[entity].max_lines
           : (kind == BLITZ_SHAPE_FRAME
                  ? world.frame_views[entity].title_color.b
@@ -5420,6 +5513,9 @@ u32 blitz_selected_debug_ptr(void) {
           : (kind == BLITZ_SHAPE_FRAME
                  ? world.frame_views[entity].title_color.a
                  : 0.0f);
+  if (kind == BLITZ_SHAPE_PATH) {
+    selected_debug_item.style[1] = (float)world.path_views[entity].point_count;
+  }
   selected_debug_item.parent_object_id = object_id_zero();
   if (mask & BLITZ_COMPONENT_RELATIVE_TRANSFORM) {
     u32 parent = world.relative_transforms[entity].parent;
@@ -6029,6 +6125,17 @@ u32 blitz_path_point_f32_count(void) {
 EXPORT("blitz_path_point_count")
 u32 blitz_path_point_count(void) {
   return path_point_count;
+}
+
+EXPORT("blitz_path_index_ptr")
+u32 blitz_path_index_ptr(void) {
+  world_update_for_frame();
+  return (u32)&path_indices[0];
+}
+
+EXPORT("blitz_path_index_count")
+u32 blitz_path_index_count(void) {
+  return path_index_count;
 }
 
 EXPORT("blitz_path_shape_count")

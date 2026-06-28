@@ -282,6 +282,8 @@ type BlitzExports = {
   blitz_path_point_ptr(): number;
   blitz_path_point_f32_count(): number;
   blitz_path_point_count(): number;
+  blitz_path_index_ptr(): number;
+  blitz_path_index_count(): number;
   blitz_path_shape_count(): number;
   blitz_text_draw_ptr(): number;
   blitz_text_draw_f32_count(): number;
@@ -355,6 +357,7 @@ async function boot() {
   });
   const maxShapes = wasm.blitz_render_max_shapes();
   const maxPathVertices = maxShapes * 18;
+  const maxPathIndices = maxShapes * 18;
   const maxTextDraws = wasm.blitz_render_max_text_draws();
   const maxDynCommands = wasm.blitz_render_max_dyn_commands();
   const maxDynRects = wasm.blitz_render_max_dyn_rects();
@@ -371,6 +374,7 @@ async function boot() {
   const ovalDrawStride = ovalDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const pathDrawStride = pathDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   const pathPointStride = pathPointF32Count * Float32Array.BYTES_PER_ELEMENT;
+  const pathIndexStride = Uint16Array.BYTES_PER_ELEMENT;
   const textDrawStride = textDrawF32Count * Float32Array.BYTES_PER_ELEMENT;
   // Storage buffers start small and grow on demand toward the capacity ceilings
   // above, so GPU memory tracks scene size instead of reserving for the maximum.
@@ -640,6 +644,7 @@ async function boot() {
   let ovalCapacity = initialStorageCapacity;
   let pathCapacity = initialStorageCapacity;
   let pathPointCapacity = initialStorageCapacity;
+  let pathIndexCapacity = initialStorageCapacity;
   let textCapacity = initialStorageCapacity;
   let dynCommandCapacity = initialStorageCapacity;
   let dynRectCapacity = initialStorageCapacity;
@@ -673,6 +678,11 @@ async function boot() {
     label: "Blitz Path Vertex Storage",
     size: pathPointCapacity * pathPointStride,
     usage: storageDstUsage,
+  });
+  let pathIndexBuffer = device.createBuffer({
+    label: "Blitz Path Index Buffer",
+    size: pathIndexCapacity * pathIndexStride,
+    usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
   });
   let textStorageBuffer = device.createBuffer({
     label: "Blitz Text Draw Storage",
@@ -804,13 +814,22 @@ async function boot() {
     ovalCapacity * ovalDrawStride +
     pathCapacity * pathDrawStride +
     pathPointCapacity * pathPointStride +
+    pathIndexCapacity * pathIndexStride +
     textCapacity * textDrawStride +
     dynCommandCapacity * shapeCommandStride +
     dynRectCapacity * rectDrawStride +
     2 * 4 * Uint32Array.BYTES_PER_ELEMENT;
   let lastUploadedShapeCommandVersion = -1;
   let currentShapeCommandCount = 0;
-  let currentPathVertexCount = 0;
+  // One entry per path draw record, cached on upload and replayed every frame as
+  // indexed draws (fill ribbon, then stroke ribbon) against the shared vertices.
+  type PathDrawCommand = {
+    baseVertex: number;
+    fillIndexOffset: number;
+    fillIndexCount: number;
+    strokeIndexCount: number;
+  };
+  let pathDrawCommands: PathDrawCommand[] = [];
   let lastUploadedDynVersion = -1;
   let currentDynCommandCount = 0;
   let lastZoomPercent = -1;
@@ -1039,7 +1058,7 @@ async function boot() {
     );
     ui.debuggerEntityId.textContent = `${words[0]}${words[1]}:${words[2]}${words[3]}`;
     const kind = view.getUint32(ptr + 16, true);
-    const kindNames = ["Rectangle", "Triangle", "Oval", "Text", "Frame"];
+    const kindNames = ["Rectangle", "Triangle", "Oval", "Text", "Frame", "Pen"];
     const mask = wasm.blitz_selected_debug_mask();
     ui.debuggerComponents.append(
       debugComponent("Entity", {
@@ -1112,12 +1131,29 @@ async function boot() {
         }),
       );
     }
+    if (kind === 5) {
+      const vertices = view.getFloat32(ptr + 100, true);
+      const indices = view.getFloat32(ptr + 104, true);
+      ui.debuggerComponents.append(
+        debugComponent("PenGeometry", {
+          points: view.getFloat32(ptr + 92, true),
+          segments: view.getFloat32(ptr + 96, true),
+          vertices,
+          indices,
+          triangles: indices / 3,
+          vertexStride: `${pathPointStride} B`,
+          vertexBytes: vertices * pathPointStride,
+          indexBytes: indices * pathIndexStride,
+          drawRecords: 1,
+        }),
+      );
+    }
     ui.debuggerComponents.append(
       debugComponent("Capabilities", {
         selectable: (mask & 64) !== 0 ? "yes" : "no",
         resizableX: (mask & 128) !== 0 ? "yes" : "no",
         resizableY: (mask & 256) !== 0 ? "yes" : "no",
-        geometricStyle: (mask & (4 | 8 | 16)) !== 0 ? "yes" : "no",
+        geometricStyle: (mask & (4 | 8 | 16 | 4096)) !== 0 ? "yes" : "no",
         textStyle: (mask & 32) !== 0 ? "yes" : "no",
         container: (mask & 1024) !== 0 ? "yes" : "no",
         relativeTransform: (mask & 512) !== 0 ? "yes" : "no",
@@ -2407,8 +2443,9 @@ async function boot() {
       const pathDrawCount = wasm.blitz_path_draw_count();
       const pathPointPtr = wasm.blitz_path_point_ptr();
       const pathPointCount = wasm.blitz_path_point_count();
+      const pathIndexPtr = wasm.blitz_path_index_ptr();
+      const pathIndexCount = wasm.blitz_path_index_count();
       currentShapeCommandCount = shapeCommandCount;
-      currentPathVertexCount = pathPointCount;
       const eShape = ensureStorage(shapeCommandStorageBuffer, shapeCommandCapacity, shapeCommandCount, maxShapes, shapeCommandStride, storageDstUsage, "Blitz Shape Command Storage");
       shapeCommandStorageBuffer = eShape.buffer;
       shapeCommandCapacity = eShape.capacity;
@@ -2437,6 +2474,9 @@ async function boot() {
       pathPointStorageBuffer = ePathPoint.buffer;
       pathPointCapacity = ePathPoint.capacity;
       bindGroupsDirty ||= ePathPoint.grew;
+      const ePathIndex = ensureStorage(pathIndexBuffer, pathIndexCapacity, pathIndexCount, maxPathIndices, pathIndexStride, GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST, "Blitz Path Index Buffer");
+      pathIndexBuffer = ePathIndex.buffer;
+      pathIndexCapacity = ePathIndex.capacity;
       if (shapeCommandCount > 0) {
         device.queue.writeBuffer(
           shapeCommandStorageBuffer,
@@ -2502,6 +2542,31 @@ async function boot() {
             pathPointCount * pathPointF32Count,
           ),
         );
+      }
+      if (pathIndexCount > 0) {
+        device.queue.writeBuffer(
+          pathIndexBuffer,
+          0,
+          new Uint16Array(wasm.memory.buffer, pathIndexPtr, pathIndexCount),
+        );
+      }
+      pathDrawCommands = [];
+      if (pathDrawCount > 0) {
+        const drawParams = pathDrawF32Count - 4;
+        const records = new Float32Array(
+          wasm.memory.buffer,
+          pathDrawPtr,
+          pathDrawCount * pathDrawF32Count,
+        );
+        for (let p = 0; p < pathDrawCount; p += 1) {
+          const o = p * pathDrawF32Count + drawParams;
+          pathDrawCommands.push({
+            baseVertex: records[o],
+            fillIndexOffset: records[o + 1],
+            fillIndexCount: records[o + 2],
+            strokeIndexCount: records[o + 3],
+          });
+        }
       }
       lastUploadedShapeCommandVersion = shapeCommandVersion;
     }
@@ -2613,10 +2678,25 @@ async function boot() {
       pass.setBindGroup(0, staticRenderBindGroup);
       pass.drawIndirect(drawArgsBuffer, 0);
     }
-    if (currentPathVertexCount > 0) {
+    if (pathDrawCommands.length > 0) {
       pass.setPipeline(pathPipeline);
       pass.setBindGroup(0, staticRenderBindGroup);
-      pass.draw(currentPathVertexCount);
+      pass.setIndexBuffer(pathIndexBuffer, "uint16");
+      for (let p = 0; p < pathDrawCommands.length; p += 1) {
+        const c = pathDrawCommands[p];
+        if (c.fillIndexCount > 0) {
+          pass.drawIndexed(c.fillIndexCount, 1, c.fillIndexOffset, c.baseVertex, p * 2);
+        }
+        if (c.strokeIndexCount > 0) {
+          pass.drawIndexed(
+            c.strokeIndexCount,
+            1,
+            c.fillIndexOffset + c.fillIndexCount,
+            c.baseVertex,
+            p * 2 + 1,
+          );
+        }
+      }
     }
     if (currentDynCommandCount > 0) {
       pass.setPipeline(shapePipeline);

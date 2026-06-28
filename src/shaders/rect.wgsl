@@ -42,12 +42,12 @@ struct PathDraw {
   bounds: vec4f,
   fill_color: vec4f,
   stroke_color: vec4f,
-  info: vec4f,
+  render: vec4f, // order, drag, stroke_width, point_count
+  draw: vec4f,   // base_vertex, fill_index_offset, fill_index_count, stroke_index_count
 };
 
 struct PathPoint {
-  position_order_drag: vec4f,
-  color: vec4f,
+  position: vec2f,
 };
 
 @group(0) @binding(0)
@@ -198,12 +198,16 @@ fn shape_vertex_main(
 }
 
 @vertex
-fn path_vertex_main(@builtin(vertex_index) vertex_index: u32) -> PathVertexOut {
-  let vertex = path_points[vertex_index];
-  let position_order_drag = vertex.position_order_drag;
-  let world = position_order_drag.xy;
-  let order = position_order_drag.z;
-  let dragged = position_order_drag.w > 0.5;
+fn path_vertex_main(@builtin(vertex_index) vertex_index: u32,
+                    @builtin(instance_index) instance_index: u32) -> PathVertexOut {
+  // firstInstance packs the draw index and a stroke/fill selector: the renderer
+  // issues one drawIndexed per ribbon with firstInstance = draw_index * 2 + is_stroke.
+  let draw_index = instance_index >> 1u;
+  let is_stroke = (instance_index & 1u) == 1u;
+  let draw = path_draws[draw_index];
+  let world = path_points[vertex_index].position;
+  let order = draw.render.x;
+  let dragged = draw.render.y > 0.5;
   var draw_world = world;
   if (dragged) {
     draw_world = world + u.interaction.xy;
@@ -215,7 +219,7 @@ fn path_vertex_main(@builtin(vertex_index) vertex_index: u32) -> PathVertexOut {
 
   var out: PathVertexOut;
   out.position = vec4f(world_to_clip(draw_world), depth, 1.0);
-  out.color = vertex.color;
+  out.color = select(draw.fill_color, draw.stroke_color, is_stroke);
   return out;
 }
 

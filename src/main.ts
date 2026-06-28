@@ -9,7 +9,6 @@ import {
 } from "./input/user-events";
 import shaderSource from "./shaders/rect.wgsl?raw";
 import cullSource from "./shaders/cull.wgsl?raw";
-import pathCullSource from "./shaders/path-cull.wgsl?raw";
 import backgroundSource from "./shaders/background.wgsl?raw";
 import { setupSceneFileStorage } from "./storage/scene-file";
 import { getOrCreateActorId } from "./storage/actor-id";
@@ -506,11 +505,6 @@ async function boot() {
         visibility: GPUShaderStage.VERTEX,
         buffer: { type: "read-only-storage" },
       },
-      {
-        binding: 10,
-        visibility: GPUShaderStage.VERTEX,
-        buffer: { type: "read-only-storage" },
-      },
     ],
   });
   const pipelineLayout = device.createPipelineLayout({
@@ -652,27 +646,6 @@ async function boot() {
     }),
     compute: { module: cullShader, entryPoint: "cull_main" },
   });
-  const pathCullShader = device.createShaderModule({
-    label: "Blitz Path Cull Shader",
-    code: pathCullSource,
-  });
-  const pathCullBindGroupLayout = device.createBindGroupLayout({
-    label: "Blitz Path Cull Bind Group Layout",
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-    ],
-  });
-  const pathCullPipeline = device.createComputePipeline({
-    label: "Blitz Path Cull Pipeline",
-    layout: device.createPipelineLayout({
-      bindGroupLayouts: [pathCullBindGroupLayout],
-    }),
-    compute: { module: pathCullShader, entryPoint: "cull_path_main" },
-  });
   let shapeCommandCapacity = initialStorageCapacity;
   let visibleCommandCapacity = initialStorageCapacity;
   let rectCapacity = initialStorageCapacity;
@@ -734,20 +707,6 @@ async function boot() {
       GPUBufferUsage.COPY_DST |
       GPUBufferUsage.COPY_SRC,
   });
-  // Path cull outputs: compacted visible segment indices + its indirect draw args.
-  const pathSegmentIndexStride = Uint32Array.BYTES_PER_ELEMENT;
-  let visiblePathSegmentCapacity = initialStorageCapacity;
-  let visiblePathSegmentBuffer = device.createBuffer({
-    label: "Blitz Visible Path Segment Storage",
-    size: visiblePathSegmentCapacity * pathSegmentIndexStride,
-    usage: GPUBufferUsage.STORAGE,
-  });
-  const pathDrawArgsBuffer = device.createBuffer({
-    label: "Blitz Path Draw Args",
-    size: 4 * Uint32Array.BYTES_PER_ELEMENT,
-    usage:
-      GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-  });
   // Reads back the post-cull visible instance count for the stats panel.
   const drawArgsReadback = device.createBuffer({
     label: "Blitz Draw Args Readback",
@@ -771,7 +730,6 @@ async function boot() {
   });
   const fontAtlasView = fontAtlasTexture.createView();
   let cullBindGroup!: GPUBindGroup;
-  let pathCullBindGroup!: GPUBindGroup;
   let staticRenderBindGroup!: GPUBindGroup;
   let dynamicRenderBindGroup!: GPUBindGroup;
   // Bind groups capture the specific buffer objects they reference, so they are
@@ -792,17 +750,6 @@ async function boot() {
         { binding: 7, resource: { buffer: pathStorageBuffer } },
       ],
     });
-    pathCullBindGroup = device.createBindGroup({
-      label: "Blitz Path Cull Bind Group",
-      layout: pathCullBindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: uniformBuffer } },
-        { binding: 1, resource: { buffer: pathSegmentStorageBuffer } },
-        { binding: 2, resource: { buffer: pathStorageBuffer } },
-        { binding: 3, resource: { buffer: visiblePathSegmentBuffer } },
-        { binding: 4, resource: { buffer: pathDrawArgsBuffer } },
-      ],
-    });
     staticRenderBindGroup = device.createBindGroup({
       label: "Blitz Static Render Bind Group",
       layout: bindGroupLayout,
@@ -817,7 +764,6 @@ async function boot() {
         { binding: 7, resource: fontSampler },
         { binding: 8, resource: { buffer: pathStorageBuffer } },
         { binding: 9, resource: { buffer: pathSegmentStorageBuffer } },
-        { binding: 10, resource: { buffer: visiblePathSegmentBuffer } },
       ],
     });
     dynamicRenderBindGroup = device.createBindGroup({
@@ -834,7 +780,6 @@ async function boot() {
         { binding: 7, resource: fontSampler },
         { binding: 8, resource: { buffer: pathStorageBuffer } },
         { binding: 9, resource: { buffer: pathSegmentStorageBuffer } },
-        { binding: 10, resource: { buffer: visiblePathSegmentBuffer } },
       ],
     });
   };
@@ -887,9 +832,20 @@ async function boot() {
     2 * 4 * Uint32Array.BYTES_PER_ELEMENT;
   let lastUploadedShapeCommandVersion = -1;
   let currentShapeCommandCount = 0;
-  // Segments uploaded this version (clamped to capacity); the GPU cull compacts
-  // the on-screen ones each frame into the indirect draw.
-  let currentPathSegmentCount = 0;
+  // Per-stroke world AABB + LOD tier segment ranges, rebuilt on upload. The draw
+  // loop viewport-culls these and draws one tier per visible stroke.
+  type PathDrawCull = {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+    dragged: boolean;
+    fullOffset: number;
+    fullCount: number;
+    coarseOffset: number;
+    coarseCount: number;
+  };
+  let pathDrawList: PathDrawCull[] = [];
   let lastUploadedDynVersion = -1;
   let currentDynCommandCount = 0;
   let lastZoomPercent = -1;
@@ -2669,10 +2625,6 @@ async function boot() {
       pathSegmentStorageBuffer = ePathSegment.buffer;
       pathSegmentCapacity = ePathSegment.capacity;
       bindGroupsDirty ||= ePathSegment.grew;
-      const eVisiblePath = ensureStorage(visiblePathSegmentBuffer, visiblePathSegmentCapacity, pathSegmentCount, maxPathSegments, pathSegmentIndexStride, GPUBufferUsage.STORAGE, "Blitz Visible Path Segment Storage");
-      visiblePathSegmentBuffer = eVisiblePath.buffer;
-      visiblePathSegmentCapacity = eVisiblePath.capacity;
-      bindGroupsDirty ||= eVisiblePath.grew;
       if (shapeCommandCount > 0) {
         device.queue.writeBuffer(
           shapeCommandStorageBuffer,
@@ -2742,7 +2694,35 @@ async function boot() {
           ),
         );
       }
-      currentPathSegmentCount = uploadableSegments;
+      pathDrawList = [];
+      if (pathDrawCount > 0) {
+        const records = new Float32Array(
+          wasm.memory.buffer,
+          pathDrawPtr,
+          pathDrawCount * pathDrawF32Count,
+        );
+        const clampTier = (offset: number, count: number) => {
+          if (count <= 0 || offset >= uploadableSegments) return [0, 0];
+          return [offset, Math.min(count, uploadableSegments - offset)];
+        };
+        for (let p = 0; p < pathDrawCount; p += 1) {
+          const o = p * pathDrawF32Count;
+          const [fullOffset, fullCount] = clampTier(records[o + 12], records[o + 13]);
+          if (fullCount <= 0) continue;
+          const [coarseOffset, coarseCount] = clampTier(records[o + 14], records[o + 15]);
+          pathDrawList.push({
+            minX: records[o],
+            minY: records[o + 1],
+            maxX: records[o] + records[o + 2],
+            maxY: records[o + 1] + records[o + 3],
+            dragged: records[o + 9] > 0.5,
+            fullOffset,
+            fullCount,
+            coarseOffset: coarseCount > 0 ? coarseOffset : fullOffset,
+            coarseCount: coarseCount > 0 ? coarseCount : fullCount,
+          });
+        }
+      }
       lastUploadedShapeCommandVersion = shapeCommandVersion;
     }
     const dynCommandPtr = wasm.blitz_dyn_command_ptr();
@@ -2807,8 +2787,6 @@ async function boot() {
       wasm.blitz_uniform_f32_count(),
     );
     uniforms[18] = gridVisible ? 1 : 0;
-    // style.y is the path-cull segment total; clamp to what was uploaded.
-    uniforms[5] = currentPathSegmentCount;
     device.queue.writeBuffer(uniformBuffer, 0, uniforms);
     positionTextEditor();
     const zoomPercent = Math.round(uniforms[4] * 100);
@@ -2820,22 +2798,14 @@ async function boot() {
       rebuildBindGroups();
     }
     device.queue.writeBuffer(drawArgsBuffer, 0, drawArgsReset);
-    device.queue.writeBuffer(pathDrawArgsBuffer, 0, drawArgsReset);
     const encoder = device.createCommandEncoder({
       label: "Blitz Render Encoder",
     });
-    if (currentShapeCommandCount > 0 || currentPathSegmentCount > 0) {
+    if (currentShapeCommandCount > 0) {
       const cullPass = encoder.beginComputePass({ label: "Blitz Cull Pass" });
-      if (currentShapeCommandCount > 0) {
-        cullPass.setPipeline(cullPipeline);
-        cullPass.setBindGroup(0, cullBindGroup);
-        cullPass.dispatchWorkgroups(Math.ceil(currentShapeCommandCount / 64));
-      }
-      if (currentPathSegmentCount > 0) {
-        cullPass.setPipeline(pathCullPipeline);
-        cullPass.setBindGroup(0, pathCullBindGroup);
-        cullPass.dispatchWorkgroups(Math.ceil(currentPathSegmentCount / 64));
-      }
+      cullPass.setPipeline(cullPipeline);
+      cullPass.setBindGroup(0, cullBindGroup);
+      cullPass.dispatchWorkgroups(Math.ceil(currentShapeCommandCount / 64));
       cullPass.end();
     }
     const pass = encoder.beginRenderPass({
@@ -2864,12 +2834,45 @@ async function boot() {
       pass.setBindGroup(0, staticRenderBindGroup);
       pass.drawIndirect(drawArgsBuffer, 0);
     }
-    if (currentPathSegmentCount > 0) {
-      // The compute cull compacted the visible segments + their instance count;
-      // one indirect draw renders just those capsules.
+    if (pathDrawList.length > 0) {
+      // Per-stroke viewport cull + LOD: skip off-screen/sub-pixel strokes, draw a
+      // coarse tier for small ones, and one instanced capsule draw per visible
+      // stroke (firstInstance = the chosen tier's segment offset).
       pass.setPipeline(pathPipeline);
       pass.setBindGroup(0, staticRenderBindGroup);
-      pass.drawIndirect(pathDrawArgsBuffer, 0);
+      const scale = uniforms[4];
+      const halfW = (uniforms[0] * 0.5) / scale;
+      const halfH = (uniforms[1] * 0.5) / scale;
+      const viewMinX = uniforms[2] - halfW;
+      const viewMaxX = uniforms[2] + halfW;
+      const viewMinY = uniforms[3] - halfH;
+      const viewMaxY = uniforms[3] + halfH;
+      const LOD_COARSE_BELOW_PX = 64;
+      for (let p = 0; p < pathDrawList.length; p += 1) {
+        const d = pathDrawList[p];
+        let offset = d.fullOffset;
+        let count = d.fullCount;
+        if (!d.dragged) {
+          if (
+            d.maxX < viewMinX ||
+            d.minX > viewMaxX ||
+            d.maxY < viewMinY ||
+            d.minY > viewMaxY
+          ) {
+            continue;
+          }
+          const screenW = (d.maxX - d.minX) * scale;
+          const screenH = (d.maxY - d.minY) * scale;
+          if (screenW < 1 && screenH < 1) {
+            continue; // sub-pixel
+          }
+          if (Math.hypot(screenW, screenH) < LOD_COARSE_BELOW_PX) {
+            offset = d.coarseOffset;
+            count = d.coarseCount;
+          }
+        }
+        pass.draw(6, count, 0, offset);
+      }
     }
     if (currentDynCommandCount > 0) {
       pass.setPipeline(shapePipeline);

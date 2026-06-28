@@ -47,6 +47,8 @@ usize strlen(const char *text) {
 #define BLITZ_MAX_TEXT_LAYOUT_LINES 256u
 #define BLITZ_CONTAINER_RETARGET_SELECTION_LIMIT 32u
 #define BLITZ_PATH_INPUT_POINTS 8192u
+// Coarse LOD keeps every Nth point; used when a stroke is small on screen.
+#define BLITZ_PATH_LOD_STRIDE 8u
 
 #define BLITZ_INVALID_INDEX 0xffffffffu
 // High bit of a command's order word: set while the command's entity is being
@@ -1605,13 +1607,23 @@ static Vec2 path_tangent_at(PathView view, Vec2 position, u32 index) {
 }
 
 // --- Path geometry & tessellation ------------------------------------------
-// Pens render as one GPU capsule per segment, so the geometry is just the
-// segment count (one PathSegment each); the shader builds the quads.
+// Each stroke emits two LOD tiers of capsule segments: full detail, plus a
+// coarse tier (every BLITZ_PATH_LOD_STRIDE-th point) for when it's small on
+// screen. The per-stroke cull picks one tier to draw.
+static u32 path_tier_segment_count(u32 point_count, u32 stride) {
+  if (point_count < 2u) {
+    return 0u;
+  }
+  u32 spans = point_count - 1u;
+  return (spans + stride - 1u) / stride; // ceil: last span reaches the end
+}
+
 static u32 path_segment_count_for(PathView view) {
   if (!view.points || view.point_count < 2u || view.fill_color.a <= 0.001f) {
     return 0u;
   }
-  return view.point_count - 1u;
+  return path_tier_segment_count(view.point_count, 1u) +
+         path_tier_segment_count(view.point_count, BLITZ_PATH_LOD_STRIDE);
 }
 
 static void path_recompute_entity_bounds_preserve_world(u32 entity) {
@@ -2090,6 +2102,29 @@ static void push_oval_draw(u32 entity, u32 order) {
   shape_command_count += 1u;
 }
 
+// Emit capsule segments connecting every stride-th point (always reaching the
+// last point) — one LOD tier of the stroke.
+static void emit_path_tier(PathView view, Vec2 position, u32 draw_index,
+                           u32 stride) {
+  u32 prev = 0u;
+  while (prev + 1u < view.point_count) {
+    u32 next = prev + stride;
+    if (next >= view.point_count) {
+      next = view.point_count - 1u;
+    }
+    Vec2 a = path_point_world(view, position, prev);
+    Vec2 b = path_point_world(view, position, next);
+    PathSegment *seg = &path_segments[path_segment_count];
+    seg->ax = a.x;
+    seg->ay = a.y;
+    seg->bx = b.x;
+    seg->by = b.y;
+    seg->draw_index = draw_index;
+    path_segment_count += 1u;
+    prev = next;
+  }
+}
+
 static void push_path_view_draws(PathView view, Vec2 position, u32 entity,
                                  u32 order) {
   if (!view.points || view.point_count < 2u) {
@@ -2122,31 +2157,25 @@ static void push_path_view_draws(PathView view, Vec2 position, u32 entity,
   draw->render[2] = view.stroke_width;
   draw->render[3] = (float)view.point_count;
 
-  // draw_params: first segment index, segment count (for per-path viewport cull).
-  u32 segment_offset = path_segment_count;
+  // draw_params: [tier0 offset, tier0 count, tier1 offset, tier1 count]. The
+  // cull picks a tier per stroke by its on-screen size.
   u32 this_draw = path_draw_count;
-  draw->draw_params[0] = (float)segment_offset;
-  draw->draw_params[1] = 0.0f;
-  draw->draw_params[2] = 0.0f;
-  draw->draw_params[3] = 0.0f;
   path_draw_count += 1u;
-
-  // One capsule per segment; color/width/order come from path_draws[draw_index].
   if (view.fill_color.a <= 0.001f) {
+    draw->draw_params[0] = 0.0f;
+    draw->draw_params[1] = 0.0f;
+    draw->draw_params[2] = 0.0f;
+    draw->draw_params[3] = 0.0f;
     return;
   }
-  for (u32 i = 1u; i < view.point_count; i += 1u) {
-    Vec2 a = path_point_world(view, position, i - 1u);
-    Vec2 b = path_point_world(view, position, i);
-    PathSegment *seg = &path_segments[path_segment_count];
-    seg->ax = a.x;
-    seg->ay = a.y;
-    seg->bx = b.x;
-    seg->by = b.y;
-    seg->draw_index = this_draw;
-    path_segment_count += 1u;
-  }
-  draw->draw_params[1] = (float)(path_segment_count - segment_offset);
+  u32 tier0_offset = path_segment_count;
+  emit_path_tier(view, position, this_draw, 1u);
+  u32 tier1_offset = path_segment_count;
+  emit_path_tier(view, position, this_draw, BLITZ_PATH_LOD_STRIDE);
+  draw->draw_params[0] = (float)tier0_offset;
+  draw->draw_params[1] = (float)(tier1_offset - tier0_offset);
+  draw->draw_params[2] = (float)tier1_offset;
+  draw->draw_params[3] = (float)(path_segment_count - tier1_offset);
 }
 
 static void push_path_draws(u32 entity, u32 order) {

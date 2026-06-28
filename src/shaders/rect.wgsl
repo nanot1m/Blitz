@@ -77,9 +77,6 @@ var<storage, read> path_draws: array<PathDraw>;
 @group(0) @binding(9)
 var<storage, read> path_segments: array<PathSegment>;
 
-@group(0) @binding(10)
-var<storage, read> visible_path_segments: array<u32>;
-
 @group(0) @binding(6)
 var font_atlas: texture_2d<f32>;
 
@@ -210,9 +207,9 @@ fn shape_vertex_main(
 @vertex
 fn path_vertex_main(@builtin(vertex_index) vertex_index: u32,
                     @builtin(instance_index) instance_index: u32) -> PathVertexOut {
-  // Instances index the cull's visible list; expand each segment into the
-  // capsule's bounding quad and let the fragment shade a distance field.
-  let seg = path_segments[visible_path_segments[instance_index]];
+  // One instance per drawn segment (firstInstance = the stroke's tier offset);
+  // expand it into the capsule's bounding quad for the distance-field fragment.
+  let seg = path_segments[instance_index];
   let draw = path_draws[seg.draw_index];
   let half_width = draw.render.z * 0.5;
   let order = draw.render.x;

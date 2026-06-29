@@ -19,14 +19,18 @@ type CollaborationElements = {
 
 type CollaborationHandlers = {
   actorId: ActorId;
-  captureScene(): Uint8Array;
-  applyScene(bytes: Uint8Array): void;
+  // Incremental ops queued since the last call (drains the queue), the full
+  // scene as ops (baseline for a joiner), and the merge of received ops.
+  captureChanges(): Uint8Array;
+  captureBaseline(): Uint8Array;
+  applyOps(bytes: Uint8Array): void;
+  hasPendingChanges(): boolean;
   localRevision(): number;
   onRemoteApplied(): void;
   onRemoteCursor(peerId: string, worldX: number, worldY: number): void;
-  // True while the local user is mid-interaction (e.g. editing text). A remote
-  // snapshot that arrives then is deferred instead of clobbering the edit.
-  isBusy(): boolean;
+  // Toggles local change tracking: on only while connected, so the broadcast
+  // queue and tombstone table don't grow when collaboration is off.
+  onActiveChange(active: boolean): void;
   onError(message: string): void;
 };
 
@@ -36,9 +40,11 @@ type CommandBody =
       revision: number;
     }
   | {
-      kind: "scene-snapshot";
-      revision: number;
-      scene: string;
+      // A CRDT op batch (base64). Used both for incremental edits and for the
+      // full-scene baseline a peer sends to a newcomer; the receiver merges
+      // either by per-entity version, so the two need no distinction.
+      kind: "ops";
+      ops: string;
     }
   | {
       // Ephemeral live-cursor position in world coordinates. Not deduped or
@@ -75,10 +81,6 @@ type EncryptedEnvelope = {
 export type CollaborationController = {
   publishLocalChange(): void;
   sendCursor(worldX: number, worldY: number): void;
-  // Called when a local edit finishes: flush applies a snapshot deferred during
-  // the edit; drop discards it (the local edit supersedes and will publish).
-  flushDeferredSnapshot(): void;
-  dropDeferredSnapshot(): void;
 };
 
 const CURSOR_SEND_INTERVAL_MS = 50;
@@ -228,10 +230,7 @@ export function setupWsCollaboration(
   let shouldReconnect = false;
   let reconnectTimer: number | undefined;
   let reconnectDelay = 1_000;
-  let lastPublishedRevision = handlers.localRevision();
-  let latestSnapshotAt = 0;
   let publishTimer: number | undefined;
-  let deferredSnapshot: { bytes: Uint8Array; createdAt: number } | undefined;
   const seenCommands = new Set<string>();
   const debugLines: string[] = [];
 
@@ -365,31 +364,39 @@ export function setupWsCollaboration(
     })();
   };
 
-  const publishSnapshot = async () => {
-    const revision = handlers.localRevision();
-    const scene = handlers.captureScene();
-    if (scene.byteLength > MAX_SCENE_BYTES) {
+  // Send a base64 op batch. Returns false (with an onError) if it exceeds the
+  // size cap — only realistic for a full baseline of a very large scene.
+  const sendOps = async (ops: Uint8Array, label: string): Promise<boolean> => {
+    if (ops.byteLength > MAX_SCENE_BYTES) {
       handlers.onError("The scene is too large to publish to collaboration.");
-      log("snapshot-skip", { reason: "too-large", bytes: scene.byteLength });
-      return;
+      log("ops-skip", { reason: "too-large", bytes: ops.byteLength, label });
+      return false;
     }
-    lastPublishedRevision = revision;
-    latestSnapshotAt = Math.max(latestSnapshotAt, Date.now());
-    await sendCommand({
-      kind: "scene-snapshot",
-      revision,
-      scene: bytesToBase64(scene),
-    });
-    log("snapshot-published", { revision, bytes: scene.byteLength });
+    await sendCommand({ kind: "ops", ops: bytesToBase64(ops) });
+    log("ops-published", { label, bytes: ops.byteLength });
+    return true;
   };
 
-  const applyRemoteSnapshot = (bytes: Uint8Array, createdAt: number) => {
-    latestSnapshotAt = createdAt;
-    handlers.applyScene(bytes);
-    // applyScene bumps the local revision; record THAT (local space) as
-    // already-synced, otherwise the apply looks like a local edit and we echo
-    // the snapshot straight back, ping-ponging forever with the peer.
-    lastPublishedRevision = handlers.localRevision();
+  const publishOps = async () => {
+    const ops = handlers.captureChanges();
+    if (ops.byteLength <= 4) {
+      return; // empty batch: just the op count, nothing changed
+    }
+    await sendOps(ops, "incremental");
+  };
+
+  const publishBaseline = async () => {
+    const ops = handlers.captureBaseline();
+    if (ops.byteLength <= 4) {
+      return;
+    }
+    await sendOps(ops, "baseline");
+  };
+
+  const applyRemoteOps = (bytes: Uint8Array) => {
+    // Ops merge by per-entity version, so they never clobber unrelated local
+    // state or an in-progress edit — apply immediately, no defer.
+    handlers.applyOps(bytes);
     handlers.onRemoteApplied();
   };
 
@@ -444,50 +451,31 @@ export function setupWsCollaboration(
       log("receive-frame", { bytes: raw.length });
       log("receive", {
         kind: command.body.kind,
-        revision: command.body.revision,
         peerId: command.peerId,
         commandId: command.commandId.slice(-12),
       });
 
       if (command.body.kind === "hello") {
+        // A newcomer announces a lower revision; peers that are ahead send a
+        // full baseline so it catches up (the newcomer merges by version).
         if (handlers.localRevision() > command.body.revision) {
           log("hello-response", {
             localRevision: handlers.localRevision(),
             remoteRevision: command.body.revision,
           });
-          await publishSnapshot();
+          await publishBaseline();
         }
         return;
       }
 
-      if (command.body.kind === "scene-snapshot") {
-        if (command.createdAt < latestSnapshotAt) {
-          log("snapshot-drop", {
-            reason: "stale-created-at",
-            createdAt: command.createdAt,
-            latestSnapshotAt,
-          });
-          return;
-        }
-        const bytes = base64ToBytes(command.body.scene);
+      if (command.body.kind === "ops") {
+        const bytes = base64ToBytes(command.body.ops);
         if (bytes.byteLength > MAX_SCENE_BYTES) {
-          log("snapshot-drop", { reason: "too-large", bytes: bytes.byteLength });
+          log("ops-drop", { reason: "too-large", bytes: bytes.byteLength });
           return;
         }
-        if (publishTimer !== undefined) {
-          window.clearTimeout(publishTimer);
-          publishTimer = undefined;
-        }
-        // Don't clobber an in-progress local edit (e.g. open text editor); hold
-        // the newest snapshot and apply it once the user finishes (see the
-        // flush/drop controller methods).
-        if (handlers.isBusy()) {
-          deferredSnapshot = { bytes, createdAt: command.createdAt };
-          log("snapshot-deferred", { revision: command.body.revision });
-          return;
-        }
-        applyRemoteSnapshot(bytes, command.createdAt);
-        log("snapshot-applied", { revision: command.body.revision, bytes: bytes.byteLength });
+        applyRemoteOps(bytes);
+        log("ops-applied", { bytes: bytes.byteLength });
       }
     } catch (error) {
       log("receive-error", error instanceof Error ? error.message : String(error));
@@ -499,6 +487,7 @@ export function setupWsCollaboration(
     stopReconnectTimer();
     socket?.close(1000, "Disconnected in Blitz settings.");
     socket = undefined;
+    handlers.onActiveChange(false);
     log("disconnect");
     setStatus("disconnected", "Disconnected");
   };
@@ -550,11 +539,12 @@ export function setupWsCollaboration(
         return;
       }
       reconnectDelay = 1_000;
+      handlers.onActiveChange(true);
       setStatus("connected", `Connected to ${room}`);
       log("socket-open", { room, localRevision: handlers.localRevision() });
       await sendCommand({ kind: "hello", revision: handlers.localRevision() });
       if (!joiningFromLink) {
-        await publishSnapshot();
+        await publishBaseline();
       } else {
         log("initial-publish-skip", { reason: "join-link" });
       }
@@ -578,6 +568,8 @@ export function setupWsCollaboration(
           void connect(url, room);
         }, reconnectDelay);
         reconnectDelay = Math.min(reconnectDelay * 2, 10_000);
+      } else {
+        handlers.onActiveChange(false);
       }
     });
     nextSocket.addEventListener("error", () => {
@@ -634,33 +626,18 @@ export function setupWsCollaboration(
       if (!socket || socket.readyState !== WebSocket.OPEN) {
         return;
       }
-      if (handlers.localRevision() === lastPublishedRevision) {
+      if (!handlers.hasPendingChanges()) {
         return;
       }
       if (publishTimer !== undefined) {
         return;
       }
-      log("publish-scheduled", {
-        localRevision: handlers.localRevision(),
-        lastPublishedRevision,
-      });
+      log("publish-scheduled", {});
       publishTimer = window.setTimeout(() => {
         publishTimer = undefined;
-        void publishSnapshot();
+        void publishOps();
       }, 120);
     },
     sendCursor,
-    flushDeferredSnapshot() {
-      const pending = deferredSnapshot;
-      deferredSnapshot = undefined;
-      if (!pending || pending.createdAt < latestSnapshotAt) {
-        return;
-      }
-      applyRemoteSnapshot(pending.bytes, pending.createdAt);
-      log("snapshot-applied", { deferred: true, bytes: pending.bytes.byteLength });
-    },
-    dropDeferredSnapshot() {
-      deferredSnapshot = undefined;
-    },
   };
 }

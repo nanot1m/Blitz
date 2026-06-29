@@ -107,6 +107,14 @@ typedef struct ObjectId {
   u32 sequence_lo;
 } ObjectId;
 
+// Per-entity LWW version: merges compare (lamport, actor_hi, actor_lo), so the
+// actor id breaks ties and the outcome is independent of delivery order.
+typedef struct CrdtVersion {
+  u32 lamport;
+  u32 actor_hi;
+  u32 actor_lo;
+} CrdtVersion;
+
 typedef struct Color {
   float r;
   float g;
@@ -386,6 +394,25 @@ static u32 *marquee_base_selected;
 static u32 *free_slots;
 static u32 free_count;
 static u32 live_count;
+// CRDT state: per-entity versions (an ECS array), the Lamport clock, the queue
+// of local changes awaiting broadcast, and a tombstone table that lets deletes
+// win against — and survive — a late update for the same object.
+typedef struct CrdtTombstone {
+  ObjectId id;
+  CrdtVersion version;
+  u32 used;
+} CrdtTombstone;
+static CrdtVersion *crdt_versions;
+static u32 crdt_clock;
+// Gates the broadcast queue + tombstone table: off, only per-entity versions
+// advance (cheap, fixed size), so nothing grows when not collaborating.
+static u32 crdt_collab_enabled;
+static ObjectId *crdt_dirty_ids;
+static u32 crdt_dirty_count;
+static u32 crdt_dirty_cap;
+static CrdtTombstone *crdt_tombstones;
+static u32 crdt_tombstone_cap;
+static u32 crdt_tombstone_count;
 
 // --- Memory allocator (free-list over linear memory) -----------------------
 // General free-list allocator over Wasm linear memory. Every demand buffer (the
@@ -669,6 +696,7 @@ static const u32 ecs_strides[] = {
     sizeof(u32),               // internal_clipboard_sources
     sizeof(u32),               // marquee_base_selected
     sizeof(u32),               // free_slots
+    sizeof(CrdtVersion),       // crdt_versions
 };
 #define BLITZ_ECS_ARRAYS ((u32)(sizeof(ecs_strides) / sizeof(ecs_strides[0])))
 
@@ -715,6 +743,7 @@ static void ecs_bind_pointers(u32 capacity) {
   internal_clipboard_sources = (u32 *)(ecs_block + ecs_offset(21u, capacity));
   marquee_base_selected = (u32 *)(ecs_block + ecs_offset(22u, capacity));
   free_slots = (u32 *)(ecs_block + ecs_offset(23u, capacity));
+  crdt_versions = (CrdtVersion *)(ecs_block + ecs_offset(24u, capacity));
 }
 
 // Grow the per-entity block to hold `count` slots. If the block is the last
@@ -896,6 +925,17 @@ static void ecs_storage_init(void) {
   internal_clipboard_sources = 0;
   marquee_base_selected = 0;
   free_slots = 0;
+  crdt_versions = 0;
+  // The heap reset above invalidates the CRDT change queue and tombstone table;
+  // drop them and reset the Lamport clock for the fresh scene.
+  crdt_clock = 0u;
+  crdt_collab_enabled = 0u;
+  crdt_dirty_ids = 0;
+  crdt_dirty_count = 0u;
+  crdt_dirty_cap = 0u;
+  crdt_tombstones = 0;
+  crdt_tombstone_cap = 0u;
+  crdt_tombstone_count = 0u;
   // The heap reset above invalidates every history allocation; drop the stacks
   // and scratch without freeing (those pointers are already gone).
   history_undo_count = 0u;
@@ -1024,6 +1064,137 @@ static u32 object_id_equal(ObjectId left, ObjectId right) {
   return left.actor_hi == right.actor_hi && left.actor_lo == right.actor_lo &&
          left.sequence_hi == right.sequence_hi &&
          left.sequence_lo == right.sequence_lo;
+}
+
+// --- CRDT: per-entity LWW merge --------------------------------------------
+// Conflict resolution is "newest wins": compare (lamport, actor_hi, actor_lo).
+static int crdt_version_newer(CrdtVersion a, CrdtVersion b) {
+  if (a.lamport != b.lamport) {
+    return a.lamport > b.lamport;
+  }
+  if (a.actor_hi != b.actor_hi) {
+    return a.actor_hi > b.actor_hi;
+  }
+  return a.actor_lo > b.actor_lo;
+}
+
+static u32 crdt_hash(ObjectId id) {
+  u32 h = id.actor_hi * 2654435761u;
+  h ^= id.actor_lo * 2246822519u;
+  h ^= id.sequence_hi * 3266489917u;
+  h ^= id.sequence_lo * 668265263u;
+  h ^= h >> 15;
+  return h;
+}
+
+// Open-addressing slot for `id` in the tombstone table: the existing entry or
+// the first empty slot. Returns 0 only if the table is unallocated/full.
+static CrdtTombstone *crdt_tombstone_slot(ObjectId id) {
+  if (crdt_tombstone_cap == 0u) {
+    return 0;
+  }
+  u32 mask = crdt_tombstone_cap - 1u;
+  u32 slot = crdt_hash(id) & mask;
+  for (u32 probe = 0u; probe < crdt_tombstone_cap; probe += 1u) {
+    CrdtTombstone *entry = &crdt_tombstones[slot];
+    if (!entry->used || object_id_equal(entry->id, id)) {
+      return entry;
+    }
+    slot = (slot + 1u) & mask;
+  }
+  return 0;
+}
+
+static u32 crdt_tombstone_grow(void) {
+  u32 next = crdt_tombstone_cap ? crdt_tombstone_cap * 2u : 256u;
+  CrdtTombstone *grown =
+      (CrdtTombstone *)blitz_alloc((usize)next * sizeof(CrdtTombstone));
+  if (!grown) {
+    return 0u;
+  }
+  for (u32 i = 0u; i < next; i += 1u) {
+    grown[i].used = 0u;
+  }
+  CrdtTombstone *old = crdt_tombstones;
+  u32 old_cap = crdt_tombstone_cap;
+  crdt_tombstones = grown;
+  crdt_tombstone_cap = next;
+  u32 mask = next - 1u;
+  for (u32 i = 0u; i < old_cap; i += 1u) {
+    if (old && old[i].used) {
+      u32 slot = crdt_hash(old[i].id) & mask;
+      while (grown[slot].used) {
+        slot = (slot + 1u) & mask;
+      }
+      grown[slot] = old[i];
+    }
+  }
+  if (old) {
+    blitz_free(old);
+  }
+  return 1u;
+}
+
+// Tombstones are never cleared: a resurrected entity (a newer upsert) is found
+// live, so apply compares against the live version and ignores the stale stone.
+static void crdt_tombstone_set(ObjectId id, CrdtVersion version) {
+  if ((crdt_tombstone_count + 1u) * 2u > crdt_tombstone_cap) {
+    if (!crdt_tombstone_grow()) {
+      return;
+    }
+  }
+  CrdtTombstone *entry = crdt_tombstone_slot(id);
+  if (!entry) {
+    return;
+  }
+  if (!entry->used) {
+    entry->used = 1u;
+    entry->id = id;
+    crdt_tombstone_count += 1u;
+  }
+  entry->version = version;
+}
+
+static u32 crdt_tombstone_version(ObjectId id, CrdtVersion *out) {
+  CrdtTombstone *entry = crdt_tombstone_slot(id);
+  if (entry && entry->used) {
+    *out = entry->version;
+    return 1u;
+  }
+  return 0u;
+}
+
+static void crdt_mark_dirty(ObjectId id) {
+  if (crdt_dirty_count >= crdt_dirty_cap) {
+    u32 next = crdt_dirty_cap ? crdt_dirty_cap * 2u : 256u;
+    ObjectId *grown = (ObjectId *)blitz_realloc(
+        crdt_dirty_ids, (usize)crdt_dirty_count * sizeof(ObjectId),
+        (usize)next * sizeof(ObjectId));
+    if (!grown) {
+      return;
+    }
+    crdt_dirty_ids = grown;
+    crdt_dirty_cap = next;
+  }
+  crdt_dirty_ids[crdt_dirty_count] = id;
+  crdt_dirty_count += 1u;
+}
+
+// Stamp a locally-edited entity (current clock + local actor). The live version
+// always advances (so a later baseline carries it); the tombstone table and
+// broadcast queue only grow while collaborating.
+static void crdt_stamp_local(u32 entity, ObjectId id, u32 deleted) {
+  CrdtVersion version = {crdt_clock, object_id_actor_hi, object_id_actor_lo};
+  if (!deleted && entity != BLITZ_INVALID_INDEX) {
+    crdt_versions[entity] = version;
+  }
+  if (!crdt_collab_enabled) {
+    return;
+  }
+  if (deleted) {
+    crdt_tombstone_set(id, version);
+  }
+  crdt_mark_dirty(id);
 }
 
 static ObjectId new_object_id(void) {
@@ -1845,6 +2016,19 @@ static void history_commit(void) {
     }
   }
 
+  // Stamp the locally-changed entities with one new Lamport tick and queue them
+  // for broadcast. An entry with no after-state is a delete (tombstone). Pure
+  // reorders carry no entity entry and aren't versioned in this phase.
+  crdt_clock += 1u;
+  for (u32 i = 0u; i < history_scratch_entry_count; i += 1u) {
+    HistoryScratchEntry *e = &history_scratch_entries[i];
+    if (!history_entry_kept(e)) {
+      continue;
+    }
+    u32 deleted = e->after_offset == BLITZ_INVALID_INDEX;
+    crdt_stamp_local(deleted ? BLITZ_INVALID_INDEX : e->entity, e->id, deleted);
+  }
+
   history_epoch_counter += 1u;
   txn.epoch = history_epoch_counter;
   history_clear_redo();
@@ -2079,6 +2263,13 @@ static void history_apply_transaction(HistoryTransaction *txn, u32 redo) {
                                     : txn->order_before_count);
   }
   history_replaying = 0u;
+  // An undo/redo is a fresh edit for collaboration: bump versions on the touched
+  // entities (an entry with no live entity is a delete) so the change broadcasts.
+  crdt_clock += 1u;
+  for (u32 i = 0u; i < txn->entry_count; i += 1u) {
+    HistoryEntry *e = &txn->entries[i];
+    crdt_stamp_local(e->entity, e->id, e->entity == BLITZ_INVALID_INDEX);
+  }
   clear_selection();
   mark_render_list_dirty();
 }
@@ -2112,6 +2303,8 @@ static u32 ecs_create_entity(void) {
   world.relative_transforms[entity].offset_x = 0.0f;
   world.relative_transforms[entity].offset_y = 0.0f;
   transform_dirty[entity] = 0u;
+  // Grown ECS slots aren't zeroed, so initialise the version explicitly.
+  crdt_versions[entity] = (CrdtVersion){0u, 0u, 0u};
   live_count += 1u;
   return entity;
 }
@@ -2553,6 +2746,217 @@ static u32 apply_entity_record_into(const unsigned char *buf, u32 offset,
   }
   world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
   return entity;
+}
+
+// --- CRDT: op transport ----------------------------------------------------
+// Wire layout of one op inside an op batch (all little-endian u32):
+//   +0  id.actor_hi   +4  id.actor_lo   +8  id.sequence_hi  +12 id.sequence_lo
+//   +16 version.lamport  +20 version.actor_hi  +24 version.actor_lo
+//   +28 deleted (1=tombstone, 0=upsert)   +32 record_bytes (0 if deleted)
+//   +36 the V8 entity record (record_bytes), present only for an upsert.
+// A batch is: u32 op_count, then the ops back to back. The 36-byte header and
+// the 4-aligned record keep every op 4-aligned.
+#define BLITZ_CRDT_OP_HEADER 36u
+
+static int crdt_version_equal(CrdtVersion a, CrdtVersion b) {
+  return a.lamport == b.lamport && a.actor_hi == b.actor_hi &&
+         a.actor_lo == b.actor_lo;
+}
+
+static CrdtVersion crdt_current_version(ObjectId id, u32 *out_entity) {
+  u32 entity = entity_for_object_id(id);
+  if (out_entity) {
+    *out_entity = entity;
+  }
+  if (entity != BLITZ_INVALID_INDEX) {
+    return crdt_versions[entity];
+  }
+  CrdtVersion stone;
+  if (crdt_tombstone_version(id, &stone)) {
+    return stone;
+  }
+  return (CrdtVersion){0u, 0u, 0u};
+}
+
+static ObjectId crdt_op_id(const unsigned char *buf, u32 op) {
+  ObjectId id = {read_u32(buf, op), read_u32(buf, op + 4u),
+                 read_u32(buf, op + 8u), read_u32(buf, op + 12u)};
+  return id;
+}
+
+static CrdtVersion crdt_op_version(const unsigned char *buf, u32 op) {
+  CrdtVersion version = {read_u32(buf, op + 16u), read_u32(buf, op + 20u),
+                         read_u32(buf, op + 24u)};
+  return version;
+}
+
+// Realize one op into the live scene if its version wins LWW. Parent relinking
+// is left to a second batch pass. Returns 1 when applied.
+static u32 crdt_apply_one(const unsigned char *buf, u32 op, u32 *destroyed_any) {
+  ObjectId id = crdt_op_id(buf, op);
+  CrdtVersion version = crdt_op_version(buf, op);
+  u32 deleted = read_u32(buf, op + 28u);
+  u32 entity;
+  CrdtVersion current = crdt_current_version(id, &entity);
+  if (!crdt_version_newer(version, current)) {
+    return 0u;
+  }
+  if (version.lamport > crdt_clock) {
+    crdt_clock = version.lamport;
+  }
+  if (deleted) {
+    if (entity != BLITZ_INVALID_INDEX) {
+      history_release_entity(entity);
+      *destroyed_any = 1u;
+    }
+    crdt_tombstone_set(id, version);
+    return 1u;
+  }
+  u32 applied = apply_entity_record_into(buf, op + BLITZ_CRDT_OP_HEADER, entity);
+  if (applied == BLITZ_INVALID_INDEX) {
+    return 0u;
+  }
+  crdt_versions[applied] = version;
+  return 1u;
+}
+
+// Apply a serialized op batch from `buf`. Two passes: realize entities, then
+// relink parents — so a child whose parent is later in the same batch still
+// links, and only the merge-winning op for an id relinks. Returns count applied.
+static u32 crdt_apply_op_batch(const unsigned char *buf, u32 byte_count) {
+  if (byte_count < 4u) {
+    return 0u;
+  }
+  u32 op_count = read_u32(buf, 0u);
+  u32 destroyed_any = 0u;
+  u32 applied = 0u;
+  u32 op = 4u;
+  for (u32 i = 0u; i < op_count; i += 1u) {
+    u32 record_bytes = read_u32(buf, op + 32u);
+    applied += crdt_apply_one(buf, op, &destroyed_any);
+    op += BLITZ_CRDT_OP_HEADER + record_bytes;
+  }
+  if (destroyed_any) {
+    history_compact_draw_order();
+  }
+  op = 4u;
+  for (u32 i = 0u; i < op_count; i += 1u) {
+    u32 deleted = read_u32(buf, op + 28u);
+    u32 record_bytes = read_u32(buf, op + 32u);
+    if (!deleted) {
+      ObjectId id = crdt_op_id(buf, op);
+      CrdtVersion version = crdt_op_version(buf, op);
+      u32 entity = entity_for_object_id(id);
+      if (entity != BLITZ_INVALID_INDEX &&
+          crdt_version_equal(crdt_versions[entity], version)) {
+        apply_record_parent(0, 0u, buf, op + BLITZ_CRDT_OP_HEADER, entity);
+      }
+    }
+    op += BLITZ_CRDT_OP_HEADER + record_bytes;
+  }
+  mark_render_list_dirty();
+  return applied;
+}
+
+static void crdt_write_op_header(u32 offset, ObjectId id, CrdtVersion version,
+                                 u32 deleted, u32 record_bytes) {
+  write_u32(scene_file_buffer, offset, id.actor_hi);
+  write_u32(scene_file_buffer, offset + 4u, id.actor_lo);
+  write_u32(scene_file_buffer, offset + 8u, id.sequence_hi);
+  write_u32(scene_file_buffer, offset + 12u, id.sequence_lo);
+  write_u32(scene_file_buffer, offset + 16u, version.lamport);
+  write_u32(scene_file_buffer, offset + 20u, version.actor_hi);
+  write_u32(scene_file_buffer, offset + 24u, version.actor_lo);
+  write_u32(scene_file_buffer, offset + 28u, deleted);
+  write_u32(scene_file_buffer, offset + 32u, record_bytes);
+}
+
+// Serialize the queued local changes into scene_file_buffer as an op batch and
+// clear the queue. Returns the byte length (>=4: the op count is always set).
+static u32 crdt_capture_changes(void) {
+  u32 count = crdt_dirty_count;
+  if (!scene_file_ensure(4u, 0u)) {
+    return 0u;
+  }
+  u32 offset = 4u;
+  u32 emitted = 0u;
+  for (u32 i = 0u; i < count; i += 1u) {
+    ObjectId id = crdt_dirty_ids[i];
+    u32 entity = entity_for_object_id(id);
+    if (entity != BLITZ_INVALID_INDEX) {
+      u32 max_record = BLITZ_SCENE_FILE_V8_RECORD_BYTES +
+                       history_entity_payload_bytes(entity);
+      if (!scene_file_ensure(offset + BLITZ_CRDT_OP_HEADER + max_record,
+                             offset)) {
+        break;
+      }
+      u32 record_bytes = capture_entity_record(
+          scene_file_buffer, offset + BLITZ_CRDT_OP_HEADER, entity);
+      if (record_bytes == 0u) {
+        continue;
+      }
+      crdt_write_op_header(offset, id, crdt_versions[entity], 0u, record_bytes);
+      offset += BLITZ_CRDT_OP_HEADER + record_bytes;
+      emitted += 1u;
+    } else {
+      CrdtVersion version;
+      if (!crdt_tombstone_version(id, &version)) {
+        continue;
+      }
+      if (!scene_file_ensure(offset + BLITZ_CRDT_OP_HEADER, offset)) {
+        break;
+      }
+      crdt_write_op_header(offset, id, version, 1u, 0u);
+      offset += BLITZ_CRDT_OP_HEADER;
+      emitted += 1u;
+    }
+  }
+  write_u32(scene_file_buffer, 0u, emitted);
+  crdt_dirty_count = 0u;
+  return offset;
+}
+
+// Serialize every live entity as an upsert op (a full-state baseline for a
+// joining peer). Returns the byte length.
+static u32 crdt_capture_baseline(void) {
+  if (!scene_file_ensure(4u, 0u)) {
+    return 0u;
+  }
+  u32 offset = 4u;
+  u32 emitted = 0u;
+  u32 baseline_lamport = 0u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.masks[entity] == 0u) {
+      continue;
+    }
+    // Entities from a loaded scene file are unversioned (lamport 0); a peer's
+    // baseline for the same id is also 0, so give them a real version once,
+    // otherwise the equal-version merge would reject them.
+    if (crdt_versions[entity].lamport == 0u) {
+      if (baseline_lamport == 0u) {
+        crdt_clock += 1u;
+        baseline_lamport = crdt_clock;
+      }
+      crdt_versions[entity] = (CrdtVersion){baseline_lamport, object_id_actor_hi,
+                                            object_id_actor_lo};
+    }
+    u32 max_record = BLITZ_SCENE_FILE_V8_RECORD_BYTES +
+                     history_entity_payload_bytes(entity);
+    if (!scene_file_ensure(offset + BLITZ_CRDT_OP_HEADER + max_record, offset)) {
+      break;
+    }
+    u32 record_bytes = capture_entity_record(
+        scene_file_buffer, offset + BLITZ_CRDT_OP_HEADER, entity);
+    if (record_bytes == 0u) {
+      continue;
+    }
+    crdt_write_op_header(offset, world.object_ids[entity], crdt_versions[entity],
+                         0u, record_bytes);
+    offset += BLITZ_CRDT_OP_HEADER + record_bytes;
+    emitted += 1u;
+  }
+  write_u32(scene_file_buffer, 0u, emitted);
+  return offset;
 }
 
 static Vec2 path_bounds_min(Vec2 *points, u32 point_count) {
@@ -6428,6 +6832,43 @@ void blitz_history_cancel(void) {
 EXPORT("blitz_history_reset")
 void blitz_history_reset(void) {
   history_reset_internal();
+}
+
+// CRDT: turn local change tracking (tombstones + broadcast queue) on or off.
+EXPORT("blitz_crdt_set_enabled")
+void blitz_crdt_set_enabled(u32 on) {
+  crdt_collab_enabled = on ? 1u : 0u;
+}
+
+// CRDT: capture local changes since the last call as an op batch in the scene
+// file buffer (read via blitz_scene_file_buffer_ptr), returning its byte length.
+EXPORT("blitz_crdt_capture_changes")
+u32 blitz_crdt_capture_changes(void) {
+  return crdt_capture_changes();
+}
+
+// CRDT: capture the whole live scene as an op batch (baseline for a joining
+// peer) in the scene file buffer, returning its byte length.
+EXPORT("blitz_crdt_capture_baseline")
+u32 blitz_crdt_capture_baseline(void) {
+  return crdt_capture_baseline();
+}
+
+// CRDT: apply an op batch the caller wrote into the scene file buffer. Returns
+// the number of ops that won LWW and changed the scene.
+EXPORT("blitz_crdt_apply_ops")
+u32 blitz_crdt_apply_ops(u32 byte_count) {
+  return crdt_apply_op_batch(scene_file_buffer, byte_count);
+}
+
+EXPORT("blitz_crdt_pending_count")
+u32 blitz_crdt_pending_count(void) {
+  return crdt_dirty_count;
+}
+
+EXPORT("blitz_crdt_clock")
+u32 blitz_crdt_clock(void) {
+  return crdt_clock;
 }
 
 // Unique id for the current undo position; 0 when nothing is on the stack.

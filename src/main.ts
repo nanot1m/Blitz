@@ -234,6 +234,12 @@ type BlitzExports = {
   blitz_history_can_undo(): number;
   blitz_history_can_redo(): number;
   blitz_history_state_id(): number;
+  blitz_crdt_set_enabled(on: number): void;
+  blitz_crdt_capture_changes(): number;
+  blitz_crdt_capture_baseline(): number;
+  blitz_crdt_apply_ops(byteCount: number): number;
+  blitz_crdt_pending_count(): number;
+  blitz_crdt_clock(): number;
   blitz_stress_test(): void;
   blitz_clear_selection(): void;
   blitz_select_object(
@@ -319,22 +325,6 @@ const textPaddingWorld = 4;
 const textEditorBorderPx = 1;
 const textCaretViewportMargin = 36;
 const ui = createBlitzUi();
-const sceneDeserializeErrors = [
-  "",
-  "The file size is invalid.",
-  "The scene is not a Blitz scene.",
-  "The scene version is not supported.",
-  "The scene file is incomplete.",
-  "The scene contains too many objects.",
-  "The saved camera is invalid.",
-  "The scene record table is incomplete.",
-  "A scene record is invalid.",
-  "A shape has invalid dimensions.",
-  "The scene text data is too large.",
-  "A non-text shape contains text data.",
-  "The scene has trailing or missing bytes.",
-  "Blitz could not allocate the loaded scene.",
-];
 async function loadWasm(): Promise<BlitzExports> {
   const response = await fetch(`${import.meta.env.BASE_URL}blitz.wasm`, {
     cache: "no-store",
@@ -346,11 +336,7 @@ async function loadWasm(): Promise<BlitzExports> {
   return module.instance.exports as BlitzExports;
 }
 
-function serializeCurrentScene(wasm: BlitzExports): Uint8Array {
-  const byteCount = wasm.blitz_scene_serialize();
-  if (byteCount === 0) {
-    throw new Error("The scene could not be serialized for collaboration.");
-  }
+function readSceneFileBuffer(wasm: BlitzExports, byteCount: number): Uint8Array {
   return new Uint8Array(
     wasm.memory.buffer,
     wasm.blitz_scene_file_buffer_ptr(),
@@ -358,18 +344,13 @@ function serializeCurrentScene(wasm: BlitzExports): Uint8Array {
   ).slice();
 }
 
-function deserializeCurrentScene(wasm: BlitzExports, bytes: Uint8Array): void {
+function applyCrdtOps(wasm: BlitzExports, bytes: Uint8Array): void {
   const ptr = wasm.blitz_scene_file_buffer_reserve(bytes.byteLength);
   if (ptr === 0) {
-    throw new Error("The collaboration scene is too large to load.");
+    throw new Error("The collaboration update is too large to apply.");
   }
   new Uint8Array(wasm.memory.buffer, ptr, bytes.byteLength).set(bytes);
-  const error = wasm.blitz_scene_deserialize(bytes.byteLength);
-  if (error !== 0) {
-    throw new Error(
-      sceneDeserializeErrors[error] ?? `The collaboration scene could not be loaded (${error}).`,
-    );
-  }
+  wasm.blitz_crdt_apply_ops(bytes.byteLength);
 }
 async function boot() {
   if (!navigator.gpu) {
@@ -1776,7 +1757,6 @@ async function boot() {
   const cancelTextEdit = () => {
     closeTextEditor();
     ui.canvas.focus();
-    collaborationController?.flushDeferredSnapshot();
   };
   const commitTextEdit = () => {
     const session = textEditSession;
@@ -1787,7 +1767,6 @@ async function boot() {
     if (nextText === session.text) {
       closeTextEditor();
       ui.canvas.focus();
-      collaborationController?.flushDeferredSnapshot();
       return;
     }
     const textLength = writeTextInput(nextText);
@@ -1840,8 +1819,6 @@ async function boot() {
     closeTextEditor();
     ui.canvas.focus();
     updateSelectionState();
-    // The committed edit will publish; discard any snapshot deferred during it.
-    collaborationController?.dropDeferredSnapshot();
   };
   const beginTextEdit = () => {
     const session = selectedTextEditSession();
@@ -2487,20 +2464,23 @@ async function boot() {
     },
     {
       actorId,
-      captureScene: () => serializeCurrentScene(wasm),
-      applyScene(bytes) {
+      captureChanges() {
+        return readSceneFileBuffer(wasm, wasm.blitz_crdt_capture_changes());
+      },
+      captureBaseline() {
+        return readSceneFileBuffer(wasm, wasm.blitz_crdt_capture_baseline());
+      },
+      applyOps(bytes) {
         applyingRemoteCollaboration = true;
         try {
-          stopDragging();
-          closeTextEditor();
-          deserializeCurrentScene(wasm, bytes);
-          sceneHistory.reset();
+          applyCrdtOps(wasm, bytes);
           updateSelectionState();
           updateEmptyState();
         } finally {
           applyingRemoteCollaboration = false;
         }
       },
+      hasPendingChanges: () => wasm.blitz_crdt_pending_count() > 0,
       localRevision: () => wasm.blitz_scene_revision(),
       onRemoteApplied() {
         updateHistoryControls();
@@ -2508,7 +2488,9 @@ async function boot() {
       onRemoteCursor(peerId, worldX, worldY) {
         remoteCursors.update(peerId, worldX, worldY);
       },
-      isBusy: () => textEditSession !== null,
+      onActiveChange(active) {
+        wasm.blitz_crdt_set_enabled(active ? 1 : 0);
+      },
       onError: ui.showFallback,
     },
   );

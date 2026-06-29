@@ -103,7 +103,7 @@ jobs:
           Environment=BLITZ_COLLAB_MAX_PEERS_PER_ROOM=$MAX_PEERS_PER_ROOM
           Environment=BLITZ_COLLAB_MAX_ROOM_MESSAGES_PER_MINUTE=$MAX_ROOM_MESSAGES_PER_MINUTE
           Environment=BLITZ_COLLAB_MAX_ROOMS=$MAX_ROOMS
-          ExecStart=$(command -v npm) run collab:relay
+          ExecStart=$DEPLOY_DIR/current/node_modules/.bin/tsx mcp/collaboration-relay.ts
           Restart=always
           RestartSec=5
 
@@ -126,10 +126,14 @@ jobs:
         run: |
           set -euo pipefail
           # The relay runs under tsx, which compiles on startup, so the socket
-          # isn't bound the instant systemctl returns. Retry until it answers.
+          # isn't bound the instant systemctl returns. Retry until it answers,
+          # and dump the service journal if it never does so the cause is visible.
           ssh -i ~/.ssh/hetzner_deploy -p "$SSH_PORT" "${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }}" \
             "for _ in \$(seq 1 30); do \
                curl -fsS http://127.0.0.1:$DEPLOY_PORT/__blitz/collaboration/status && exit 0; \
                sleep 1; \
              done; \
-             echo 'collaboration relay did not become healthy within 30s' >&2; exit 1"
+             echo '--- collaboration relay did not become healthy within 30s; recent logs: ---' >&2; \
+             { sudo journalctl -u blitz-collab.service --no-pager -n 100 2>&1 || journalctl -u blitz-collab.service --no-pager -n 100 2>&1; } >&2; \
+             { sudo systemctl status blitz-collab.service --no-pager --full 2>&1 || true; } >&2; \
+             exit 1"

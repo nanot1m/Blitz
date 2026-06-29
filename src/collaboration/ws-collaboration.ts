@@ -415,7 +415,10 @@ export function setupWsCollaboration(
         }
         latestSnapshotAt = command.createdAt;
         handlers.applyScene(bytes);
-        lastPublishedRevision = command.body.revision;
+        // applyScene bumps the local revision; record THAT (local space) as
+        // already-synced, otherwise the apply looks like a local edit and we
+        // echo the snapshot straight back, ping-ponging forever with the peer.
+        lastPublishedRevision = handlers.localRevision();
         handlers.onRemoteApplied();
         log("snapshot-applied", { revision: command.body.revision, bytes: bytes.byteLength });
       }

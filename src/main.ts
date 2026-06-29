@@ -13,6 +13,10 @@ import backgroundSource from "./shaders/background.wgsl?raw";
 import { setupSceneFileStorage } from "./storage/scene-file";
 import { getOrCreateActorId } from "./storage/actor-id";
 import { createWasmHistory } from "./history/wasm-history";
+import {
+  setupWsCollaboration,
+  type CollaborationController,
+} from "./collaboration/ws-collaboration";
 import { createBlitzUi } from "./ui";
 import "./style.css";
 type BlitzExports = {
@@ -314,6 +318,22 @@ const textPaddingWorld = 4;
 const textEditorBorderPx = 1;
 const textCaretViewportMargin = 36;
 const ui = createBlitzUi();
+const sceneDeserializeErrors = [
+  "",
+  "The file size is invalid.",
+  "The scene is not a Blitz scene.",
+  "The scene version is not supported.",
+  "The scene file is incomplete.",
+  "The scene contains too many objects.",
+  "The saved camera is invalid.",
+  "The scene record table is incomplete.",
+  "A scene record is invalid.",
+  "A shape has invalid dimensions.",
+  "The scene text data is too large.",
+  "A non-text shape contains text data.",
+  "The scene has trailing or missing bytes.",
+  "Blitz could not allocate the loaded scene.",
+];
 async function loadWasm(): Promise<BlitzExports> {
   const response = await fetch(`${import.meta.env.BASE_URL}blitz.wasm`, {
     cache: "no-store",
@@ -323,6 +343,32 @@ async function loadWasm(): Promise<BlitzExports> {
   }
   const module = await WebAssembly.instantiateStreaming(response, {});
   return module.instance.exports as BlitzExports;
+}
+
+function serializeCurrentScene(wasm: BlitzExports): Uint8Array {
+  const byteCount = wasm.blitz_scene_serialize();
+  if (byteCount === 0) {
+    throw new Error("The scene could not be serialized for collaboration.");
+  }
+  return new Uint8Array(
+    wasm.memory.buffer,
+    wasm.blitz_scene_file_buffer_ptr(),
+    byteCount,
+  ).slice();
+}
+
+function deserializeCurrentScene(wasm: BlitzExports, bytes: Uint8Array): void {
+  const ptr = wasm.blitz_scene_file_buffer_reserve(bytes.byteLength);
+  if (ptr === 0) {
+    throw new Error("The collaboration scene is too large to load.");
+  }
+  new Uint8Array(wasm.memory.buffer, ptr, bytes.byteLength).set(bytes);
+  const error = wasm.blitz_scene_deserialize(bytes.byteLength);
+  if (error !== 0) {
+    throw new Error(
+      sceneDeserializeErrors[error] ?? `The collaboration scene could not be loaded (${error}).`,
+    );
+  }
 }
 async function boot() {
   if (!navigator.gpu) {
@@ -2075,6 +2121,8 @@ async function boot() {
     updateEmptyState();
   };
   let stopDragging = () => {};
+  let collaborationController: CollaborationController | undefined;
+  let applyingRemoteCollaboration = false;
   const sceneHistory = createWasmHistory(wasm, {
     onApplied() {
       closeTextEditor();
@@ -2084,6 +2132,9 @@ async function boot() {
     },
     onChanged() {
       updateHistoryControls();
+      if (!applyingRemoteCollaboration) {
+        collaborationController?.publishLocalChange();
+      }
     },
     onError: ui.showFallback,
   });
@@ -2403,6 +2454,42 @@ async function boot() {
       status: ui.mcpBridgeStatus,
     },
     mcpAdapter,
+  );
+  collaborationController = setupWsCollaboration(
+    {
+      dialog: ui.collaborationSettingsDialog,
+      openButton: ui.openCollaborationSettingsButton,
+      closeButton: ui.closeCollaborationSettingsButton,
+      form: ui.collaborationSettingsForm,
+      urlInput: ui.collaborationUrlInput,
+      roomInput: ui.collaborationRoomInput,
+      shareLinkInput: ui.collaborationShareLinkInput,
+      disconnectButton: ui.disconnectCollaborationButton,
+      status: ui.collaborationStatus,
+      peerId: ui.collaborationPeerId,
+    },
+    {
+      actorId,
+      captureScene: () => serializeCurrentScene(wasm),
+      applyScene(bytes) {
+        applyingRemoteCollaboration = true;
+        try {
+          stopDragging();
+          closeTextEditor();
+          deserializeCurrentScene(wasm, bytes);
+          sceneHistory.reset();
+          updateSelectionState();
+          updateEmptyState();
+        } finally {
+          applyingRemoteCollaboration = false;
+        }
+      },
+      localRevision: () => wasm.blitz_scene_revision(),
+      onRemoteApplied() {
+        updateHistoryControls();
+      },
+      onError: ui.showFallback,
+    },
   );
   const runSceneAction = (action: () => void) => {
     stopDragging();

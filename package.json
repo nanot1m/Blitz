@@ -9,6 +9,7 @@
     "build": "npm run build:wasm && tsc && vite build",
     "build:font": "node scripts/compile-font.mjs",
     "build:wasm": "node scripts/compile-font.mjs && node scripts/build-wasm.mjs",
+    "collab:relay": "tsx mcp/collaboration-relay.ts",
     "mcp:server": "tsx mcp/server.ts",
     "setup:mcp": "node scripts/setup-local-mcp.mjs",
     "preview": "vite preview --host 127.0.0.1",

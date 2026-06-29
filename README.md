@@ -190,6 +190,36 @@ For GitHub Pages, use the site origin without the repository path. WebSocket `Or
 
 GitHub Pages can host the static Blitz frontend, WASM, shaders, and font atlas. It cannot run the MCP server. The local MCP process must still run on the user's computer, and the Pages origin must be allowed by that process.
 
+## Hosted collaboration deployment
+
+The static Blitz app is deployed by the existing GitHub Pages workflow. Hetzner only needs to run the WebSocket collaboration relay:
+
+```text
+GitHub Pages
+    │ serves static app, WASM, font assets
+    ▼
+Browser
+    │ encrypted signed collaboration commands over WSS
+    ▼
+Hetzner relay
+```
+
+The relay does not require account authentication. Collaboration rooms are protected by an encryption key in the shared URL hash (`#collabRoom=...&collabKey=...`), which browsers do not send to the server. The relay only receives encrypted command envelopes.
+
+The `Deploy Hetzner` workflow deploys the relay and restarts `blitz-collab.service`. Configure these GitHub repository secrets:
+
+- `HETZNER_HOST`: server hostname or IP
+- `HETZNER_USER`: SSH user
+- `HETZNER_SSH_KEY`: private deploy key
+
+Optional repository variables:
+
+- `HETZNER_APP_DIR`: install directory, defaults to `/opt/blitz`
+- `HETZNER_COLLAB_PORT`: relay port, defaults to `8790`
+- `HETZNER_SSH_PORT`: SSH port, defaults to `22`
+
+Because GitHub Pages is HTTPS, production collaboration should use a `wss://` relay URL. Put a TLS reverse proxy such as Caddy or Nginx in front of the relay, or terminate TLS before forwarding to `127.0.0.1:8790`.
+
 The planned hosted, multi-user authentication design is documented in [`docs/ed25519-auth-plan.md`](docs/ed25519-auth-plan.md). It is not part of the current local bridge.
 
 ### MCP tools

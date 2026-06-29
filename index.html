@@ -112,6 +112,9 @@
           <button id="open-mcp-settings" type="button" aria-label="MCP bridge settings" title="MCP bridge: Disconnected">
             <i data-lucide="settings" aria-hidden="true"></i>
           </button>
+          <button id="open-collaboration-settings" type="button" aria-label="Collaboration settings" title="Collaboration: Disconnected">
+            <i data-lucide="radio" aria-hidden="true"></i>
+          </button>
         </div>
       </details>
     </div>
@@ -288,6 +291,58 @@
         <div class="dialog-actions">
           <button id="disconnect-mcp-bridge" class="secondary-action" type="button">Disconnect</button>
           <button class="primary-action" type="submit">Connect</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="collaboration-settings-dialog" aria-labelledby="collaboration-settings-title">
+      <form id="collaboration-settings-form">
+        <div class="dialog-heading">
+          <div>
+            <h2 id="collaboration-settings-title">Collaboration</h2>
+            <p>Share an encrypted room link with collaborators.</p>
+          </div>
+          <button id="close-collaboration-settings" class="dialog-close" type="button" aria-label="Close settings">×</button>
+        </div>
+        <label>
+          WebSocket relay URL
+          <input
+            id="collaboration-url"
+            name="collaboration-url"
+            type="url"
+            value="ws://127.0.0.1:8790"
+            spellcheck="false"
+            required
+          />
+        </label>
+        <label>
+          Room
+          <input
+            id="collaboration-room"
+            name="collaboration-room"
+            type="text"
+            pattern="[a-zA-Z0-9._-]{1,80}"
+            spellcheck="false"
+            required
+          />
+        </label>
+        <label>
+          Share link
+          <input
+            id="collaboration-share-link"
+            name="collaboration-share-link"
+            type="url"
+            spellcheck="false"
+            readonly
+          />
+        </label>
+        <p class="settings-note">Scene commands are encrypted before upload. The encryption key is stored in the URL hash and is not sent to the relay.</p>
+        <div class="bridge-status-row">
+          <span id="collaboration-status" data-state="disconnected">Disconnected</span>
+          <span id="collaboration-peer-id"></span>
+        </div>
+        <div class="dialog-actions">
+          <button id="disconnect-collaboration" class="secondary-action" type="button">Disconnect</button>
+          <button class="primary-action" type="submit">Start</button>
         </div>
       </form>
     </dialog>

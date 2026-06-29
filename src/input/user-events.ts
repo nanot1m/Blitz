@@ -178,7 +178,7 @@ export function setupCanvasInteractions(
   let touchStartY = 0;
   let longPressTimer: number | undefined;
   const touchMoveThreshold = 8;
-  const mouseDragThreshold = 4;
+  const mouseDragThreshold = 1;
   const longPressDelay = 450;
   const doubleTapDelay = 300;
   const doubleTapDistance = 24;
@@ -204,6 +204,48 @@ export function setupCanvasInteractions(
       x: (clientX - rect.left) * dpr,
       y: (clientY - rect.top) * dpr,
     };
+  };
+
+  // Custom drag cursor: while dragging an item we hide the OS cursor (which the
+  // compositor draws in real time, so it always runs ahead of the canvas) and
+  // draw our own at the same pointer position the frame is rendered from. The
+  // synthetic cursor and the dragged item then share the same latency, so the
+  // item no longer appears to trail the pointer.
+  let dragCursorEl: HTMLDivElement | null = null;
+  // Centered on the pointer (the move cursor's hotspot is its center).
+  const positionDragCursor = (clientX: number, clientY: number) => {
+    if (dragCursorEl) {
+      dragCursorEl.style.transform =
+        `translate(${clientX}px, ${clientY}px) translate(-50%, -50%)`;
+    }
+  };
+  const showDragCursor = (clientX: number, clientY: number) => {
+    if (!dragCursorEl) {
+      dragCursorEl = document.createElement("div");
+      dragCursorEl.style.cssText =
+        "position:fixed;left:0;top:0;pointer-events:none;z-index:99999;will-change:transform;";
+      dragCursorEl.innerHTML =
+        '<svg width="16" height="16" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
+        '<path d="M12 1.5 L8.5 5 H10.75 V10.75 H5 V8.5 L1.5 12 L5 15.5 V13.25 H10.75 V19 H8.5 ' +
+        'L12 22.5 L15.5 19 H13.25 V13.25 H19 V15.5 L22.5 12 L19 8.5 V10.75 H13.25 V5 H15.5 Z" ' +
+        'fill="white" stroke="black" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+      document.body.appendChild(dragCursorEl);
+    }
+    dragCursorEl.style.display = "block";
+    positionDragCursor(clientX, clientY);
+    canvas.style.cursor = "none";
+  };
+  const updateDragCursor = (clientX: number, clientY: number) => {
+    if (!dragCursorEl || dragCursorEl.style.display === "none") {
+      return;
+    }
+    positionDragCursor(clientX, clientY);
+  };
+  const hideDragCursor = () => {
+    if (dragCursorEl) {
+      dragCursorEl.style.display = "none";
+    }
+    canvas.style.cursor = "";
   };
 
   const touchGesture = () => {
@@ -314,6 +356,7 @@ export function setupCanvasInteractions(
     selectingArea = false;
     mouseEntityDragPending = false;
     clearInteractionClasses();
+    hideDragCursor();
     wasm.blitz_pointer_up();
     if (editTransactionActive) {
       options.commitEdit();
@@ -507,6 +550,7 @@ export function setupCanvasInteractions(
         clearLongPressTimer();
         if (draggingEntity) {
           canvas.classList.add("is-dragging-entity");
+          showDragCursor(event.clientX, event.clientY);
         }
         if (resizingEntity) {
           setResizeCursor(resizePointerMode);
@@ -514,6 +558,7 @@ export function setupCanvasInteractions(
       }
       const point = eventToCanvasPixels(event);
       wasm.blitz_pointer_move(point.x, point.y);
+      updateDragCursor(event.clientX, event.clientY);
     } else {
       wasm.blitz_pan((event.clientX - lastX) * dpr, (event.clientY - lastY) * dpr);
     }

@@ -1133,6 +1133,35 @@ dialog::backdrop {
   white-space: nowrap;
 }
 
+.collaboration-debug {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.collaboration-debug-heading {
+  color: #657080;
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+#collaboration-debug-log {
+  width: 100%;
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  padding: 9px;
+  border: 1px solid #d4d9e1;
+  border-radius: 7px;
+  background: #f7f9fc;
+  color: #313b48;
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .dialog-actions {
   display: flex;
   justify-content: flex-end;

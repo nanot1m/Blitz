@@ -173,6 +173,7 @@ export function createBlitzUi() {
     disconnectCollaborationButton: requireElement<HTMLButtonElement>("#disconnect-collaboration"),
     collaborationStatus: requireElement<HTMLElement>("#collaboration-status"),
     collaborationPeerId: requireElement<HTMLElement>("#collaboration-peer-id"),
+    collaborationDebugLog: requireElement<HTMLPreElement>("#collaboration-debug-log"),
     mcpSettingsDialog: requireElement<HTMLDialogElement>("#mcp-settings-dialog"),
     mcpSettingsForm: requireElement<HTMLFormElement>("#mcp-settings-form"),
     closeMcpSettingsButton: requireElement<HTMLButtonElement>("#close-mcp-settings"),

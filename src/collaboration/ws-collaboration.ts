@@ -14,6 +14,7 @@ type CollaborationElements = {
   disconnectButton: HTMLButtonElement;
   status: HTMLElement;
   peerId: HTMLElement;
+  debugLog: HTMLPreElement;
 };
 
 type CollaborationHandlers = {
@@ -166,6 +167,20 @@ function actorHex(actor: ActorId): string {
   return `${actor.hi.toString(16).padStart(8, "0")}${actor.lo.toString(16).padStart(8, "0")}`;
 }
 
+function formatDebugValue(value: unknown): string {
+  if (value === undefined) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 async function messageText(data: unknown): Promise<string> {
   if (typeof data === "string") {
     return data;
@@ -196,13 +211,28 @@ export function setupWsCollaboration(
   let reconnectTimer: number | undefined;
   let reconnectDelay = 1_000;
   let lastPublishedRevision = handlers.localRevision();
+  let latestSnapshotAt = 0;
+  let publishTimer: number | undefined;
   const seenCommands = new Set<string>();
+  const debugLines: string[] = [];
+
+  const log = (event: string, detail?: unknown) => {
+    const timestamp = new Date().toLocaleTimeString();
+    const suffix = formatDebugValue(detail);
+    debugLines.push(`[${timestamp}] ${event}${suffix ? ` ${suffix}` : ""}`);
+    while (debugLines.length > 160) {
+      debugLines.shift();
+    }
+    elements.debugLog.textContent = debugLines.join("\n");
+    elements.debugLog.scrollTop = elements.debugLog.scrollHeight;
+  };
 
   const hashSettings = readHashSettings();
   const hashRoom =
     hashSettings.room && ROOM_PATTERN.test(hashSettings.room)
       ? hashSettings.room.toLowerCase()
       : undefined;
+  const joiningFromLink = Boolean(hashRoom && hashSettings.key);
   elements.urlInput.value = localStorage.getItem(URL_STORAGE_KEY) ?? DEFAULT_URL;
 
   const setStatus = (state: "disconnected" | "connecting" | "connected", message: string) => {
@@ -210,6 +240,7 @@ export function setupWsCollaboration(
     elements.status.textContent = message;
     elements.openButton.dataset.state = state;
     elements.openButton.title = `Collaboration: ${message}`;
+    log("status", { state, message });
   };
 
   const stopReconnectTimer = () => {
@@ -223,6 +254,7 @@ export function setupWsCollaboration(
     if (!identity) {
       identity = await getOrCreateCollaborationIdentity();
       elements.peerId.textContent = identity.peerId;
+      log("identity", { peerId: identity.peerId });
     }
     const payload: CommandPayload = {
       type: "blitz.crdt.command",
@@ -276,11 +308,17 @@ export function setupWsCollaboration(
 
   const sendCommand = async (body: CommandBody) => {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
+      log("send-skip", { reason: "socket-not-open", kind: body.kind });
       return;
     }
     const command = await signCommand(body);
     seenCommands.add(command.commandId);
     socket.send(JSON.stringify(await encryptCommand(command)));
+    log("send", {
+      kind: body.kind,
+      revision: body.revision,
+      commandId: command.commandId.slice(-12),
+    });
   };
 
   const publishSnapshot = async () => {
@@ -288,19 +326,24 @@ export function setupWsCollaboration(
     const scene = handlers.captureScene();
     if (scene.byteLength > MAX_SCENE_BYTES) {
       handlers.onError("The scene is too large to publish to collaboration.");
+      log("snapshot-skip", { reason: "too-large", bytes: scene.byteLength });
       return;
     }
     lastPublishedRevision = revision;
+    latestSnapshotAt = Math.max(latestSnapshotAt, Date.now());
     await sendCommand({
       kind: "scene-snapshot",
       revision,
       scene: bytesToBase64(scene),
     });
+    log("snapshot-published", { revision, bytes: scene.byteLength });
   };
 
   const handleCommand = async (event: MessageEvent) => {
     try {
-      const envelope = JSON.parse(await messageText(event.data)) as EncryptedEnvelope;
+      const raw = await messageText(event.data);
+      log("receive-frame", { bytes: raw.length });
+      const envelope = JSON.parse(raw) as EncryptedEnvelope;
       if (
         !envelope ||
         envelope.type !== "blitz.collab.encrypted" ||
@@ -308,6 +351,7 @@ export function setupWsCollaboration(
         typeof envelope.nonce !== "string" ||
         typeof envelope.ciphertext !== "string"
       ) {
+        log("receive-drop", { reason: "invalid-envelope" });
         return;
       }
       const command = await decryptCommand(envelope);
@@ -321,36 +365,62 @@ export function setupWsCollaboration(
         typeof command.signature !== "string" ||
         seenCommands.has(command.commandId)
       ) {
+        log("receive-drop", {
+          reason: command && seenCommands.has(command.commandId) ? "seen-command" : "invalid-command",
+        });
         return;
       }
       seenCommands.add(command.commandId);
       identity ??= await getOrCreateCollaborationIdentity();
       const ok = await identity.verify(command.publicKey, commandPayload(command), command.signature);
       if (!ok) {
+        log("receive-drop", { reason: "bad-signature", commandId: command.commandId.slice(-12) });
         return;
       }
+      log("receive", {
+        kind: command.body.kind,
+        revision: command.body.revision,
+        peerId: command.peerId,
+        commandId: command.commandId.slice(-12),
+      });
 
       if (command.body.kind === "hello") {
         if (handlers.localRevision() > command.body.revision) {
+          log("hello-response", {
+            localRevision: handlers.localRevision(),
+            remoteRevision: command.body.revision,
+          });
           await publishSnapshot();
         }
         return;
       }
 
       if (command.body.kind === "scene-snapshot") {
-        if (command.body.revision < handlers.localRevision()) {
+        if (command.createdAt < latestSnapshotAt) {
+          log("snapshot-drop", {
+            reason: "stale-created-at",
+            createdAt: command.createdAt,
+            latestSnapshotAt,
+          });
           return;
         }
         const bytes = base64ToBytes(command.body.scene);
         if (bytes.byteLength > MAX_SCENE_BYTES) {
+          log("snapshot-drop", { reason: "too-large", bytes: bytes.byteLength });
           return;
         }
+        if (publishTimer !== undefined) {
+          window.clearTimeout(publishTimer);
+          publishTimer = undefined;
+        }
+        latestSnapshotAt = command.createdAt;
         handlers.applyScene(bytes);
         lastPublishedRevision = command.body.revision;
         handlers.onRemoteApplied();
+        log("snapshot-applied", { revision: command.body.revision, bytes: bytes.byteLength });
       }
     } catch (error) {
-      handlers.onError(error instanceof Error ? error.message : String(error));
+      log("receive-error", error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -359,6 +429,7 @@ export function setupWsCollaboration(
     stopReconnectTimer();
     socket?.close(1000, "Disconnected in Blitz settings.");
     socket = undefined;
+    log("disconnect");
     setStatus("disconnected", "Disconnected");
   };
 
@@ -383,8 +454,15 @@ export function setupWsCollaboration(
       }
       identity = await getOrCreateCollaborationIdentity();
       elements.peerId.textContent = identity.peerId;
+      log("connect-ready", {
+        url,
+        room,
+        peerId: identity.peerId,
+        mode: hashRoom === room ? "join-link" : "host",
+      });
     } catch (error) {
       setStatus("disconnected", error instanceof Error ? error.message : String(error));
+      log("connect-error", error instanceof Error ? error.message : String(error));
       return;
     }
 
@@ -396,21 +474,33 @@ export function setupWsCollaboration(
 
     const nextSocket = new WebSocket(`${url.replace(/\/$/, "")}/${encodeURIComponent(room)}`);
     socket = nextSocket;
+    log("socket-create", { room });
     nextSocket.addEventListener("open", async () => {
       if (socket !== nextSocket) {
         return;
       }
       reconnectDelay = 1_000;
       setStatus("connected", `Connected to ${room}`);
+      log("socket-open", { room, localRevision: handlers.localRevision() });
       await sendCommand({ kind: "hello", revision: handlers.localRevision() });
-      await publishSnapshot();
+      if (!joiningFromLink) {
+        await publishSnapshot();
+      } else {
+        log("initial-publish-skip", { reason: "join-link" });
+      }
     });
     nextSocket.addEventListener("message", handleCommand);
-    nextSocket.addEventListener("close", () => {
+    nextSocket.addEventListener("close", (event: CloseEvent) => {
       if (socket !== nextSocket) {
         return;
       }
       socket = undefined;
+      log("socket-close", {
+        code: event.code,
+        reason: event.reason,
+        wasClean: event.wasClean,
+        shouldReconnect,
+      });
       setStatus("disconnected", shouldReconnect ? "Reconnecting..." : "Disconnected");
       if (shouldReconnect) {
         reconnectTimer = window.setTimeout(() => {
@@ -422,6 +512,7 @@ export function setupWsCollaboration(
     });
     nextSocket.addEventListener("error", () => {
       if (socket === nextSocket) {
+        log("socket-error");
         setStatus("disconnected", "Connection failed");
       }
     });
@@ -445,6 +536,7 @@ export function setupWsCollaboration(
   void getOrCreateCollaborationIdentity().then((nextIdentity) => {
     identity = nextIdentity;
     elements.peerId.textContent = nextIdentity.peerId;
+    log("identity", { peerId: nextIdentity.peerId });
   });
   if (hashSettings.key && hashSettings.room) {
     encodedRoomKey = hashSettings.key;
@@ -453,11 +545,17 @@ export function setupWsCollaboration(
       .then((key) => {
         roomKey = key;
         roomKeyRoom = hashRoom ?? "";
+        log("link-key-imported", { room: hashRoom });
       })
-      .catch((error) => setStatus("disconnected", error instanceof Error ? error.message : String(error)));
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        log("link-key-error", message);
+        setStatus("disconnected", message);
+      });
   }
   setStatus("disconnected", "Disconnected");
   if (hashSettings.key && hashRoom) {
+    log("auto-connect", { room: hashRoom });
     void connect(elements.urlInput.value, hashRoom);
   }
 
@@ -469,7 +567,17 @@ export function setupWsCollaboration(
       if (handlers.localRevision() === lastPublishedRevision) {
         return;
       }
-      void publishSnapshot();
+      if (publishTimer !== undefined) {
+        return;
+      }
+      log("publish-scheduled", {
+        localRevision: handlers.localRevision(),
+        lastPublishedRevision,
+      });
+      publishTimer = window.setTimeout(() => {
+        publishTimer = undefined;
+        void publishSnapshot();
+      }, 120);
     },
   };
 }

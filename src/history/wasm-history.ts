@@ -25,15 +25,18 @@ export function createWasmHistory(
   options: WasmHistoryOptions,
 ) {
   let applying = false;
+  let active = false;
 
   const begin = () => {
     if (!applying) {
+      active = true;
       wasm.blitz_history_begin();
     }
   };
 
   const cancel = () => {
     if (!applying) {
+      active = false;
       wasm.blitz_history_cancel();
     }
   };
@@ -43,6 +46,7 @@ export function createWasmHistory(
       return;
     }
     wasm.blitz_history_commit();
+    active = false;
     options.onChanged?.();
   };
 
@@ -92,6 +96,7 @@ export function createWasmHistory(
     canRedo: () => wasm.blitz_history_can_redo() === 1,
     canUndo: () => wasm.blitz_history_can_undo() === 1,
     commit,
+    isActive: () => active,
     redo,
     reset,
     stateId: () => wasm.blitz_history_state_id(),

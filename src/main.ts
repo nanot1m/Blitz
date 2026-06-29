@@ -2466,6 +2466,7 @@ async function boot() {
       disconnectButton: ui.disconnectCollaborationButton,
       status: ui.collaborationStatus,
       peerId: ui.collaborationPeerId,
+      debugLog: ui.collaborationDebugLog,
     },
     {
       actorId,
@@ -2681,6 +2682,9 @@ async function boot() {
   const render = () => {
     resize();
     sceneFileStorage.syncDirtyState();
+    if (!applyingRemoteCollaboration && !sceneHistory.isActive()) {
+      collaborationController?.publishLocalChange();
+    }
     updateEmptyState();
     const now = performance.now();
     if (lastFrameStamp) {

@@ -578,7 +578,12 @@ export function createCanvasMcpAdapter(wasm: BlitzMcpExports, options: CanvasAda
       const deleted = wasm.blitz_selected_count();
       if (wasm.blitz_has_selection() !== 0) {
         options.stopDragging();
-        wasm.blitz_delete_selected();
+        options.beginHistory();
+        try {
+          wasm.blitz_delete_selected();
+        } finally {
+          options.commitHistory();
+        }
         options.updateSelectionState();
       }
       return { deleted, ...getState() };

@@ -67,7 +67,7 @@ export type CollaborationController = {
 
 const URL_STORAGE_KEY = "blitz.collaboration.url";
 const ROOM_STORAGE_KEY = "blitz.collaboration.room";
-const DEFAULT_URL = "ws://127.0.0.1:8790";
+const DEFAULT_URL = "wss://62-238-2-245.sslip.io";
 const MAX_SCENE_BYTES = 16 * 1024 * 1024;
 
 function base64Url(bytes: Uint8Array): string {

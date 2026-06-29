@@ -316,5 +316,48 @@ check("redo of the in-container move stays fast", (() => {
   return performance.now() - t < 500;
 })());
 
+// --- 13. Deleting a container: undo re-attaches children + restores z-order --
+console.log("container delete -> undo restores children + z-order");
+wasm.blitz_init();
+wasm.blitz_set_actor_id(1, 1);
+wasm.blitz_resize(1920, 1080);
+wasm.blitz_set_camera(960, 540, 1);
+const rows = () => {
+  const n = wasm.blitz_query_scene(-1e9, -1e9, 1e9, 1e9, 100);
+  const v = new DataView(wasm.memory.buffer, wasm.blitz_scene_query_ptr(), n * ITEM);
+  const out = [];
+  for (let i = 0; i < n; i += 1) {
+    const o = i * ITEM;
+    out.push({
+      kind: v.getUint32(o + 16, true),
+      order: v.getUint32(o + 20, true),
+      x: v.getFloat32(o + 40, true),
+      parentSeq: v.getUint32(o + 124, true),
+    });
+  }
+  return out;
+};
+wasm.blitz_create_frame(0, 0, 500, 500, 0.9, 0.9, 0.9, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 18, 0);
+let q = wasm.blitz_query_scene(-1e9, -1e9, 1e9, 1e9, 5);
+let qv = new DataView(wasm.memory.buffer, wasm.blitz_scene_query_ptr(), q * ITEM);
+const frameId = [qv.getUint32(0, true), qv.getUint32(4, true), qv.getUint32(8, true), qv.getUint32(12, true)];
+const containerSeq = frameId[3];
+for (let i = 0; i < 3; i += 1) wasm.blitz_create_rect(50 + i * 30, 50, 8, 8, 1, 0, 0, 1, 0, 0, 0, 1, 1);
+wasm.blitz_create_rect(600, 600, 20, 20, 0, 1, 0, 1, 0, 0, 0, 1, 1); // top-level, above the frame
+const before = rows();
+const childCountBefore = before.filter((r) => r.parentSeq === containerSeq).length;
+const frameOrderBefore = before.find((r) => r.kind === 4).order;
+wasm.blitz_history_reset();
+wasm.blitz_clear_selection();
+wasm.blitz_select_object(frameId[0], frameId[1], frameId[2], frameId[3], 0);
+wasm.blitz_delete_selected();
+check("deleting the container removed it", rows().every((r) => r.kind !== 4));
+wasm.blitz_history_undo();
+const after = rows();
+const frame = after.find((r) => r.kind === 4);
+check("undo brings the container back", frame !== undefined);
+check("undo re-attaches the children", after.filter((r) => r.parentSeq === containerSeq).length === childCountBefore && childCountBefore === 3);
+check("undo restores the container's z-order", frame && frame.order === frameOrderBefore);
+
 console.log(failures === 0 ? "\nWASM history test passed." : `\n${failures} failure(s).`);
 process.exit(failures === 0 ? 0 : 1);

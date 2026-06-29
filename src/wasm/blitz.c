@@ -795,11 +795,12 @@ typedef struct {
   unsigned char *bytes;  // before+after record blobs; entry offsets index here
   u32 byte_count;
   u32 epoch;  // unique state id, for dirty tracking
-  // Draw-order (z-order) snapshots, present only when the transaction reordered;
-  // entity-index sequences restored as a permutation of the live set.
-  u32 *order_before;
+  // Draw-order (z-order) snapshots, present only when the transaction reordered
+  // or deleted. Stored as object_ids (not indices) so they survive the index
+  // reuse that a delete/undo causes; restored as a permutation of the live set.
+  ObjectId *order_before;
   u32 order_before_count;
-  u32 *order_after;
+  ObjectId *order_after;
   u32 order_after_count;
 } HistoryTransaction;
 
@@ -828,12 +829,16 @@ static u32 history_scratch_byte_cap;
 // in-transaction parents in O(1) instead of scanning the whole world.
 static u32 *history_apply_map;
 static u32 history_apply_map_cap;
-// Pre-mutation draw_order snapshot for the open transaction, taken lazily the
-// first time a reorder happens so non-reordering edits pay nothing.
-static u32 *history_order_scratch;
+// Pre-mutation draw_order snapshot for the open transaction (object_ids), taken
+// lazily the first time a reorder/delete happens so other edits pay nothing.
+static ObjectId *history_order_scratch;
 static u32 history_order_scratch_cap;
 static u32 history_order_before_count;
 static u32 history_order_dirty;
+// id->entity table over all live entities, used to rebuild draw_order from an
+// object_id snapshot in O(n) instead of a scan per entry.
+static u32 *history_order_map;
+static u32 history_order_map_cap;
 
 static void ecs_storage_init(void) {
   // blitz_init resets the whole heap, releasing every demand block wholesale,
@@ -911,6 +916,8 @@ static void ecs_storage_init(void) {
   history_order_scratch_cap = 0u;
   history_order_before_count = 0u;
   history_order_dirty = 0u;
+  history_order_map = 0;
+  history_order_map_cap = 0u;
 }
 
 // Reserve room for one more entry in the dynamic stream before a push: grow the
@@ -1526,8 +1533,8 @@ static void history_record_order_before(void) {
     while (next < world.draw_order_count) {
       next *= 2u;
     }
-    u32 *grown = (u32 *)blitz_realloc(history_order_scratch, 0,
-                                      (usize)next * 4u);
+    ObjectId *grown = (ObjectId *)blitz_realloc(
+        history_order_scratch, 0, (usize)next * sizeof(ObjectId));
     if (!grown) {
       return;
     }
@@ -1535,7 +1542,7 @@ static void history_record_order_before(void) {
     history_order_scratch_cap = next;
   }
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
-    history_order_scratch[i] = world.draw_order[i];
+    history_order_scratch[i] = world.object_ids[world.draw_order[i]];
   }
   history_order_before_count = world.draw_order_count;
   history_order_dirty = 1u;
@@ -1596,7 +1603,8 @@ static void history_free_transaction(HistoryTransaction *txn) {
 // draw-order snapshots (which carry no record bytes but can be large).
 static u32 history_txn_bytes(const HistoryTransaction *txn) {
   return txn->byte_count +
-         (txn->order_before_count + txn->order_after_count) * 4u;
+         (txn->order_before_count + txn->order_after_count) *
+             (u32)sizeof(ObjectId);
 }
 
 static void history_clear_redo(void) {
@@ -1761,7 +1769,8 @@ static void history_commit(void) {
   if (history_order_dirty) {
     u32 changed = history_order_before_count != world.draw_order_count;
     for (u32 i = 0u; !changed && i < world.draw_order_count; i += 1u) {
-      changed = history_order_scratch[i] != world.draw_order[i];
+      changed = !object_id_equal(history_order_scratch[i],
+                                 world.object_ids[world.draw_order[i]]);
     }
     if (!changed) {
       history_order_dirty = 0u;
@@ -1788,9 +1797,10 @@ static void history_commit(void) {
   if (history_order_dirty) {
     txn.order_before_count = history_order_before_count;
     txn.order_after_count = world.draw_order_count;
-    txn.order_before =
-        (u32 *)blitz_alloc((usize)history_order_before_count * 4u);
-    txn.order_after = (u32 *)blitz_alloc((usize)world.draw_order_count * 4u);
+    txn.order_before = (ObjectId *)blitz_alloc(
+        (usize)history_order_before_count * sizeof(ObjectId));
+    txn.order_after = (ObjectId *)blitz_alloc((usize)world.draw_order_count *
+                                              sizeof(ObjectId));
     if (!txn.order_before || !txn.order_after) {
       history_free_transaction(&txn);
       history_scratch_reset();
@@ -1800,7 +1810,7 @@ static void history_commit(void) {
       txn.order_before[i] = history_order_scratch[i];
     }
     for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
-      txn.order_after[i] = world.draw_order[i];
+      txn.order_after[i] = world.object_ids[world.draw_order[i]];
     }
   }
   txn.entry_count = keep_entries;
@@ -1946,15 +1956,69 @@ static u32 history_apply_map_lookup(HistoryTransaction *txn, ObjectId id) {
 // and any live entity missing from the snapshot is appended, so the result is
 // always a valid permutation of the live set even if entities were created or
 // deleted since the snapshot was taken.
-static void history_restore_draw_order(const u32 *order, u32 count) {
+// Populate history_order_map with id->entity for every live entity. Returns 0
+// if the scratch table can't grow.
+static u32 history_order_map_build(void) {
+  u32 needed = 16u;
+  while (needed < (live_count + 1u) * 2u) {
+    needed *= 2u;
+  }
+  if (needed > history_order_map_cap) {
+    u32 *grown = (u32 *)blitz_realloc(history_order_map, 0, (usize)needed * 4u);
+    if (!grown) {
+      return 0u;
+    }
+    history_order_map = grown;
+    history_order_map_cap = needed;
+  }
+  for (u32 i = 0u; i < history_order_map_cap; i += 1u) {
+    history_order_map[i] = BLITZ_INVALID_INDEX;
+  }
+  u32 mask = history_order_map_cap - 1u;
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.masks[entity] == 0u) {
+      continue;
+    }
+    u32 slot = history_apply_map_hash(world.object_ids[entity]) & mask;
+    while (history_order_map[slot] != BLITZ_INVALID_INDEX) {
+      slot = (slot + 1u) & mask;
+    }
+    history_order_map[slot] = entity;
+  }
+  return 1u;
+}
+
+static u32 history_order_map_lookup(ObjectId id) {
+  if (history_order_map_cap == 0u) {
+    return BLITZ_INVALID_INDEX;
+  }
+  u32 mask = history_order_map_cap - 1u;
+  u32 slot = history_apply_map_hash(id) & mask;
+  while (history_order_map[slot] != BLITZ_INVALID_INDEX) {
+    u32 entity = history_order_map[slot];
+    if (object_id_equal(world.object_ids[entity], id)) {
+      return entity;
+    }
+    slot = (slot + 1u) & mask;
+  }
+  return BLITZ_INVALID_INDEX;
+}
+
+// Rebuild draw_order from an object_id snapshot. Ids are resolved to current
+// entities (which may have new indices after a delete/undo); anything no longer
+// live is dropped and any live entity absent from the snapshot is appended, so
+// the result is a valid permutation of the live set.
+static void history_restore_draw_order(const ObjectId *order, u32 count) {
+  if (!history_order_map_build()) {
+    return;
+  }
   for (u32 i = 0u; i < world.entity_count; i += 1u) {
     draw_order_seen[i] = 0u;
   }
   u32 out = 0u;
   for (u32 i = 0u; i < count; i += 1u) {
-    u32 entity = order[i];
-    if (entity < world.entity_count && world.masks[entity] != 0u &&
-        !draw_order_seen[entity]) {
+    u32 entity = history_order_map_lookup(order[i]);
+    if (entity != BLITZ_INVALID_INDEX && !draw_order_seen[entity]) {
       draw_order_seen[entity] = 1u;
       world.draw_order[out] = entity;
       out += 1u;
@@ -6300,11 +6364,22 @@ void blitz_delete_selected(void) {
     return;
   }
   u32 history_owned = history_begin_owned();
+  // Snapshot z-order so undo can put restored objects back where they were.
+  history_record_order_before();
   u32 kept = 0u;
   for (u32 index = 0u; index < world.draw_order_count; index += 1u) {
     u32 entity = world.draw_order[index];
     if (world.selected[entity]) {
       history_record_deleted(entity);
+      // cleanup detaches this entity's children (they survive). Record the ones
+      // that aren't themselves being deleted so undo re-attaches them to the
+      // restored container; a selected child is captured by its own delete.
+      for (u32 child = world.first_child[entity]; child != BLITZ_INVALID_INDEX;
+           child = world.next_sibling[child]) {
+        if (!world.selected[child]) {
+          history_record_before(child);
+        }
+      }
       cleanup_entity_hierarchy(entity);
       release_entity_resources(entity);
       world.masks[entity] = 0u;

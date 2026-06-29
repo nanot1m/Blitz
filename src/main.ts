@@ -12,7 +12,7 @@ import cullSource from "./shaders/cull.wgsl?raw";
 import backgroundSource from "./shaders/background.wgsl?raw";
 import { setupSceneFileStorage } from "./storage/scene-file";
 import { getOrCreateActorId } from "./storage/actor-id";
-import { createSceneHistory } from "./history/scene-history";
+import { createWasmHistory } from "./history/wasm-history";
 import { createBlitzUi } from "./ui";
 import "./style.css";
 type BlitzExports = {
@@ -220,6 +220,15 @@ type BlitzExports = {
   blitz_capture_start_viewpoint(): void;
   blitz_scene_serialize(): number;
   blitz_scene_deserialize(byteCount: number): number;
+  blitz_history_begin(): void;
+  blitz_history_commit(): void;
+  blitz_history_cancel(): void;
+  blitz_history_reset(): void;
+  blitz_history_undo(): number;
+  blitz_history_redo(): number;
+  blitz_history_can_undo(): number;
+  blitz_history_can_redo(): number;
+  blitz_history_state_id(): number;
   blitz_stress_test(): void;
   blitz_clear_selection(): void;
   blitz_select_object(
@@ -2085,7 +2094,7 @@ async function boot() {
     updateEmptyState();
   };
   let stopDragging = () => {};
-  const sceneHistory = createSceneHistory(wasm, {
+  const sceneHistory = createWasmHistory(wasm, {
     onApplied() {
       closeTextEditor();
       stopDragging();

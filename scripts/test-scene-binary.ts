@@ -158,8 +158,8 @@ wasm.blitz_clear_scene();
 wasm.blitz_resize(1000, 1000);
 wasm.blitz_set_camera(0, 0, 1);
 wasm.blitz_create_rect(-100, -50, 200, 100, 0.2, 0.4, 0.8, 1, 0.1, 0.2, 0.3, 1, 2);
-if (wasm.blitz_selected_style_kind() !== 1) {
-  throw new Error("A selected rectangle did not expose geometric styles.");
+if (wasm.blitz_selected_style_kind() !== 5) {
+  throw new Error("A selected rectangle did not expose geometric + stroke styles.");
 }
 wasm.blitz_set_selected_fill(0.9, 0.1, 0.2);
 wasm.blitz_set_selected_fill_opacity(0.4);
@@ -237,8 +237,8 @@ wasm.blitz_create_frame(
   22,
   frameTitleLength,
 );
-if (wasm.blitz_selected_style_kind() !== 3) {
-  throw new Error("A selected frame did not expose both geometric and title text styles.");
+if (wasm.blitz_selected_style_kind() !== 7) {
+  throw new Error("A selected frame did not expose geometric, stroke, and title text styles.");
 }
 if (wasm.blitz_selected_container_state() !== 2) {
   throw new Error("A new frame should default to a container.");
@@ -413,7 +413,7 @@ writePathInput([
   { x: 570, y: 530 },
   { x: 570, y: 570 },
 ]);
-wasm.blitz_create_path(3, 0.08, 0.1, 0.13, 1, 0.08, 0.1, 0.13, 0, 4);
+wasm.blitz_create_path(3, 0.08, 0.1, 0.13, 1, 4);
 const creationAttachPathId = readLastCreatedObjectId();
 let creationAttachedRect = querySceneItemByObjectId(creationAttachRectId);
 let creationAttachedPath = querySceneItemByObjectId(creationAttachPathId);
@@ -622,7 +622,7 @@ writePathInput([
   { x: 560, y: 500 },
   { x: 560, y: 540 },
 ]);
-wasm.blitz_create_path(3, 0.08, 0.1, 0.13, 0.9, 0.08, 0.1, 0.13, 0, 5);
+wasm.blitz_create_path(3, 0.08, 0.1, 0.13, 0.9, 5);
 const pathRoundTripId = readLastCreatedObjectId();
 if (wasm.blitz_selected_style_kind() !== 1) {
   throw new Error("A selected path did not expose geometric styles.");
@@ -653,8 +653,8 @@ if (wasm.blitz_selected_count() !== originalEntities) {
 if (wasm.blitz_scene_revision() !== revisionBeforeSelectAll) {
   throw new Error("Select all should not mark the scene as modified.");
 }
-if (wasm.blitz_selected_style_kind() !== 3) {
-  throw new Error("Mixed selection did not expose geometry and text style capabilities.");
+if (wasm.blitz_selected_style_kind() !== 7) {
+  throw new Error("Mixed selection did not expose geometry, stroke, and text style capabilities.");
 }
 wasm.blitz_set_selected_fill(0.15, 0.25, 0.35);
 wasm.blitz_set_selected_text_color(0.7, 0.6, 0.5);

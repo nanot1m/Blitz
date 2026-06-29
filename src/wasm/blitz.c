@@ -776,6 +776,53 @@ static int ecs_storage_reserve(u32 count) {
   return 1;
 }
 
+// --- History state ---------------------------------------------------------
+// Declared here (ahead of ecs_storage_init) so the heap reset can drop the
+// stacks and scratch; the engine itself lives further down.
+#define BLITZ_HISTORY_MAX_STEPS 64u
+#define BLITZ_HISTORY_MAX_BYTES (256u * 1024u * 1024u)
+
+typedef struct {
+  ObjectId id;
+  u32 entity;  // last-known index; an O(1) hint so apply avoids a per-entry scan
+  u32 before_offset;  // BLITZ_INVALID_INDEX when absent (a create)
+  u32 after_offset;   // BLITZ_INVALID_INDEX when absent (a delete)
+} HistoryEntry;
+
+typedef struct {
+  HistoryEntry *entries;
+  u32 entry_count;
+  unsigned char *bytes;  // before+after record blobs; entry offsets index here
+  u32 byte_count;
+  u32 epoch;  // unique state id, for dirty tracking
+} HistoryTransaction;
+
+typedef struct {
+  ObjectId id;
+  u32 entity;  // index recorded at capture time; verified live before after-capture
+  u32 before_offset;  // into history_scratch_bytes, or BLITZ_INVALID_INDEX
+  u32 after_offset;
+} HistoryScratchEntry;
+
+static HistoryTransaction history_undo_stack[BLITZ_HISTORY_MAX_STEPS];
+static HistoryTransaction history_redo_stack[BLITZ_HISTORY_MAX_STEPS];
+static u32 history_undo_count;
+static u32 history_redo_count;
+static u32 history_total_bytes;
+static u32 history_epoch_counter;
+static u32 history_transaction_active;
+static u32 history_replaying;
+static HistoryScratchEntry *history_scratch_entries;
+static u32 history_scratch_entry_count;
+static u32 history_scratch_entry_cap;
+static unsigned char *history_scratch_bytes;
+static u32 history_scratch_byte_count;
+static u32 history_scratch_byte_cap;
+// Per-apply id->entry index map, so parent relink during a bulk undo resolves
+// in-transaction parents in O(1) instead of scanning the whole world.
+static u32 *history_apply_map;
+static u32 history_apply_map_cap;
+
 static void ecs_storage_init(void) {
   // blitz_init resets the whole heap, releasing every demand block wholesale,
   // so all heap-backed pointers must be cleared here.
@@ -832,6 +879,22 @@ static void ecs_storage_init(void) {
   internal_clipboard_sources = 0;
   marquee_base_selected = 0;
   free_slots = 0;
+  // The heap reset above invalidates every history allocation; drop the stacks
+  // and scratch without freeing (those pointers are already gone).
+  history_undo_count = 0u;
+  history_redo_count = 0u;
+  history_total_bytes = 0u;
+  history_epoch_counter = 0u;
+  history_transaction_active = 0u;
+  history_replaying = 0u;
+  history_scratch_entries = 0;
+  history_scratch_entry_count = 0u;
+  history_scratch_entry_cap = 0u;
+  history_scratch_bytes = 0;
+  history_scratch_byte_count = 0u;
+  history_scratch_byte_cap = 0u;
+  history_apply_map = 0;
+  history_apply_map_cap = 0u;
 }
 
 // Reserve room for one more entry in the dynamic stream before a push: grow the
@@ -863,7 +926,6 @@ static u32 object_id_actor_lo;
 static u32 next_object_id_sequence_hi;
 static u32 next_object_id_sequence_lo;
 static ObjectId last_created_object_id;
-static u32 history_transaction_active;
 
 static void clear_selection(void);
 static void extract_static_shapes(void);
@@ -1354,39 +1416,493 @@ static void world_update_for_frame(void) {
 }
 
 // --- History (undo/redo) ---------------------------------------------------
-static void history_reset_internal(void) {
-  history_transaction_active = 0u;
-}
+// Delta-based: a transaction records the BEFORE and AFTER V8 record of every
+// entity it touches. Undo restores BEFORE (re-creating deletes, removing
+// creates); redo restores AFTER. Records are keyed by object_id, so entity-slot
+// reuse and parent links survive a round-trip. Budget: BLITZ_HISTORY_MAX_STEPS
+// steps and BLITZ_HISTORY_MAX_BYTES of record payload, oldest evicted first.
+// A transaction is assumed to be one logical op: it never both creates and
+// modifies the same entity, so scratch entries are appended without dedup
+// (keeping record capture linear even for whole-selection transforms).
+// Transaction/scratch types and state are declared ahead of ecs_storage_init so
+// the heap reset there can drop them; see the "History state" block above.
 
-static void history_begin(void) {
-  history_transaction_active = 0u;
-}
+static u32 capture_entity_record(unsigned char *buf, u32 offset, u32 entity);
+static u32 apply_entity_record_into(const unsigned char *buf, u32 offset,
+                                    u32 entity);
+static void apply_record_parent(const unsigned char *buf, u32 offset, u32 child,
+                                u32 parent);
 
-static u32 history_begin_owned(void) {
+static u32 history_entity_payload_bytes(u32 entity) {
+  u32 mask = world.masks[entity];
+  if (mask & BLITZ_COMPONENT_PATH_VIEW) {
+    return world.path_views[entity].point_count * 8u;
+  }
+  if ((mask & BLITZ_COMPONENT_RECT_VIEW) && (mask & BLITZ_COMPONENT_FRAME_VIEW)) {
+    const char *title = world.frame_views[entity].title;
+    return align4(title ? string_length(title) : 0u);
+  }
+  if (mask & BLITZ_COMPONENT_TEXT_VIEW) {
+    const char *text = world.text_views[entity].text;
+    return align4(text ? string_length(text) : 0u);
+  }
   return 0u;
 }
 
+static u32 history_scratch_reserve_bytes(u32 needed) {
+  if (history_scratch_byte_count + needed <= history_scratch_byte_cap) {
+    return 1u;
+  }
+  u32 next = history_scratch_byte_cap ? history_scratch_byte_cap : 65536u;
+  while (next < history_scratch_byte_count + needed) {
+    next *= 2u;
+  }
+  unsigned char *grown = (unsigned char *)blitz_realloc(
+      history_scratch_bytes, history_scratch_byte_count, next);
+  if (!grown) {
+    return 0u;
+  }
+  history_scratch_bytes = grown;
+  history_scratch_byte_cap = next;
+  return 1u;
+}
+
+static u32 history_scratch_reserve_entries(u32 needed) {
+  if (history_scratch_entry_count + needed <= history_scratch_entry_cap) {
+    return 1u;
+  }
+  u32 next = history_scratch_entry_cap ? history_scratch_entry_cap : 256u;
+  while (next < history_scratch_entry_count + needed) {
+    next *= 2u;
+  }
+  HistoryScratchEntry *grown = (HistoryScratchEntry *)blitz_realloc(
+      history_scratch_entries,
+      (usize)history_scratch_entry_count * sizeof(HistoryScratchEntry),
+      (usize)next * sizeof(HistoryScratchEntry));
+  if (!grown) {
+    return 0u;
+  }
+  history_scratch_entries = grown;
+  history_scratch_entry_cap = next;
+  return 1u;
+}
+
+static void history_scratch_reset(void) {
+  history_scratch_entry_count = 0u;
+  history_scratch_byte_count = 0u;
+}
+
+static void history_txn_begin(void) {
+  history_scratch_reset();
+  history_transaction_active = 1u;
+}
+
+static void history_capture_before(u32 entity) {
+  if (history_replaying || !history_scratch_reserve_entries(1u)) {
+    return;
+  }
+  u32 max_record =
+      BLITZ_SCENE_FILE_V8_RECORD_BYTES + history_entity_payload_bytes(entity);
+  if (!history_scratch_reserve_bytes(max_record)) {
+    return;
+  }
+  u32 offset = history_scratch_byte_count;
+  u32 written = capture_entity_record(history_scratch_bytes, offset, entity);
+  if (written == 0u) {
+    return;
+  }
+  history_scratch_byte_count += written;
+  HistoryScratchEntry *e =
+      &history_scratch_entries[history_scratch_entry_count++];
+  e->id = world.object_ids[entity];
+  e->entity = entity;
+  e->before_offset = offset;
+  e->after_offset = BLITZ_INVALID_INDEX;
+}
+
+static void history_free_transaction(HistoryTransaction *txn) {
+  if (txn->entries) {
+    blitz_free(txn->entries);
+  }
+  if (txn->bytes) {
+    blitz_free(txn->bytes);
+  }
+  txn->entries = 0;
+  txn->bytes = 0;
+  txn->entry_count = 0u;
+  txn->byte_count = 0u;
+}
+
+static void history_clear_redo(void) {
+  for (u32 i = 0u; i < history_redo_count; i += 1u) {
+    history_total_bytes -= history_redo_stack[i].byte_count;
+    history_free_transaction(&history_redo_stack[i]);
+  }
+  history_redo_count = 0u;
+}
+
+static void history_pop_oldest(HistoryTransaction *stack, u32 *count) {
+  history_total_bytes -= stack[0].byte_count;
+  history_free_transaction(&stack[0]);
+  for (u32 i = 1u; i < *count; i += 1u) {
+    stack[i - 1u] = stack[i];
+  }
+  *count -= 1u;
+}
+
+static u32 history_records_equal(u32 off_a, u32 off_b) {
+  u32 size_a = read_u32(history_scratch_bytes, off_a + 4u);
+  u32 size_b = read_u32(history_scratch_bytes, off_b + 4u);
+  if (size_a != size_b) {
+    return 0u;
+  }
+  for (u32 i = 0u; i < size_a; i += 1u) {
+    if (history_scratch_bytes[off_a + i] != history_scratch_bytes[off_b + i]) {
+      return 0u;
+    }
+  }
+  return 1u;
+}
+
+static u32 history_entry_kept(const HistoryScratchEntry *e) {
+  u32 has_before = e->before_offset != BLITZ_INVALID_INDEX;
+  u32 has_after = e->after_offset != BLITZ_INVALID_INDEX;
+  if (!has_before && !has_after) {
+    return 0u;
+  }
+  if (has_before && has_after &&
+      history_records_equal(e->before_offset, e->after_offset)) {
+    return 0u;
+  }
+  return 1u;
+}
+
+static void history_reset_internal(void) {
+  history_transaction_active = 0u;
+  history_scratch_reset();
+  history_clear_redo();
+  for (u32 i = 0u; i < history_undo_count; i += 1u) {
+    history_total_bytes -= history_undo_stack[i].byte_count;
+    history_free_transaction(&history_undo_stack[i]);
+  }
+  history_undo_count = 0u;
+}
+
+static void history_begin(void) {
+  history_txn_begin();
+}
+
+static u32 history_begin_owned(void) {
+  if (history_transaction_active) {
+    return 0u;
+  }
+  history_txn_begin();
+  return 1u;
+}
+
 static void history_record_before(u32 entity) {
-  (void)entity;
+  if (!history_transaction_active) {
+    history_txn_begin();
+  }
+  history_capture_before(entity);
 }
 
 static void history_record_created(u32 entity) {
-  (void)entity;
+  if (!history_transaction_active || history_replaying ||
+      !history_scratch_reserve_entries(1u)) {
+    return;
+  }
+  HistoryScratchEntry *e =
+      &history_scratch_entries[history_scratch_entry_count++];
+  e->id = world.object_ids[entity];
+  e->entity = entity;
+  e->before_offset = BLITZ_INVALID_INDEX;
+  e->after_offset = BLITZ_INVALID_INDEX;
 }
 
 static void history_record_deleted(u32 entity) {
-  (void)entity;
+  if (!history_transaction_active) {
+    history_txn_begin();
+  }
+  history_capture_before(entity);
 }
 
 static void history_record_selected_before(void) {
+  if (!history_transaction_active) {
+    history_txn_begin();
+  }
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.selected[entity]) {
+      history_capture_before(entity);
+    }
+  }
 }
 
 static void history_commit(void) {
+  if (!history_transaction_active) {
+    return;
+  }
   history_transaction_active = 0u;
+  if (history_replaying) {
+    history_scratch_reset();
+    return;
+  }
+
+  for (u32 i = 0u; i < history_scratch_entry_count; i += 1u) {
+    HistoryScratchEntry *e = &history_scratch_entries[i];
+    // The capture-time index is reused directly; if the slot was freed or
+    // recycled (e.g. the entity was deleted in this transaction), the object_id
+    // no longer matches and there is no after-state to record.
+    u32 entity = e->entity;
+    if (entity >= world.entity_count || world.masks[entity] == 0u ||
+        !object_id_equal(world.object_ids[entity], e->id)) {
+      e->after_offset = BLITZ_INVALID_INDEX;
+      continue;
+    }
+    u32 max_record =
+        BLITZ_SCENE_FILE_V8_RECORD_BYTES + history_entity_payload_bytes(entity);
+    if (!history_scratch_reserve_bytes(max_record)) {
+      e->after_offset = BLITZ_INVALID_INDEX;
+      continue;
+    }
+    u32 offset = history_scratch_byte_count;
+    u32 written = capture_entity_record(history_scratch_bytes, offset, entity);
+    if (written == 0u) {
+      e->after_offset = BLITZ_INVALID_INDEX;
+      continue;
+    }
+    history_scratch_byte_count += written;
+    e->after_offset = offset;
+  }
+
+  u32 keep_entries = 0u;
+  u32 keep_bytes = 0u;
+  for (u32 i = 0u; i < history_scratch_entry_count; i += 1u) {
+    HistoryScratchEntry *e = &history_scratch_entries[i];
+    if (!history_entry_kept(e)) {
+      continue;
+    }
+    keep_entries += 1u;
+    if (e->before_offset != BLITZ_INVALID_INDEX) {
+      keep_bytes += read_u32(history_scratch_bytes, e->before_offset + 4u);
+    }
+    if (e->after_offset != BLITZ_INVALID_INDEX) {
+      keep_bytes += read_u32(history_scratch_bytes, e->after_offset + 4u);
+    }
+  }
+  if (keep_entries == 0u) {
+    history_scratch_reset();
+    return;
+  }
+
+  HistoryTransaction txn;
+  txn.entries =
+      (HistoryEntry *)blitz_alloc((usize)keep_entries * sizeof(HistoryEntry));
+  txn.bytes = (unsigned char *)blitz_alloc(keep_bytes);
+  if (!txn.entries || !txn.bytes) {
+    if (txn.entries) {
+      blitz_free(txn.entries);
+    }
+    if (txn.bytes) {
+      blitz_free(txn.bytes);
+    }
+    history_scratch_reset();
+    return;
+  }
+  txn.entry_count = keep_entries;
+  txn.byte_count = keep_bytes;
+  u32 write_pos = 0u;
+  u32 out_index = 0u;
+  for (u32 i = 0u; i < history_scratch_entry_count; i += 1u) {
+    HistoryScratchEntry *e = &history_scratch_entries[i];
+    if (!history_entry_kept(e)) {
+      continue;
+    }
+    HistoryEntry *out = &txn.entries[out_index++];
+    out->id = e->id;
+    out->entity = e->entity;
+    if (e->before_offset != BLITZ_INVALID_INDEX) {
+      u32 size = read_u32(history_scratch_bytes, e->before_offset + 4u);
+      copy_bytes(txn.bytes + write_pos,
+                 history_scratch_bytes + e->before_offset, size);
+      out->before_offset = write_pos;
+      write_pos += size;
+    } else {
+      out->before_offset = BLITZ_INVALID_INDEX;
+    }
+    if (e->after_offset != BLITZ_INVALID_INDEX) {
+      u32 size = read_u32(history_scratch_bytes, e->after_offset + 4u);
+      copy_bytes(txn.bytes + write_pos,
+                 history_scratch_bytes + e->after_offset, size);
+      out->after_offset = write_pos;
+      write_pos += size;
+    } else {
+      out->after_offset = BLITZ_INVALID_INDEX;
+    }
+  }
+
+  history_epoch_counter += 1u;
+  txn.epoch = history_epoch_counter;
+  history_clear_redo();
+  if (history_undo_count == BLITZ_HISTORY_MAX_STEPS) {
+    history_pop_oldest(history_undo_stack, &history_undo_count);
+  }
+  history_undo_stack[history_undo_count++] = txn;
+  history_total_bytes += txn.byte_count;
+  while (history_total_bytes > BLITZ_HISTORY_MAX_BYTES &&
+         history_undo_count > 1u) {
+    history_pop_oldest(history_undo_stack, &history_undo_count);
+  }
+  history_scratch_reset();
 }
 
 static void history_cancel(void) {
   history_transaction_active = 0u;
+  history_scratch_reset();
+}
+
+// Tear down an entity without touching draw_order; the caller compacts the
+// draw order once for the whole batch (a per-entity removal would be O(n) each,
+// O(n^2) over a bulk undo).
+static void history_release_entity(u32 entity) {
+  cleanup_entity_hierarchy(entity);
+  release_entity_resources(entity);
+  world.masks[entity] = 0u;
+  world.selected[entity] = 0u;
+  free_slots[free_count] = entity;
+  free_count += 1u;
+  live_count -= 1u;
+}
+
+static void history_compact_draw_order(void) {
+  u32 kept = 0u;
+  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
+    u32 entity = world.draw_order[i];
+    if (world.masks[entity] != 0u) {
+      world.draw_order[kept] = entity;
+      kept += 1u;
+    }
+  }
+  world.draw_order_count = kept;
+}
+
+// True when the entry's index hint still points at the same live entity.
+static u32 history_hint_valid(const HistoryEntry *e) {
+  return e->entity < world.entity_count && world.masks[e->entity] != 0u &&
+         object_id_equal(world.object_ids[e->entity], e->id);
+}
+
+static u32 history_apply_map_hash(ObjectId id) {
+  u32 h = id.actor_hi * 2654435761u;
+  h ^= id.actor_lo * 2246822519u;
+  h ^= id.sequence_hi * 3266489917u;
+  h ^= id.sequence_lo * 668265263u;
+  h ^= h >> 15;
+  return h;
+}
+
+// Build an id -> entry-index table over a transaction so parent relink resolves
+// in-transaction parents in O(1). Returns 0 if the scratch table can't grow.
+static u32 history_apply_map_build(HistoryTransaction *txn) {
+  u32 needed = 16u;
+  while (needed < txn->entry_count * 2u) {
+    needed *= 2u;
+  }
+  if (needed > history_apply_map_cap) {
+    u32 *grown = (u32 *)blitz_realloc(history_apply_map, 0, (usize)needed * 4u);
+    if (!grown) {
+      return 0u;
+    }
+    history_apply_map = grown;
+    history_apply_map_cap = needed;
+  }
+  // The table size for both insert and lookup is history_apply_map_cap, which
+  // only grows; clearing the whole capacity keeps that mask consistent.
+  for (u32 i = 0u; i < history_apply_map_cap; i += 1u) {
+    history_apply_map[i] = BLITZ_INVALID_INDEX;
+  }
+  u32 mask = history_apply_map_cap - 1u;
+  for (u32 i = 0u; i < txn->entry_count; i += 1u) {
+    u32 slot = history_apply_map_hash(txn->entries[i].id) & mask;
+    while (history_apply_map[slot] != BLITZ_INVALID_INDEX) {
+      slot = (slot + 1u) & mask;
+    }
+    history_apply_map[slot] = i;
+  }
+  return 1u;
+}
+
+static u32 history_apply_map_lookup(HistoryTransaction *txn, ObjectId id) {
+  if (history_apply_map_cap == 0u) {
+    return BLITZ_INVALID_INDEX;
+  }
+  u32 mask = history_apply_map_cap - 1u;
+  u32 slot = history_apply_map_hash(id) & mask;
+  while (history_apply_map[slot] != BLITZ_INVALID_INDEX) {
+    HistoryEntry *e = &txn->entries[history_apply_map[slot]];
+    if (object_id_equal(e->id, id)) {
+      return e->entity;
+    }
+    slot = (slot + 1u) & mask;
+  }
+  return BLITZ_INVALID_INDEX;
+}
+
+static void history_apply_transaction(HistoryTransaction *txn, u32 redo) {
+  history_replaying = 1u;
+  u32 destroyed_any = 0u;
+  // Pass 1: realize each entry's restored state. The transition is read from
+  // which side is present, so creates never look the entity up (the freed slot
+  // wouldn't be found anyway) and modify/delete reuse the O(1) index hint.
+  for (u32 i = 0u; i < txn->entry_count; i += 1u) {
+    HistoryEntry *e = &txn->entries[i];
+    u32 restore_offset = redo ? e->after_offset : e->before_offset;
+    u32 remove_offset = redo ? e->before_offset : e->after_offset;
+    if (restore_offset != BLITZ_INVALID_INDEX && remove_offset == BLITZ_INVALID_INDEX) {
+      u32 existing = history_hint_valid(e) ? e->entity : BLITZ_INVALID_INDEX;
+      e->entity = apply_entity_record_into(txn->bytes, restore_offset, existing);
+    } else if (restore_offset != BLITZ_INVALID_INDEX) {
+      u32 entity = history_hint_valid(e) ? e->entity : entity_for_object_id(e->id);
+      e->entity = apply_entity_record_into(txn->bytes, restore_offset, entity);
+    } else if (remove_offset != BLITZ_INVALID_INDEX) {
+      u32 entity = history_hint_valid(e) ? e->entity : entity_for_object_id(e->id);
+      if (entity != BLITZ_INVALID_INDEX) {
+        history_release_entity(entity);
+        destroyed_any = 1u;
+      }
+      e->entity = BLITZ_INVALID_INDEX;
+    }
+  }
+  if (destroyed_any) {
+    history_compact_draw_order();
+  }
+  // Pass 2: relink parents now that every entity exists. Child comes from the
+  // refreshed hint; the parent is resolved through the per-transaction map,
+  // falling back to a scan only for a parent outside this transaction.
+  u32 have_map = history_apply_map_build(txn);
+  for (u32 i = 0u; i < txn->entry_count; i += 1u) {
+    HistoryEntry *e = &txn->entries[i];
+    u32 restore_offset = redo ? e->after_offset : e->before_offset;
+    if (restore_offset == BLITZ_INVALID_INDEX || e->entity == BLITZ_INVALID_INDEX) {
+      continue;
+    }
+    ObjectId parent_id = {read_u32(txn->bytes, restore_offset + 112u),
+                          read_u32(txn->bytes, restore_offset + 116u),
+                          read_u32(txn->bytes, restore_offset + 120u),
+                          read_u32(txn->bytes, restore_offset + 124u)};
+    u32 parent = BLITZ_INVALID_INDEX;
+    if (!object_id_is_zero(parent_id)) {
+      parent = have_map ? history_apply_map_lookup(txn, parent_id)
+                        : BLITZ_INVALID_INDEX;
+      if (parent == BLITZ_INVALID_INDEX) {
+        parent = entity_for_object_id(parent_id);
+      }
+    }
+    apply_record_parent(txn->bytes, restore_offset, e->entity, parent);
+  }
+  history_replaying = 0u;
+  clear_selection();
+  mark_render_list_dirty();
 }
 
 static u32 ecs_create_entity(void) {
@@ -1570,6 +2086,261 @@ static void ecs_set_path_view(u32 entity, Vec2 *points, u32 point_count,
   world.path_views[entity].fill_color = fill_color;
   world.path_views[entity].stroke_width = stroke_width;
   world.masks[entity] |= BLITZ_COMPONENT_PATH_VIEW;
+}
+
+// --- History delta: per-entity capture / restore ---------------------------
+// Capture one entity into the V8 record layout at buf+offset; returns the
+// record size (0 if the entity has no serializable view). Mirrors the scene
+// serialize body so the bytes are interchangeable with apply_entity_record.
+static u32 capture_entity_record(unsigned char *buf, u32 offset, u32 entity) {
+  u32 mask = world.masks[entity];
+  u32 kind;
+  Color fill = {0.0f, 0.0f, 0.0f, 1.0f};
+  Color stroke = {0.0f, 0.0f, 0.0f, 0.0f};
+  float stroke_width = 0.0f, font_size = 0.0f, origin_x = 0.0f;
+  float baseline_offset = 0.0f, max_width = 0.0f, line_height = 0.0f;
+  u32 max_lines = 0u, align = 0u, text_length = 0u;
+  const char *text = 0;
+  if ((mask & BLITZ_COMPONENT_RECT_VIEW) && (mask & BLITZ_COMPONENT_FRAME_VIEW)) {
+    RectView r = world.rect_views[entity];
+    FrameView f = world.frame_views[entity];
+    kind = BLITZ_SHAPE_FRAME;
+    fill = r.fill_color;
+    stroke = r.stroke_color;
+    stroke_width = r.stroke_width;
+    font_size = f.title_font_size;
+    origin_x = f.title_color.r;
+    baseline_offset = f.title_color.g;
+    max_width = f.title_color.b;
+    line_height = f.title_color.a;
+    text = f.title;
+    text_length = text ? string_length(text) : 0u;
+  } else if (mask & BLITZ_COMPONENT_RECT_VIEW) {
+    RectView r = world.rect_views[entity];
+    kind = BLITZ_SHAPE_RECT;
+    fill = r.fill_color;
+    stroke = r.stroke_color;
+    stroke_width = r.stroke_width;
+  } else if (mask & BLITZ_COMPONENT_TRIANGLE_VIEW) {
+    TriangleView t = world.triangle_views[entity];
+    kind = BLITZ_SHAPE_TRIANGLE;
+    fill = t.fill_color;
+    stroke = t.stroke_color;
+    stroke_width = t.stroke_width;
+  } else if (mask & BLITZ_COMPONENT_OVAL_VIEW) {
+    OvalView o = world.oval_views[entity];
+    kind = BLITZ_SHAPE_OVAL;
+    fill = o.fill_color;
+    stroke = o.stroke_color;
+    stroke_width = o.stroke_width;
+  } else if (mask & BLITZ_COMPONENT_TEXT_VIEW) {
+    TextView v = world.text_views[entity];
+    kind = BLITZ_SHAPE_TEXT;
+    fill = v.color;
+    font_size = v.font_size;
+    origin_x = v.origin_x;
+    baseline_offset = v.baseline_offset;
+    max_width = v.max_width;
+    line_height = v.line_height;
+    max_lines = v.max_lines;
+    align = v.align;
+    text = v.text;
+    text_length = text ? string_length(text) : 0u;
+  } else if (mask & BLITZ_COMPONENT_PATH_VIEW) {
+    PathView v = world.path_views[entity];
+    kind = BLITZ_SHAPE_PATH;
+    fill = v.fill_color;
+    stroke_width = v.stroke_width;
+    text_length = v.point_count;
+  } else {
+    return 0u;
+  }
+
+  u32 payload = kind == BLITZ_SHAPE_PATH ? text_length * 8u : align4(text_length);
+  u32 record_bytes = BLITZ_SCENE_FILE_V8_RECORD_BYTES + payload;
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  ObjectId oid = world.object_ids[entity];
+  write_u32(buf, offset, kind);
+  write_u32(buf, offset + 4u, record_bytes);
+  write_u32(buf, offset + 8u, oid.sequence_lo);
+  write_u32(buf, offset + 12u, text_length);
+  write_f32(buf, offset + 16u, position.x);
+  write_f32(buf, offset + 20u, position.y);
+  write_f32(buf, offset + 24u, size.x);
+  write_f32(buf, offset + 28u, size.y);
+  write_f32(buf, offset + 32u, fill.r);
+  write_f32(buf, offset + 36u, fill.g);
+  write_f32(buf, offset + 40u, fill.b);
+  write_f32(buf, offset + 44u, fill.a);
+  write_f32(buf, offset + 48u, stroke.r);
+  write_f32(buf, offset + 52u, stroke.g);
+  write_f32(buf, offset + 56u, stroke.b);
+  write_f32(buf, offset + 60u, stroke.a);
+  write_f32(buf, offset + 64u, stroke_width);
+  write_f32(buf, offset + 68u, font_size);
+  write_f32(buf, offset + 72u, origin_x);
+  write_f32(buf, offset + 76u, baseline_offset);
+  write_u32(buf, offset + 80u, oid.actor_hi);
+  write_u32(buf, offset + 84u, oid.actor_lo);
+  write_u32(buf, offset + 88u, oid.sequence_hi);
+  write_f32(buf, offset + 92u, max_width);
+  write_f32(buf, offset + 96u, line_height);
+  write_u32(buf, offset + 100u, max_lines);
+  write_u32(buf, offset + 104u, align);
+  write_u32(buf, offset + 108u, mask & BLITZ_COMPONENT_CONTAINER);
+  ObjectId parent_id = object_id_zero();
+  float parent_offset_x = 0.0f;
+  float parent_offset_y = 0.0f;
+  if ((mask & BLITZ_COMPONENT_RELATIVE_TRANSFORM) &&
+      world.relative_transforms[entity].parent != BLITZ_INVALID_INDEX) {
+    parent_id = world.object_ids[world.relative_transforms[entity].parent];
+    parent_offset_x = world.relative_transforms[entity].offset_x;
+    parent_offset_y = world.relative_transforms[entity].offset_y;
+  }
+  write_u32(buf, offset + 112u, parent_id.actor_hi);
+  write_u32(buf, offset + 116u, parent_id.actor_lo);
+  write_u32(buf, offset + 120u, parent_id.sequence_hi);
+  write_u32(buf, offset + 124u, parent_id.sequence_lo);
+  write_f32(buf, offset + 128u, parent_offset_x);
+  write_f32(buf, offset + 132u, parent_offset_y);
+  if (kind == BLITZ_SHAPE_PATH) {
+    PathView v = world.path_views[entity];
+    for (u32 i = 0u; i < v.point_count; i += 1u) {
+      write_f32(buf, offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES + i * 8u,
+                v.points[i].x);
+      write_f32(buf, offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES + i * 8u + 4u,
+                v.points[i].y);
+    }
+  } else if (text) {
+    for (u32 i = 0u; i < text_length; i += 1u) {
+      buf[offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES + i] = (unsigned char)text[i];
+    }
+  }
+  return record_bytes;
+}
+
+// Re-establish a record's relative-transform parent. `child` is the already
+// resolved entity; `parent` is its resolved parent (INVALID when the record has
+// no parent). Call after all records in a delta have been applied.
+static void apply_record_parent(const unsigned char *buf, u32 offset, u32 child,
+                                u32 parent) {
+  if (child == BLITZ_INVALID_INDEX) {
+    return;
+  }
+  if (parent == BLITZ_INVALID_INDEX) {
+    if (world.masks[child] & BLITZ_COMPONENT_RELATIVE_TRANSFORM) {
+      detach_from_parent(child);
+    }
+    return;
+  }
+  attach_relative_transform(child, parent, read_f32(buf, offset + 128u),
+                            read_f32(buf, offset + 132u));
+}
+
+// Create or update an entity from a record (id-stable). `entity` is the target
+// slot, or INVALID to create a fresh one. Existing entities are updated in place
+// (index preserved, so hierarchy references stay valid); the old path-point
+// allocation is freed before replacing. Parent links are left to
+// apply_record_parent.
+static u32 apply_entity_record_into(const unsigned char *buf, u32 offset,
+                                    u32 entity) {
+  u32 kind = read_u32(buf, offset);
+  ObjectId oid = {read_u32(buf, offset + 80u), read_u32(buf, offset + 84u),
+                  read_u32(buf, offset + 88u), read_u32(buf, offset + 8u)};
+  u32 text_length = read_u32(buf, offset + 12u);
+  float x = read_f32(buf, offset + 16u);
+  float y = read_f32(buf, offset + 20u);
+  float width = read_f32(buf, offset + 24u);
+  float height = read_f32(buf, offset + 28u);
+  Color fill = {read_f32(buf, offset + 32u), read_f32(buf, offset + 36u),
+                read_f32(buf, offset + 40u), read_f32(buf, offset + 44u)};
+  Color stroke = {read_f32(buf, offset + 48u), read_f32(buf, offset + 52u),
+                  read_f32(buf, offset + 56u), read_f32(buf, offset + 60u)};
+  float stroke_width = read_f32(buf, offset + 64u);
+  float font_size = read_f32(buf, offset + 68u);
+  float origin_x = read_f32(buf, offset + 72u);
+  float baseline_offset = read_f32(buf, offset + 76u);
+  float max_width = read_f32(buf, offset + 92u);
+  float line_height = read_f32(buf, offset + 96u);
+  u32 max_lines = read_u32(buf, offset + 100u);
+  u32 align = read_u32(buf, offset + 104u);
+  u32 container = read_u32(buf, offset + 108u) & BLITZ_COMPONENT_CONTAINER;
+  const unsigned char *payload = buf + offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES;
+
+  if (entity == BLITZ_INVALID_INDEX) {
+    entity = ecs_create_entity();
+    if (entity == BLITZ_INVALID_INDEX) {
+      return BLITZ_INVALID_INDEX;
+    }
+    world.object_ids[entity] = oid;
+    advance_sequence_past(oid);
+  } else {
+    if (world.masks[entity] & BLITZ_COMPONENT_PATH_VIEW) {
+      blitz_free(world.path_views[entity].points);
+      world.path_views[entity].points = 0;
+    }
+    world.masks[entity] &=
+        ~(u32)(BLITZ_COMPONENT_RECT_VIEW | BLITZ_COMPONENT_TRIANGLE_VIEW |
+               BLITZ_COMPONENT_OVAL_VIEW | BLITZ_COMPONENT_TEXT_VIEW |
+               BLITZ_COMPONENT_FRAME_VIEW | BLITZ_COMPONENT_PATH_VIEW |
+               BLITZ_COMPONENT_CONTAINER);
+  }
+  ecs_set_position(entity, x, y);
+  ecs_set_size(entity, width, height);
+  if (kind == BLITZ_SHAPE_TRIANGLE) {
+    ecs_set_triangle_view(entity, fill, stroke, stroke_width);
+    ecs_set_resizable(entity, 1u, 1u);
+  } else if (kind == BLITZ_SHAPE_OVAL) {
+    ecs_set_oval_view(entity, fill, stroke, stroke_width);
+    ecs_set_resizable(entity, 1u, 1u);
+  } else if (kind == BLITZ_SHAPE_PATH) {
+    Vec2 *points = (Vec2 *)blitz_alloc((usize)text_length * sizeof(Vec2));
+    if (!points) {
+      return BLITZ_INVALID_INDEX;
+    }
+    for (u32 i = 0u; i < text_length; i += 1u) {
+      points[i].x = read_f32(payload, i * 8u);
+      points[i].y = read_f32(payload, i * 8u + 4u);
+    }
+    ecs_set_path_view(entity, points, text_length, fill, stroke_width);
+  } else if (kind == BLITZ_SHAPE_FRAME) {
+    char *title = "";
+    if (text_length > 0u && text_pool_ensure(text_length + 1u)) {
+      title = &text_pool[text_pool_used];
+      for (u32 i = 0u; i < text_length; i += 1u) {
+        title[i] = (char)payload[i];
+      }
+      title[text_length] = '\0';
+      text_pool_used += text_length + 1u;
+    }
+    Color title_color = {origin_x, baseline_offset, max_width, line_height};
+    ecs_set_rect_view(entity, fill, stroke, stroke_width);
+    ecs_set_frame_view(entity, title, title_color,
+                       font_size > 0.0f ? font_size : 18.0f);
+    ecs_set_resizable(entity, 1u, 1u);
+  } else if (kind == BLITZ_SHAPE_TEXT) {
+    char *text = "";
+    if (text_length > 0u && text_pool_ensure(text_length + 1u)) {
+      text = &text_pool[text_pool_used];
+      for (u32 i = 0u; i < text_length; i += 1u) {
+        text[i] = (char)payload[i];
+      }
+      text[text_length] = '\0';
+      text_pool_used += text_length + 1u;
+    }
+    ecs_set_text_view(entity, text, fill, font_size, origin_x, baseline_offset,
+                      max_width, line_height, max_lines, align);
+    ecs_set_resizable(entity, 1u, 0u);
+  } else {
+    ecs_set_rect_view(entity, fill, stroke, stroke_width);
+    ecs_set_resizable(entity, 1u, 1u);
+  }
+  if (container) {
+    set_container_component(entity, 1u);
+  }
+  world.masks[entity] |= BLITZ_COMPONENT_SELECTABLE;
+  return entity;
 }
 
 static Vec2 path_bounds_min(Vec2 *points, u32 point_count) {
@@ -5378,10 +6149,12 @@ void blitz_delete_selected(void) {
   if (selected_count == 0u) {
     return;
   }
+  u32 history_owned = history_begin_owned();
   u32 kept = 0u;
   for (u32 index = 0u; index < world.draw_order_count; index += 1u) {
     u32 entity = world.draw_order[index];
     if (world.selected[entity]) {
+      history_record_deleted(entity);
       cleanup_entity_hierarchy(entity);
       release_entity_resources(entity);
       world.masks[entity] = 0u;
@@ -5402,11 +6175,79 @@ void blitz_delete_selected(void) {
   resize_active = 0u;
   resize_entity = BLITZ_INVALID_INDEX;
   mark_render_list_dirty();
+  if (history_owned) {
+    history_commit();
+  }
 }
 
 EXPORT("blitz_has_selection")
 u32 blitz_has_selection(void) {
   return selected_count > 0u;
+}
+
+EXPORT("blitz_history_begin")
+void blitz_history_begin(void) {
+  history_begin();
+}
+
+EXPORT("blitz_history_commit")
+void blitz_history_commit(void) {
+  history_commit();
+}
+
+EXPORT("blitz_history_cancel")
+void blitz_history_cancel(void) {
+  history_cancel();
+}
+
+EXPORT("blitz_history_reset")
+void blitz_history_reset(void) {
+  history_reset_internal();
+}
+
+// Unique id for the current undo position; 0 when nothing is on the stack.
+// Stable when undo returns to a prior state, fresh when a new branch is pushed,
+// so callers can use it for dirty tracking.
+EXPORT("blitz_history_state_id")
+u32 blitz_history_state_id(void) {
+  return history_undo_count > 0u
+             ? history_undo_stack[history_undo_count - 1u].epoch
+             : 0u;
+}
+
+EXPORT("blitz_history_can_undo")
+u32 blitz_history_can_undo(void) {
+  return history_undo_count > 0u ? 1u : 0u;
+}
+
+EXPORT("blitz_history_can_redo")
+u32 blitz_history_can_redo(void) {
+  return history_redo_count > 0u ? 1u : 0u;
+}
+
+EXPORT("blitz_history_undo")
+u32 blitz_history_undo(void) {
+  if (history_undo_count == 0u) {
+    return 0u;
+  }
+  HistoryTransaction txn = history_undo_stack[--history_undo_count];
+  history_apply_transaction(&txn, 0u);
+  history_redo_stack[history_redo_count++] = txn;
+  return 1u;
+}
+
+EXPORT("blitz_history_redo")
+u32 blitz_history_redo(void) {
+  if (history_redo_count == 0u) {
+    return 0u;
+  }
+  HistoryTransaction txn = history_redo_stack[--history_redo_count];
+  history_apply_transaction(&txn, 1u);
+  if (history_undo_count == BLITZ_HISTORY_MAX_STEPS) {
+    history_pop_oldest(history_undo_stack, &history_undo_count);
+  }
+  history_undo_stack[history_undo_count++] = txn;
+  return 1u;
 }
 
 // --- Public API: selection inspector ---------------------------------------

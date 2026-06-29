@@ -379,15 +379,15 @@ export function setupWsCollaboration(
 
   const publishOps = async () => {
     const ops = handlers.captureChanges();
-    if (ops.byteLength <= 4) {
-      return; // empty batch: just the op count, nothing changed
+    if (ops.byteLength === 0) {
+      return; // nothing queued
     }
     await sendOps(ops, "incremental");
   };
 
   const publishBaseline = async () => {
     const ops = handlers.captureBaseline();
-    if (ops.byteLength <= 4) {
+    if (ops.byteLength === 0) {
       return;
     }
     await sendOps(ops, "baseline");

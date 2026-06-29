@@ -43,6 +43,7 @@ function snapshot(w) {
     ].join(":");
     map.set(key, {
       kind: view.getUint32(o + 16, true),
+      order: view.getUint32(o + 20, true),
       x: view.getFloat32(o + 40, true),
       y: view.getFloat32(o + 44, true),
       w: view.getFloat32(o + 48, true),
@@ -97,6 +98,14 @@ function converged(a, b) {
 }
 
 const onlyKey = (w) => snapshot(w).keys().next().value;
+
+// Keys in draw order (front-most last), per the query's order field.
+function orderedKeys(w) {
+  return [...snapshot(w).entries()]
+    .sort((a, b) => a[1].order - b[1].order)
+    .map(([key]) => key);
+}
+const sameOrder = (a, b) => a.length === b.length && a.every((k, i) => k === b[i]);
 
 // --- 1. Create propagation A -> B ------------------------------------------
 console.log("create propagation A -> B");
@@ -387,6 +396,150 @@ console.log("tracking disabled: no broadcast queue, versions still advance");
   const joiner = await makeInstance(2, 2);
   check("baseline after re-enable transfers all", applyOps(joiner, captureBaseline(w)) === 2);
   check("converges after re-enable", converged(snapshot(w), snapshot(joiner)));
+}
+
+// --- 15. Z-order: a reorder propagates -------------------------------------
+console.log("z-order reorder propagates");
+{
+  const a = await makeInstance(1, 1);
+  const b = await makeInstance(2, 2);
+  a.blitz_create_rect(0, 0, 40, 40, 1, 0, 0, 1, 0, 0, 0, 1, 2);
+  a.blitz_create_rect(100, 0, 40, 40, 0, 1, 0, 1, 0, 0, 0, 1, 2);
+  a.blitz_create_rect(200, 0, 40, 40, 0, 0, 1, 1, 0, 0, 0, 1, 2);
+  applyOps(b, captureOps(a));
+  check("B mirrors initial order", sameOrder(orderedKeys(a), orderedKeys(b)));
+  const firstKey = orderedKeys(a)[0];
+  // Select the back-most rect and bring it to the front.
+  a.blitz_clear_selection();
+  a.blitz_pointer_down(20, 20, 0);
+  a.blitz_pointer_up();
+  a.blitz_bring_to_front();
+  check("A moved it to front", orderedKeys(a).at(-1) === firstKey);
+  check("A flagged an order change", a.blitz_crdt_has_pending() === 1);
+  applyOps(b, captureOps(a));
+  check("B sees the new front-most", orderedKeys(b).at(-1) === firstKey);
+  check("orders converge", sameOrder(orderedKeys(a), orderedKeys(b)));
+}
+
+// --- 16. Concurrent reorders: whole-order LWW (higher actor wins) -----------
+console.log("concurrent reorders converge (higher actor wins)");
+{
+  const a = await makeInstance(1, 1);
+  const b = await makeInstance(2, 2); // higher actor -> wins ties
+  a.blitz_create_rect(0, 0, 40, 40, 1, 0, 0, 1, 0, 0, 0, 1, 2);
+  a.blitz_create_rect(100, 0, 40, 40, 0, 1, 0, 1, 0, 0, 0, 1, 2);
+  a.blitz_create_rect(200, 0, 40, 40, 0, 0, 1, 1, 0, 0, 0, 1, 2);
+  applyOps(b, captureOps(a));
+  // A brings the back-most to front; B brings the middle to front. Same Lamport.
+  a.blitz_clear_selection();
+  a.blitz_pointer_down(20, 20, 0);
+  a.blitz_pointer_up();
+  a.blitz_bring_to_front();
+  b.blitz_clear_selection();
+  b.blitz_pointer_down(120, 20, 0);
+  b.blitz_pointer_up();
+  b.blitz_bring_to_front();
+  check("A and B diverged locally",
+    !sameOrder(orderedKeys(a), orderedKeys(b)));
+  const opsA = captureOps(a);
+  const opsB = captureOps(b);
+  const bOrder = orderedKeys(b);
+  applyOps(a, opsB); // B (higher actor) wins on A
+  applyOps(b, opsA); // A loses on B
+  check("A adopts B's order", sameOrder(orderedKeys(a), bOrder));
+  check("B keeps its order", sameOrder(orderedKeys(b), bOrder));
+  check("orders converge", sameOrder(orderedKeys(a), orderedKeys(b)));
+}
+
+// --- 17. Baseline carries the draw order -----------------------------------
+console.log("baseline carries a reordered scene to a joiner");
+{
+  const host = await makeInstance(1, 1);
+  host.blitz_create_rect(0, 0, 40, 40, 1, 0, 0, 1, 0, 0, 0, 1, 2);
+  host.blitz_create_rect(100, 0, 40, 40, 0, 1, 0, 1, 0, 0, 0, 1, 2);
+  host.blitz_create_rect(200, 0, 40, 40, 0, 0, 1, 1, 0, 0, 0, 1, 2);
+  host.blitz_clear_selection();
+  host.blitz_pointer_down(20, 20, 0);
+  host.blitz_pointer_up();
+  host.blitz_bring_to_front();
+  captureOps(host); // drain incremental queue
+  const joiner = await makeInstance(2, 2);
+  applyOps(joiner, captureBaseline(host));
+  check("joiner has all 3", joiner.blitz_entity_count() === 3);
+  check("joiner mirrors the reordered order",
+    sameOrder(orderedKeys(host), orderedKeys(joiner)));
+}
+
+// --- 18. Cross-message parent: child before parent links on retry ----------
+console.log("cross-message parent links once the parent arrives");
+{
+  const a = await makeInstance(1, 1);
+  a.blitz_create_frame(0, 0, 300, 300, 0.9, 0.9, 0.9, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 18, 0);
+  const batchFrame = captureOps(a);
+  a.blitz_create_rect(500, 500, 40, 40, 1, 0, 0, 1, 0, 0, 0, 1, 2);
+  captureOps(a); // drain the bare child create
+  a.blitz_clear_selection();
+  a.blitz_pointer_down(520, 520, 0);
+  a.blitz_pointer_move(150, 150); // drag into the frame -> reparent op
+  a.blitz_pointer_up();
+  const batchReparent = captureOps(a);
+  const aSnap = snapshot(a);
+  const frameKey = [...aSnap.entries()].find(([, v]) => v.kind === 4)?.[0];
+  const childKey = [...aSnap.entries()].find(([, v]) => v.kind === 0)?.[0];
+  const frameSeq = Number(frameKey.split(":")[3]);
+  // Deliver the reparent op to a peer that doesn't have the frame yet.
+  const b = await makeInstance(2, 2);
+  applyOps(b, batchReparent);
+  check("child created but unparented (parent missing)",
+    snapshot(b).get(childKey)?.parentSeq === 0);
+  applyOps(b, batchFrame); // parent arrives -> retry links the child
+  check("child links once the parent arrives",
+    snapshot(b).get(childKey)?.parentSeq === frameSeq);
+}
+
+// --- 19. Offline delete propagates on reconnect ----------------------------
+console.log("offline delete propagates on reconnect");
+{
+  const a = await makeInstance(1, 1);
+  const b = await makeInstance(2, 2);
+  a.blitz_create_rect(0, 0, 40, 40, 1, 0, 0, 1, 0, 0, 0, 1, 2);
+  applyOps(b, captureOps(a));
+  check("B has X", b.blitz_entity_count() === 1);
+  a.blitz_crdt_set_enabled(0); // disconnect
+  a.blitz_clear_selection();
+  a.blitz_pointer_down(20, 20, 0);
+  a.blitz_pointer_up();
+  a.blitz_delete_selected();
+  check("A deleted X offline", a.blitz_entity_count() === 0);
+  check("A tombstoned it despite being offline", a.blitz_crdt_tombstone_count() === 1);
+  a.blitz_crdt_set_enabled(1); // reconnect; both exchange baselines
+  const aBaseline = captureBaseline(a);
+  const bBaseline = captureBaseline(b);
+  applyOps(a, bBaseline); // B's stale X must not resurrect on A
+  check("A stays deleted (tombstone beats stale upsert)", a.blitz_entity_count() === 0);
+  applyOps(b, aBaseline); // A's tombstone removes X on B
+  check("B applied the offline delete", b.blitz_entity_count() === 0);
+}
+
+// --- 20. Tombstone is dropped when its id is resurrected -------------------
+console.log("tombstone is removed when an id is resurrected");
+{
+  const a = await makeInstance(1, 1); // lower actor (delete loses)
+  const b = await makeInstance(2, 2); // higher actor (update wins)
+  a.blitz_create_rect(0, 0, 40, 40, 1, 0, 0, 1, 0, 0, 0, 1, 2);
+  applyOps(b, captureOps(a));
+  a.blitz_clear_selection();
+  a.blitz_pointer_down(20, 20, 0);
+  a.blitz_pointer_up();
+  a.blitz_delete_selected();
+  check("A has a tombstone after delete", a.blitz_crdt_tombstone_count() === 1);
+  b.blitz_clear_selection();
+  b.blitz_pointer_down(20, 20, 0);
+  b.blitz_pointer_move(120, 20);
+  b.blitz_pointer_up();
+  applyOps(a, captureOps(b)); // B's newer update resurrects X on A
+  check("A resurrected the entity", a.blitz_entity_count() === 1);
+  check("stale tombstone was dropped", a.blitz_crdt_tombstone_count() === 0);
 }
 
 console.log("");

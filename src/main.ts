@@ -239,6 +239,7 @@ type BlitzExports = {
   blitz_crdt_capture_baseline(): number;
   blitz_crdt_apply_ops(byteCount: number): number;
   blitz_crdt_pending_count(): number;
+  blitz_crdt_has_pending(): number;
   blitz_crdt_clock(): number;
   blitz_stress_test(): void;
   blitz_clear_selection(): void;
@@ -2480,7 +2481,7 @@ async function boot() {
           applyingRemoteCollaboration = false;
         }
       },
-      hasPendingChanges: () => wasm.blitz_crdt_pending_count() > 0,
+      hasPendingChanges: () => wasm.blitz_crdt_has_pending() === 1,
       localRevision: () => wasm.blitz_scene_revision(),
       onRemoteApplied() {
         updateHistoryControls();

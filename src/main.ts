@@ -2462,7 +2462,6 @@ async function boot() {
       closeButton: ui.closeCollaborationSettingsButton,
       form: ui.collaborationSettingsForm,
       urlInput: ui.collaborationUrlInput,
-      roomInput: ui.collaborationRoomInput,
       shareLinkInput: ui.collaborationShareLinkInput,
       disconnectButton: ui.disconnectCollaborationButton,
       status: ui.collaborationStatus,

@@ -10,7 +10,6 @@ type CollaborationElements = {
   closeButton: HTMLButtonElement;
   form: HTMLFormElement;
   urlInput: HTMLInputElement;
-  roomInput: HTMLInputElement;
   shareLinkInput: HTMLInputElement;
   disconnectButton: HTMLButtonElement;
   status: HTMLElement;
@@ -66,7 +65,6 @@ export type CollaborationController = {
 };
 
 const URL_STORAGE_KEY = "blitz.collaboration.url";
-const ROOM_STORAGE_KEY = "blitz.collaboration.room";
 const DEFAULT_URL = "wss://62-238-2-245.sslip.io";
 const MAX_SCENE_BYTES = 16 * 1024 * 1024;
 const ROOM_PATTERN = /^room-[0-9a-f]{32}$/i;
@@ -118,14 +116,6 @@ function validateUrl(value: string): string {
     throw new Error("The collaboration URL must not contain credentials, query parameters, or a fragment.");
   }
   return url.toString();
-}
-
-function validateRoom(value: string): string {
-  const room = value.trim().toLowerCase();
-  if (!ROOM_PATTERN.test(room)) {
-    throw new Error("Start a new collaboration to generate a secure room ID.");
-  }
-  return room;
 }
 
 function randomId(): string {
@@ -209,12 +199,7 @@ export function setupWsCollaboration(
   const seenCommands = new Set<string>();
 
   const hashSettings = readHashSettings();
-  const storedRoom = localStorage.getItem(ROOM_STORAGE_KEY) ?? undefined;
   elements.urlInput.value = localStorage.getItem(URL_STORAGE_KEY) ?? DEFAULT_URL;
-  elements.roomInput.value =
-    (hashSettings.room && ROOM_PATTERN.test(hashSettings.room) ? hashSettings.room : undefined) ??
-    (storedRoom && ROOM_PATTERN.test(storedRoom) ? storedRoom : undefined) ??
-    randomRoom();
 
   const setStatus = (state: "disconnected" | "connecting" | "connected", message: string) => {
     elements.status.dataset.state = state;
@@ -373,7 +358,7 @@ export function setupWsCollaboration(
     setStatus("disconnected", "Disconnected");
   };
 
-  const connect = async (urlValue: string, roomValue: string) => {
+  const connect = async (urlValue: string, reconnectRoom?: string) => {
     stopReconnectTimer();
     socket?.close(1000, "Replacing collaboration connection.");
 
@@ -381,7 +366,11 @@ export function setupWsCollaboration(
     let room: string;
     try {
       url = validateUrl(urlValue);
-      room = validateRoom(roomValue);
+      room =
+        reconnectRoom ??
+        (hashSettings.room && ROOM_PATTERN.test(hashSettings.room)
+          ? hashSettings.room.toLowerCase()
+          : randomRoom());
       if (hashSettings.key && hashSettings.room === room) {
         encodedRoomKey = hashSettings.key;
         roomKey = await importRoomKey(encodedRoomKey);
@@ -400,7 +389,6 @@ export function setupWsCollaboration(
     }
 
     localStorage.setItem(URL_STORAGE_KEY, url);
-    localStorage.setItem(ROOM_STORAGE_KEY, room);
     connectedRoom = room;
     elements.shareLinkInput.value = writeShareHash(room, encodedRoomKey);
     shouldReconnect = true;
@@ -448,7 +436,7 @@ export function setupWsCollaboration(
   });
   elements.form.addEventListener("submit", (event) => {
     event.preventDefault();
-    void connect(elements.urlInput.value, elements.roomInput.value);
+    void connect(elements.urlInput.value);
     elements.dialog.close();
   });
   elements.disconnectButton.addEventListener("click", disconnect);

@@ -169,7 +169,6 @@ export function createBlitzUi() {
     collaborationSettingsForm: requireElement<HTMLFormElement>("#collaboration-settings-form"),
     closeCollaborationSettingsButton: requireElement<HTMLButtonElement>("#close-collaboration-settings"),
     collaborationUrlInput: requireElement<HTMLInputElement>("#collaboration-url"),
-    collaborationRoomInput: requireElement<HTMLInputElement>("#collaboration-room"),
     collaborationShareLinkInput: requireElement<HTMLInputElement>("#collaboration-share-link"),
     disconnectCollaborationButton: requireElement<HTMLButtonElement>("#disconnect-collaboration"),
     collaborationStatus: requireElement<HTMLElement>("#collaboration-status"),

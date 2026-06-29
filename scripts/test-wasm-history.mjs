@@ -232,5 +232,52 @@ check(`${BULK_DELETE} delete cleared the scene`, afterDelete === 0);
 check(`${BULK_DELETE} undo restored every entity`, afterUndo === BULK_DELETE);
 check(`bulk delete/undo/redo/undo under 2s (${bulkMs.toFixed(0)}ms)`, bulkMs < 2000);
 
+// --- 11. Z-order (bring-to-front / send-to-back) is undoable ----------------
+console.log("z-order changes preserved in history");
+wasm.blitz_clear_scene();
+const orderOf = (x) => {
+  const n = wasm.blitz_query_scene(-1e6, -1e6, 1e6, 1e6, 1000);
+  const v = new DataView(wasm.memory.buffer, wasm.blitz_scene_query_ptr(), n * ITEM);
+  for (let i = 0; i < n; i += 1) {
+    if (Math.abs(v.getFloat32(i * ITEM + 40, true) - x) < 0.01) {
+      return v.getUint32(i * ITEM + 20, true);
+    }
+  }
+  return -1;
+};
+const idOf = (x) => {
+  const n = wasm.blitz_query_scene(-1e6, -1e6, 1e6, 1e6, 1000);
+  const v = new DataView(wasm.memory.buffer, wasm.blitz_scene_query_ptr(), n * ITEM);
+  for (let i = 0; i < n; i += 1) {
+    const o = i * ITEM;
+    if (Math.abs(v.getFloat32(o + 40, true) - x) < 0.01) {
+      return [v.getUint32(o, true), v.getUint32(o + 4, true), v.getUint32(o + 8, true), v.getUint32(o + 12, true)];
+    }
+  }
+  return null;
+};
+wasm.blitz_create_rect(10, 0, 5, 5, 1, 0, 0, 1, 0, 0, 0, 1, 1);
+wasm.blitz_create_rect(20, 0, 5, 5, 0, 1, 0, 1, 0, 0, 0, 1, 1);
+wasm.blitz_create_rect(30, 0, 5, 5, 0, 0, 1, 1, 0, 0, 0, 1, 1);
+wasm.blitz_history_reset();
+const beforeOrder = orderOf(10);
+const a = idOf(10);
+wasm.blitz_clear_selection();
+wasm.blitz_select_object(a[0], a[1], a[2], a[3], 0);
+wasm.blitz_bring_to_front();
+check("bring-to-front moved the shape to the top", orderOf(10) === 2);
+check("bring-to-front created an undo step", wasm.blitz_history_can_undo() === 1);
+wasm.blitz_history_undo();
+check("undo restores the original z-order", orderOf(10) === beforeOrder);
+wasm.blitz_history_redo();
+check("redo re-applies the z-order", orderOf(10) === 2);
+// A no-op reorder (already frontmost) must not create a step.
+wasm.blitz_clear_selection();
+wasm.blitz_select_object(a[0], a[1], a[2], a[3], 0);
+const stateBeforeNoop = wasm.blitz_history_state_id();
+wasm.blitz_bring_to_front();
+check("no-op bring-to-front (already frontmost) adds no step",
+  wasm.blitz_history_state_id() === stateBeforeNoop && orderOf(10) === 2);
+
 console.log(failures === 0 ? "\nWASM history test passed." : `\n${failures} failure(s).`);
 process.exit(failures === 0 ? 0 : 1);

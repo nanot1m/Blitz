@@ -795,6 +795,12 @@ typedef struct {
   unsigned char *bytes;  // before+after record blobs; entry offsets index here
   u32 byte_count;
   u32 epoch;  // unique state id, for dirty tracking
+  // Draw-order (z-order) snapshots, present only when the transaction reordered;
+  // entity-index sequences restored as a permutation of the live set.
+  u32 *order_before;
+  u32 order_before_count;
+  u32 *order_after;
+  u32 order_after_count;
 } HistoryTransaction;
 
 typedef struct {
@@ -822,6 +828,12 @@ static u32 history_scratch_byte_cap;
 // in-transaction parents in O(1) instead of scanning the whole world.
 static u32 *history_apply_map;
 static u32 history_apply_map_cap;
+// Pre-mutation draw_order snapshot for the open transaction, taken lazily the
+// first time a reorder happens so non-reordering edits pay nothing.
+static u32 *history_order_scratch;
+static u32 history_order_scratch_cap;
+static u32 history_order_before_count;
+static u32 history_order_dirty;
 
 static void ecs_storage_init(void) {
   // blitz_init resets the whole heap, releasing every demand block wholesale,
@@ -895,6 +907,10 @@ static void ecs_storage_init(void) {
   history_scratch_byte_cap = 0u;
   history_apply_map = 0;
   history_apply_map_cap = 0u;
+  history_order_scratch = 0;
+  history_order_scratch_cap = 0u;
+  history_order_before_count = 0u;
+  history_order_dirty = 0u;
 }
 
 // Reserve room for one more entry in the dynamic stream before a push: grow the
@@ -1490,6 +1506,34 @@ static u32 history_scratch_reserve_entries(u32 needed) {
 static void history_scratch_reset(void) {
   history_scratch_entry_count = 0u;
   history_scratch_byte_count = 0u;
+  history_order_dirty = 0u;
+  history_order_before_count = 0u;
+}
+
+// Snapshot the current draw order the first time a transaction reorders, so undo
+// can put it back. No-op when no transaction is open or while replaying.
+static void history_record_order_before(void) {
+  if (!history_transaction_active || history_replaying || history_order_dirty) {
+    return;
+  }
+  if (world.draw_order_count > history_order_scratch_cap) {
+    u32 next = history_order_scratch_cap ? history_order_scratch_cap : 256u;
+    while (next < world.draw_order_count) {
+      next *= 2u;
+    }
+    u32 *grown = (u32 *)blitz_realloc(history_order_scratch, 0,
+                                      (usize)next * 4u);
+    if (!grown) {
+      return;
+    }
+    history_order_scratch = grown;
+    history_order_scratch_cap = next;
+  }
+  for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
+    history_order_scratch[i] = world.draw_order[i];
+  }
+  history_order_before_count = world.draw_order_count;
+  history_order_dirty = 1u;
 }
 
 static void history_txn_begin(void) {
@@ -1527,22 +1571,39 @@ static void history_free_transaction(HistoryTransaction *txn) {
   if (txn->bytes) {
     blitz_free(txn->bytes);
   }
+  if (txn->order_before) {
+    blitz_free(txn->order_before);
+  }
+  if (txn->order_after) {
+    blitz_free(txn->order_after);
+  }
   txn->entries = 0;
   txn->bytes = 0;
   txn->entry_count = 0u;
   txn->byte_count = 0u;
+  txn->order_before = 0;
+  txn->order_after = 0;
+  txn->order_before_count = 0u;
+  txn->order_after_count = 0u;
+}
+
+// Total heap a transaction holds against the budget: record blobs plus the
+// draw-order snapshots (which carry no record bytes but can be large).
+static u32 history_txn_bytes(const HistoryTransaction *txn) {
+  return txn->byte_count +
+         (txn->order_before_count + txn->order_after_count) * 4u;
 }
 
 static void history_clear_redo(void) {
   for (u32 i = 0u; i < history_redo_count; i += 1u) {
-    history_total_bytes -= history_redo_stack[i].byte_count;
+    history_total_bytes -= history_txn_bytes(&history_redo_stack[i]);
     history_free_transaction(&history_redo_stack[i]);
   }
   history_redo_count = 0u;
 }
 
 static void history_pop_oldest(HistoryTransaction *stack, u32 *count) {
-  history_total_bytes -= stack[0].byte_count;
+  history_total_bytes -= history_txn_bytes(&stack[0]);
   history_free_transaction(&stack[0]);
   for (u32 i = 1u; i < *count; i += 1u) {
     stack[i - 1u] = stack[i];
@@ -1582,7 +1643,7 @@ static void history_reset_internal(void) {
   history_scratch_reset();
   history_clear_redo();
   for (u32 i = 0u; i < history_undo_count; i += 1u) {
-    history_total_bytes -= history_undo_stack[i].byte_count;
+    history_total_bytes -= history_txn_bytes(&history_undo_stack[i]);
     history_free_transaction(&history_undo_stack[i]);
   }
   history_undo_count = 0u;
@@ -1690,24 +1751,52 @@ static void history_commit(void) {
       keep_bytes += read_u32(history_scratch_bytes, e->after_offset + 4u);
     }
   }
-  if (keep_entries == 0u) {
+  // Drop a reorder snapshot that didn't actually change the order (e.g. bring to
+  // front when already frontmost), so it neither bloats nor adds a no-op step.
+  if (history_order_dirty) {
+    u32 changed = history_order_before_count != world.draw_order_count;
+    for (u32 i = 0u; !changed && i < world.draw_order_count; i += 1u) {
+      changed = history_order_scratch[i] != world.draw_order[i];
+    }
+    if (!changed) {
+      history_order_dirty = 0u;
+    }
+  }
+  if (keep_entries == 0u && !history_order_dirty) {
     history_scratch_reset();
     return;
   }
 
-  HistoryTransaction txn;
-  txn.entries =
-      (HistoryEntry *)blitz_alloc((usize)keep_entries * sizeof(HistoryEntry));
-  txn.bytes = (unsigned char *)blitz_alloc(keep_bytes);
-  if (!txn.entries || !txn.bytes) {
-    if (txn.entries) {
-      blitz_free(txn.entries);
+  HistoryTransaction txn = {0};
+  if (keep_entries > 0u) {
+    txn.entries =
+        (HistoryEntry *)blitz_alloc((usize)keep_entries * sizeof(HistoryEntry));
+    txn.bytes = (unsigned char *)blitz_alloc(keep_bytes);
+    if (!txn.entries || !txn.bytes) {
+      history_free_transaction(&txn);
+      history_scratch_reset();
+      return;
     }
-    if (txn.bytes) {
-      blitz_free(txn.bytes);
+  }
+  // A reorder may have happened with no per-entity change, so capture the
+  // before/after draw orders before bailing on an empty entity set.
+  if (history_order_dirty) {
+    txn.order_before_count = history_order_before_count;
+    txn.order_after_count = world.draw_order_count;
+    txn.order_before =
+        (u32 *)blitz_alloc((usize)history_order_before_count * 4u);
+    txn.order_after = (u32 *)blitz_alloc((usize)world.draw_order_count * 4u);
+    if (!txn.order_before || !txn.order_after) {
+      history_free_transaction(&txn);
+      history_scratch_reset();
+      return;
     }
-    history_scratch_reset();
-    return;
+    for (u32 i = 0u; i < history_order_before_count; i += 1u) {
+      txn.order_before[i] = history_order_scratch[i];
+    }
+    for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
+      txn.order_after[i] = world.draw_order[i];
+    }
   }
   txn.entry_count = keep_entries;
   txn.byte_count = keep_bytes;
@@ -1748,7 +1837,7 @@ static void history_commit(void) {
     history_pop_oldest(history_undo_stack, &history_undo_count);
   }
   history_undo_stack[history_undo_count++] = txn;
-  history_total_bytes += txn.byte_count;
+  history_total_bytes += history_txn_bytes(&txn);
   while (history_total_bytes > BLITZ_HISTORY_MAX_BYTES &&
          history_undo_count > 1u) {
     history_pop_oldest(history_undo_stack, &history_undo_count);
@@ -1848,6 +1937,33 @@ static u32 history_apply_map_lookup(HistoryTransaction *txn, ObjectId id) {
   return BLITZ_INVALID_INDEX;
 }
 
+// Rebuild draw_order from a stored snapshot. Stale or freed indices are dropped
+// and any live entity missing from the snapshot is appended, so the result is
+// always a valid permutation of the live set even if entities were created or
+// deleted since the snapshot was taken.
+static void history_restore_draw_order(const u32 *order, u32 count) {
+  for (u32 i = 0u; i < world.entity_count; i += 1u) {
+    draw_order_seen[i] = 0u;
+  }
+  u32 out = 0u;
+  for (u32 i = 0u; i < count; i += 1u) {
+    u32 entity = order[i];
+    if (entity < world.entity_count && world.masks[entity] != 0u &&
+        !draw_order_seen[entity]) {
+      draw_order_seen[entity] = 1u;
+      world.draw_order[out] = entity;
+      out += 1u;
+    }
+  }
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.masks[entity] != 0u && !draw_order_seen[entity]) {
+      world.draw_order[out] = entity;
+      out += 1u;
+    }
+  }
+  world.draw_order_count = out;
+}
+
 static void history_apply_transaction(HistoryTransaction *txn, u32 redo) {
   history_replaying = 1u;
   u32 destroyed_any = 0u;
@@ -1899,6 +2015,11 @@ static void history_apply_transaction(HistoryTransaction *txn, u32 redo) {
       }
     }
     apply_record_parent(txn->bytes, restore_offset, e->entity, parent);
+  }
+  if (redo ? txn->order_after != 0 : txn->order_before != 0) {
+    history_restore_draw_order(redo ? txn->order_after : txn->order_before,
+                               redo ? txn->order_after_count
+                                    : txn->order_before_count);
   }
   history_replaying = 0u;
   clear_selection();
@@ -2522,6 +2643,7 @@ static u32 entity_in_container(u32 entity, u32 container) {
 // no-op when the selection already sits entirely above the container's other
 // contents.
 static void lift_selection_above_container(u32 container) {
+  history_record_order_before();
   // Flag the dropped set: every selected shape plus everything nested in one.
   u32 lifted = 0u;
   for (u32 i = 0u; i < world.draw_order_count; i += 1u) {
@@ -2599,6 +2721,7 @@ static void flush_draw_order_normalize(void) {
 }
 
 static void reorder_selection(u32 selected_first) {
+  history_record_order_before();
   u32 output = 0u;
   for (u32 pass = 0u; pass < 2u; pass += 1u) {
     u32 want_selected = selected_first ? pass == 0u : pass == 1u;
@@ -6860,9 +6983,11 @@ void blitz_bring_to_front(void) {
   if (selected_count == 0u) {
     return;
   }
-  history_record_selected_before();
+  u32 history_owned = history_begin_owned();
   reorder_selection(0u);
-  history_commit();
+  if (history_owned) {
+    history_commit();
+  }
 }
 
 EXPORT("blitz_send_to_back")
@@ -6870,9 +6995,11 @@ void blitz_send_to_back(void) {
   if (selected_count == 0u) {
     return;
   }
-  history_record_selected_before();
+  u32 history_owned = history_begin_owned();
   reorder_selection(1u);
-  history_commit();
+  if (history_owned) {
+    history_commit();
+  }
 }
 
 // --- Public API: render buffer accessors -----------------------------------

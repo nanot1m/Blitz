@@ -14,6 +14,7 @@ concurrency:
 
 env:
   DEPLOY_DIR: ${{ vars.HETZNER_APP_DIR || '/opt/blitz' }}
+  DEPLOY_HOST: ${{ vars.HETZNER_COLLAB_HOST || '127.0.0.1' }}
   DEPLOY_PORT: ${{ vars.HETZNER_COLLAB_PORT || '8790' }}
   SSH_PORT: ${{ vars.HETZNER_SSH_PORT || '22' }}
 
@@ -63,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/hetzner_deploy -p "$SSH_PORT" "${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }}" \
-            "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' DEPLOY_PORT='$DEPLOY_PORT' bash -s" <<'REMOTE'
+            "DEPLOY_DIR='$DEPLOY_DIR' GITHUB_SHA='$GITHUB_SHA' DEPLOY_HOST='$DEPLOY_HOST' DEPLOY_PORT='$DEPLOY_PORT' bash -s" <<'REMOTE'
           set -euo pipefail
 
           if [ "$(id -u)" -eq 0 ]; then
@@ -88,7 +89,7 @@ jobs:
           Type=simple
           WorkingDirectory=$DEPLOY_DIR/current
           Environment=NODE_ENV=production
-          Environment=BLITZ_COLLAB_HOST=0.0.0.0
+          Environment=BLITZ_COLLAB_HOST=$DEPLOY_HOST
           Environment=BLITZ_COLLAB_PORT=$DEPLOY_PORT
           ExecStart=$(command -v npm) run collab:relay
           Restart=always

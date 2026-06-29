@@ -121,10 +121,18 @@ jobs:
           $SUDO systemctl restart blitz-collab.service
           $SUDO systemctl --no-pager --full status blitz-collab.service
 
-          find "$DEPLOY_DIR/releases" -mindepth 1 -maxdepth 1 -type d \
-            | sort \
-            | head -n -5 \
-            | xargs -r rm -rf
+          # Prune old releases by mtime (newest 5 kept), never the active one.
+          # The previous lexical SHA sort could delete the release `current`
+          # points to, leaving WorkingDirectory dangling (CHDIR crash loop).
+          CURRENT_TARGET="$(readlink -f "$DEPLOY_DIR/current" 2>/dev/null || true)"
+          (ls -1dt "$DEPLOY_DIR/releases"/*/ 2>/dev/null || true) \
+            | tail -n +6 \
+            | while IFS= read -r dir; do
+                abs="$(readlink -f "${dir%/}" 2>/dev/null || true)"
+                if [ -n "$abs" ] && [ "$abs" != "$CURRENT_TARGET" ]; then
+                  rm -rf "$abs"
+                fi
+              done
           REMOTE
 
       - name: Health check

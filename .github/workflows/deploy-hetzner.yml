@@ -125,5 +125,11 @@ jobs:
       - name: Health check
         run: |
           set -euo pipefail
+          # The relay runs under tsx, which compiles on startup, so the socket
+          # isn't bound the instant systemctl returns. Retry until it answers.
           ssh -i ~/.ssh/hetzner_deploy -p "$SSH_PORT" "${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }}" \
-            "curl -fsS http://127.0.0.1:$DEPLOY_PORT/__blitz/collaboration/status"
+            "for _ in \$(seq 1 30); do \
+               curl -fsS http://127.0.0.1:$DEPLOY_PORT/__blitz/collaboration/status && exit 0; \
+               sleep 1; \
+             done; \
+             echo 'collaboration relay did not become healthy within 30s' >&2; exit 1"

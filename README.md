@@ -215,10 +215,19 @@ The `Deploy Hetzner` workflow deploys the relay and restarts `blitz-collab.servi
 Optional repository variables:
 
 - `HETZNER_APP_DIR`: install directory, defaults to `/opt/blitz`
+- `HETZNER_COLLAB_HOST`: relay bind host, defaults to `127.0.0.1`
 - `HETZNER_COLLAB_PORT`: relay port, defaults to `8790`
+- `HETZNER_COLLAB_MAX_CONNECTIONS`: total WebSocket connection cap, defaults to `200`
+- `HETZNER_COLLAB_MAX_CONNECTIONS_PER_IP`: per-IP WebSocket cap, defaults to `20`
+- `HETZNER_COLLAB_MAX_MESSAGES_PER_MINUTE`: per-connection message cap, defaults to `120`
+- `HETZNER_COLLAB_MAX_PEERS_PER_ROOM`: per-room peer cap, defaults to `20`
+- `HETZNER_COLLAB_MAX_ROOM_MESSAGES_PER_MINUTE`: per-room message cap, defaults to `600`
+- `HETZNER_COLLAB_MAX_ROOMS`: active room cap, defaults to `100`
 - `HETZNER_SSH_PORT`: SSH port, defaults to `22`
 
 Because GitHub Pages is HTTPS, production collaboration should use a `wss://` relay URL. Put a TLS reverse proxy such as Caddy or Nginx in front of the relay, or terminate TLS before forwarding to `127.0.0.1:8790`.
+
+The hosted relay accepts only high-entropy room IDs shaped like `room-<128-bit-hex>`. It rejects malformed encrypted envelopes before broadcast and enforces connection, room, and message-rate limits. The stock Caddy package does not include a rate-limit module; Caddy is configured for TLS termination, request-size limits, headers, and proxy timeouts, while WebSocket abuse limits are enforced by the relay process.
 
 The planned hosted, multi-user authentication design is documented in [`docs/ed25519-auth-plan.md`](docs/ed25519-auth-plan.md). It is not part of the current local bridge.
 

@@ -69,6 +69,7 @@ const URL_STORAGE_KEY = "blitz.collaboration.url";
 const ROOM_STORAGE_KEY = "blitz.collaboration.room";
 const DEFAULT_URL = "wss://62-238-2-245.sslip.io";
 const MAX_SCENE_BYTES = 16 * 1024 * 1024;
+const ROOM_PATTERN = /^room-[0-9a-f]{32}$/i;
 
 function base64Url(bytes: Uint8Array): string {
   return bytesToBase64(bytes).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
@@ -120,9 +121,9 @@ function validateUrl(value: string): string {
 }
 
 function validateRoom(value: string): string {
-  const room = value.trim();
-  if (!/^[a-zA-Z0-9._-]{1,80}$/.test(room)) {
-    throw new Error("Room names may contain letters, numbers, dots, underscores, and dashes.");
+  const room = value.trim().toLowerCase();
+  if (!ROOM_PATTERN.test(room)) {
+    throw new Error("Start a new collaboration to generate a secure room ID.");
   }
   return room;
 }
@@ -134,7 +135,7 @@ function randomId(): string {
 }
 
 function randomRoom(): string {
-  return `room-${randomId().slice(0, 16)}`;
+  return `room-${randomId()}`;
 }
 
 async function importRoomKey(encoded: string): Promise<CryptoKey> {
@@ -192,9 +193,12 @@ export function setupWsCollaboration(
   const seenCommands = new Set<string>();
 
   const hashSettings = readHashSettings();
+  const storedRoom = localStorage.getItem(ROOM_STORAGE_KEY) ?? undefined;
   elements.urlInput.value = localStorage.getItem(URL_STORAGE_KEY) ?? DEFAULT_URL;
   elements.roomInput.value =
-    hashSettings.room ?? localStorage.getItem(ROOM_STORAGE_KEY) ?? randomRoom();
+    (hashSettings.room && ROOM_PATTERN.test(hashSettings.room) ? hashSettings.room : undefined) ??
+    (storedRoom && ROOM_PATTERN.test(storedRoom) ? storedRoom : undefined) ??
+    randomRoom();
 
   const setStatus = (state: "disconnected" | "connecting" | "connected", message: string) => {
     elements.status.dataset.state = state;

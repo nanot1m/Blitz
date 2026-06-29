@@ -10,6 +10,21 @@ const maxMessageBytes = Number.parseInt(
   process.env.BLITZ_COLLAB_MAX_MESSAGE_BYTES ?? String(20 * 1024 * 1024),
   10,
 );
+const maxConnections = Number.parseInt(process.env.BLITZ_COLLAB_MAX_CONNECTIONS ?? "200", 10);
+const maxConnectionsPerIp = Number.parseInt(
+  process.env.BLITZ_COLLAB_MAX_CONNECTIONS_PER_IP ?? "20",
+  10,
+);
+const maxRooms = Number.parseInt(process.env.BLITZ_COLLAB_MAX_ROOMS ?? "100", 10);
+const maxPeersPerRoom = Number.parseInt(process.env.BLITZ_COLLAB_MAX_PEERS_PER_ROOM ?? "20", 10);
+const maxMessagesPerMinute = Number.parseInt(
+  process.env.BLITZ_COLLAB_MAX_MESSAGES_PER_MINUTE ?? "120",
+  10,
+);
+const maxRoomMessagesPerMinute = Number.parseInt(
+  process.env.BLITZ_COLLAB_MAX_ROOM_MESSAGES_PER_MINUTE ?? "600",
+  10,
+);
 const staticDirectory = process.env.BLITZ_STATIC_DIR
   ? resolve(process.env.BLITZ_STATIC_DIR)
   : undefined;
@@ -19,6 +34,14 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 }
 
 const rooms = new Map<string, Set<WebSocket>>();
+const ipConnections = new Map<string, number>();
+const roomBuckets = new Map<string, RateBucket>();
+let activeConnections = 0;
+
+type RateBucket = {
+  count: number;
+  resetAt: number;
+};
 
 const contentTypes = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -36,7 +59,85 @@ function roomFromUrl(url: string | undefined): string | undefined {
   }
   const parsed = new URL(url, "ws://localhost");
   const room = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
-  return /^[a-zA-Z0-9._-]{1,80}$/.test(room) ? room : undefined;
+  return /^room-[0-9a-f]{32}$/i.test(room) ? room.toLowerCase() : undefined;
+}
+
+function peerIp(request: Parameters<WebSocketServer["emit"]>[2]): string {
+  const forwarded = request.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0]?.trim() ?? request.socket.remoteAddress ?? "unknown";
+  }
+  return request.socket.remoteAddress ?? "unknown";
+}
+
+function increment(map: Map<string, number>, key: string): number {
+  const next = (map.get(key) ?? 0) + 1;
+  map.set(key, next);
+  return next;
+}
+
+function decrement(map: Map<string, number>, key: string): void {
+  const next = (map.get(key) ?? 0) - 1;
+  if (next > 0) {
+    map.set(key, next);
+  } else {
+    map.delete(key);
+  }
+}
+
+function allowBucket(bucket: RateBucket | undefined, limit: number, now: number): RateBucket | undefined {
+  if (limit < 1) {
+    return undefined;
+  }
+  if (!bucket || now >= bucket.resetAt) {
+    return { count: 1, resetAt: now + 60_000 };
+  }
+  if (bucket.count >= limit) {
+    return undefined;
+  }
+  bucket.count += 1;
+  return bucket;
+}
+
+function isBase64Url(value: unknown, minimumLength: number, maximumLength: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= minimumLength &&
+    value.length <= maximumLength &&
+    /^[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
+function validEnvelope(data: WebSocket.RawData, room: string): boolean {
+  if (Array.isArray(data)) {
+    return false;
+  }
+  const raw =
+    typeof data === "string"
+      ? data
+      : Buffer.isBuffer(data)
+        ? data.toString("utf8")
+        : Buffer.from(data).toString("utf8");
+  if (raw.length > maxMessageBytes) {
+    return false;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const envelope = value as Record<string, unknown>;
+  return (
+    envelope.type === "blitz.collab.encrypted" &&
+    envelope.version === 1 &&
+    envelope.room === room &&
+    isBase64Url(envelope.nonce, 16, 16) &&
+    isBase64Url(envelope.ciphertext, 24, Math.ceil((maxMessageBytes * 4) / 3))
+  );
 }
 
 function leaveRoom(webSocket: WebSocket, room: string): void {
@@ -137,16 +238,59 @@ webSocketServer.on("connection", (webSocket, request) => {
     webSocket.close(1008, "Invalid collaboration room.");
     return;
   }
+  const ip = peerIp(request);
+  if (activeConnections >= maxConnections) {
+    webSocket.close(1013, "Server connection limit reached.");
+    return;
+  }
+  if (increment(ipConnections, ip) > maxConnectionsPerIp) {
+    decrement(ipConnections, ip);
+    webSocket.close(1013, "IP connection limit reached.");
+    return;
+  }
+  activeConnections += 1;
 
   let peers = rooms.get(room);
   if (!peers) {
+    if (rooms.size >= maxRooms) {
+      activeConnections -= 1;
+      decrement(ipConnections, ip);
+      webSocket.close(1013, "Room limit reached.");
+      return;
+    }
     peers = new Set();
     rooms.set(room, peers);
+  } else if (peers.size >= maxPeersPerRoom) {
+    activeConnections -= 1;
+    decrement(ipConnections, ip);
+    webSocket.close(1013, "Room peer limit reached.");
+    return;
   }
   peers.add(webSocket);
   console.error(`Collaboration peer joined ${room}; peers=${peers.size}`);
 
   webSocket.on("message", (data) => {
+    const now = Date.now();
+    const peerBucket = allowBucket(
+      (webSocket as WebSocket & { blitzBucket?: RateBucket }).blitzBucket,
+      maxMessagesPerMinute,
+      now,
+    );
+    if (!peerBucket) {
+      webSocket.close(1008, "Message rate limit exceeded.");
+      return;
+    }
+    (webSocket as WebSocket & { blitzBucket?: RateBucket }).blitzBucket = peerBucket;
+    const roomBucket = allowBucket(roomBuckets.get(room), maxRoomMessagesPerMinute, now);
+    if (!roomBucket) {
+      webSocket.close(1013, "Room message rate limit exceeded.");
+      return;
+    }
+    roomBuckets.set(room, roomBucket);
+    if (!validEnvelope(data, room)) {
+      webSocket.close(1008, "Invalid encrypted envelope.");
+      return;
+    }
     const activePeers = rooms.get(room);
     if (!activePeers) {
       return;
@@ -160,6 +304,11 @@ webSocketServer.on("connection", (webSocket, request) => {
 
   webSocket.on("close", () => {
     leaveRoom(webSocket, room);
+    activeConnections -= 1;
+    decrement(ipConnections, ip);
+    if (!rooms.has(room)) {
+      roomBuckets.delete(room);
+    }
     console.error(`Collaboration peer left ${room}; peers=${rooms.get(room)?.size ?? 0}`);
   });
 });

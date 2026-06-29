@@ -43,11 +43,16 @@ jobs:
       - name: Typecheck relay
         run: npx tsc -p tsconfig.mcp.json
 
+      - name: Build relay
+        run: npm run build:relay
+
       - name: Pack release
         run: |
           set -euo pipefail
+          # Ship compiled JS, so the host runs plain `node` with only production
+          # dependencies — no tsx / dev deps, no compile-on-startup.
           mkdir -p .deploy/blitz
-          cp -R mcp package.json package-lock.json tsconfig.mcp.json .deploy/blitz/
+          cp -R relay-dist package.json package-lock.json .deploy/blitz/
           tar -C .deploy -czf blitz-${GITHUB_SHA}.tar.gz blitz
 
       - name: Configure SSH
@@ -82,7 +87,7 @@ jobs:
           RELEASE_DIR="$DEPLOY_DIR/releases/$GITHUB_SHA"
           tar -xzf "$RELEASE_DIR/release.tar.gz" -C "$RELEASE_DIR" --strip-components=1
           cd "$RELEASE_DIR"
-          npm ci
+          npm ci --omit=dev
 
           ln -sfn "$RELEASE_DIR" "$DEPLOY_DIR/current"
 
@@ -103,7 +108,7 @@ jobs:
           Environment=BLITZ_COLLAB_MAX_PEERS_PER_ROOM=$MAX_PEERS_PER_ROOM
           Environment=BLITZ_COLLAB_MAX_ROOM_MESSAGES_PER_MINUTE=$MAX_ROOM_MESSAGES_PER_MINUTE
           Environment=BLITZ_COLLAB_MAX_ROOMS=$MAX_ROOMS
-          ExecStart=$DEPLOY_DIR/current/node_modules/.bin/tsx mcp/collaboration-relay.ts
+          ExecStart=$(command -v node) $DEPLOY_DIR/current/relay-dist/collaboration-relay.js
           Restart=always
           RestartSec=5
 
@@ -125,9 +130,8 @@ jobs:
       - name: Health check
         run: |
           set -euo pipefail
-          # The relay runs under tsx, which compiles on startup, so the socket
-          # isn't bound the instant systemctl returns. Retry until it answers,
-          # and dump the service journal if it never does so the cause is visible.
+          # Retry until the relay binds (it starts fast as plain node, but give
+          # it a moment), and dump the service journal if it never does.
           ssh -i ~/.ssh/hetzner_deploy -p "$SSH_PORT" "${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }}" \
             "for _ in \$(seq 1 30); do \
                curl -fsS http://127.0.0.1:$DEPLOY_PORT/__blitz/collaboration/status && exit 0; \

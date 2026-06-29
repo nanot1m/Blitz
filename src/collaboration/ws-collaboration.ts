@@ -176,6 +176,22 @@ function actorHex(actor: ActorId): string {
   return `${actor.hi.toString(16).padStart(8, "0")}${actor.lo.toString(16).padStart(8, "0")}`;
 }
 
+async function messageText(data: unknown): Promise<string> {
+  if (typeof data === "string") {
+    return data;
+  }
+  if (data instanceof Blob) {
+    return data.text();
+  }
+  if (data instanceof ArrayBuffer) {
+    return new TextDecoder().decode(data);
+  }
+  if (ArrayBuffer.isView(data)) {
+    return new TextDecoder().decode(data);
+  }
+  throw new Error("Unsupported collaboration message format.");
+}
+
 export function setupWsCollaboration(
   elements: CollaborationElements,
   handlers: CollaborationHandlers,
@@ -293,9 +309,9 @@ export function setupWsCollaboration(
     });
   };
 
-  const handleCommand = async (event: MessageEvent<string>) => {
+  const handleCommand = async (event: MessageEvent) => {
     try {
-      const envelope = JSON.parse(event.data) as EncryptedEnvelope;
+      const envelope = JSON.parse(await messageText(event.data)) as EncryptedEnvelope;
       if (
         !envelope ||
         envelope.type !== "blitz.collab.encrypted" ||

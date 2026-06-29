@@ -108,9 +108,9 @@ function isBase64Url(value: unknown, minimumLength: number, maximumLength: numbe
   );
 }
 
-function validEnvelope(data: WebSocket.RawData, room: string): boolean {
+function envelopeText(data: WebSocket.RawData, room: string): string | undefined {
   if (Array.isArray(data)) {
-    return false;
+    return undefined;
   }
   const raw =
     typeof data === "string"
@@ -119,16 +119,16 @@ function validEnvelope(data: WebSocket.RawData, room: string): boolean {
         ? data.toString("utf8")
         : Buffer.from(data).toString("utf8");
   if (raw.length > maxMessageBytes) {
-    return false;
+    return undefined;
   }
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch {
-    return false;
+    return undefined;
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
+    return undefined;
   }
   const envelope = value as Record<string, unknown>;
   return (
@@ -137,7 +137,9 @@ function validEnvelope(data: WebSocket.RawData, room: string): boolean {
     envelope.room === room &&
     isBase64Url(envelope.nonce, 16, 16) &&
     isBase64Url(envelope.ciphertext, 24, Math.ceil((maxMessageBytes * 4) / 3))
-  );
+  )
+    ? raw
+    : undefined;
 }
 
 function leaveRoom(webSocket: WebSocket, room: string): void {
@@ -287,7 +289,8 @@ webSocketServer.on("connection", (webSocket, request) => {
       return;
     }
     roomBuckets.set(room, roomBucket);
-    if (!validEnvelope(data, room)) {
+    const raw = envelopeText(data, room);
+    if (!raw) {
       webSocket.close(1008, "Invalid encrypted envelope.");
       return;
     }
@@ -297,7 +300,7 @@ webSocketServer.on("connection", (webSocket, request) => {
     }
     for (const peer of activePeers) {
       if (peer !== webSocket && peer.readyState === WebSocket.OPEN) {
-        peer.send(data);
+        peer.send(raw);
       }
     }
   });

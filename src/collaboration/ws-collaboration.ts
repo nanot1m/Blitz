@@ -199,6 +199,10 @@ export function setupWsCollaboration(
   const seenCommands = new Set<string>();
 
   const hashSettings = readHashSettings();
+  const hashRoom =
+    hashSettings.room && ROOM_PATTERN.test(hashSettings.room)
+      ? hashSettings.room.toLowerCase()
+      : undefined;
   elements.urlInput.value = localStorage.getItem(URL_STORAGE_KEY) ?? DEFAULT_URL;
 
   const setStatus = (state: "disconnected" | "connecting" | "connected", message: string) => {
@@ -366,12 +370,8 @@ export function setupWsCollaboration(
     let room: string;
     try {
       url = validateUrl(urlValue);
-      room =
-        reconnectRoom ??
-        (hashSettings.room && ROOM_PATTERN.test(hashSettings.room)
-          ? hashSettings.room.toLowerCase()
-          : randomRoom());
-      if (hashSettings.key && hashSettings.room === room) {
+      room = reconnectRoom ?? hashRoom ?? randomRoom();
+      if (hashSettings.key && hashRoom === room) {
         encodedRoomKey = hashSettings.key;
         roomKey = await importRoomKey(encodedRoomKey);
         roomKeyRoom = room;
@@ -452,11 +452,14 @@ export function setupWsCollaboration(
     void importRoomKey(encodedRoomKey)
       .then((key) => {
         roomKey = key;
-        roomKeyRoom = hashSettings.room ?? "";
+        roomKeyRoom = hashRoom ?? "";
       })
       .catch((error) => setStatus("disconnected", error instanceof Error ? error.message : String(error)));
   }
   setStatus("disconnected", "Disconnected");
+  if (hashSettings.key && hashRoom) {
+    void connect(elements.urlInput.value, hashRoom);
+  }
 
   return {
     publishLocalChange() {

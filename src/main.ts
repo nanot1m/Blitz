@@ -357,9 +357,6 @@ async function boot() {
   }
   const format = navigator.gpu.getPreferredCanvasFormat();
   const depthFormat: GPUTextureFormat = "depth32float";
-  // 4x MSAA: pens render with binary coverage + depth-write (clean union, correct
-  // z-order, single-blend translucency); MSAA supplies the smooth edges.
-  const SAMPLE_COUNT = 4;
   context.configure({
     device,
     format,
@@ -463,7 +460,6 @@ async function boot() {
       depthWriteEnabled: false,
       depthCompare: "always",
     },
-    multisample: { count: SAMPLE_COUNT },
   });
   const bindGroupLayout = device.createBindGroupLayout({
     label: "Blitz Shape Bind Group Layout",
@@ -560,7 +556,6 @@ async function boot() {
       depthWriteEnabled: true,
       depthCompare: "greater-equal",
     },
-    multisample: { count: SAMPLE_COUNT },
   });
   const pathPipeline = device.createRenderPipeline({
     label: "Blitz Path Pipeline",
@@ -594,14 +589,13 @@ async function boot() {
       topology: "triangle-list",
     },
     depthStencil: {
-      // Depth-write on: binary coverage + MSAA means each pixel is owned by one
-      // capsule (first writer wins), so the union is clean, translucency blends
-      // once, and pens z-order correctly against shapes and text.
+      // Depth-write on with binary coverage: each pixel is owned by one capsule
+      // (first writer wins), so the union is clean, translucency blends once, and
+      // pens z-order correctly against shapes and text.
       format: depthFormat,
       depthWriteEnabled: true,
       depthCompare: "greater",
     },
-    multisample: { count: SAMPLE_COUNT },
   });
   const cullShader = device.createShaderModule({
     label: "Blitz Cull Shader",
@@ -960,14 +954,11 @@ async function boot() {
         ${metricRow("WASM reserved", formatBytes(wasm.memory.buffer.byteLength))}
         ${metricRow("WASM live", formatBytes(wasm.blitz_wasm_live_bytes()))}
         ${metricRow("GPU buffers", formatBytes(gpuBufferBytes()))}
-        ${metricRow("MSAA targets", formatBytes(ui.canvas.width * ui.canvas.height * 4 * SAMPLE_COUNT * 2))}
       </div>
     `;
   };
   let depthTexture: GPUTexture | null = null;
   let depthView: GPUTextureView | null = null;
-  let msaaColorTexture: GPUTexture | null = null;
-  let msaaColorView: GPUTextureView | null = null;
   const resize = () => {
     const dpr = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.floor(ui.canvas.clientWidth * dpr));
@@ -985,19 +976,9 @@ async function boot() {
         label: "Blitz Depth Texture",
         size: [width, height],
         format: depthFormat,
-        sampleCount: SAMPLE_COUNT,
         usage: GPUTextureUsage.RENDER_ATTACHMENT,
       });
       depthView = depthTexture.createView();
-      msaaColorTexture?.destroy();
-      msaaColorTexture = device.createTexture({
-        label: "Blitz MSAA Color Texture",
-        size: [width, height],
-        format,
-        sampleCount: SAMPLE_COUNT,
-        usage: GPUTextureUsage.RENDER_ATTACHMENT,
-      });
-      msaaColorView = msaaColorTexture.createView();
     }
   };
   const colorHex = (red: number, green: number, blue: number) =>
@@ -2881,11 +2862,10 @@ async function boot() {
       label: "Blitz Render Pass",
       colorAttachments: [
         {
-          view: msaaColorView!,
-          resolveTarget: context.getCurrentTexture().createView(),
+          view: context.getCurrentTexture().createView(),
           clearValue: { r: 0, g: 0, b: 0, a: 1 },
           loadOp: "clear",
-          storeOp: "discard",
+          storeOp: "store",
         },
       ],
       depthStencilAttachment: {

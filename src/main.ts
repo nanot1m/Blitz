@@ -17,6 +17,7 @@ import {
   setupWsCollaboration,
   type CollaborationController,
 } from "./collaboration/ws-collaboration";
+import { createRemoteCursors } from "./collaboration/remote-cursors";
 import { createBlitzUi } from "./ui";
 import "./style.css";
 type BlitzExports = {
@@ -1347,6 +1348,13 @@ async function boot() {
       y: (point.y - uniforms[1] * 0.5) / zoom + uniforms[3],
     };
   };
+  // Broadcast the local pointer (world coords) to collaborators; sendCursor is
+  // throttled and a no-op while disconnected. The listener above already
+  // refreshed lastCursorCanvasPoint, so cursorWorldPoint() is current here.
+  ui.canvas.addEventListener("pointermove", () => {
+    const world = cursorWorldPoint();
+    collaborationController?.sendCursor(world.x, world.y);
+  });
   const querySelectedShapes = (): ClipboardShape[] => {
     wasm.blitz_query_scene(
       -worldQueryExtent,
@@ -1768,6 +1776,7 @@ async function boot() {
   const cancelTextEdit = () => {
     closeTextEditor();
     ui.canvas.focus();
+    collaborationController?.flushDeferredSnapshot();
   };
   const commitTextEdit = () => {
     const session = textEditSession;
@@ -1778,6 +1787,7 @@ async function boot() {
     if (nextText === session.text) {
       closeTextEditor();
       ui.canvas.focus();
+      collaborationController?.flushDeferredSnapshot();
       return;
     }
     const textLength = writeTextInput(nextText);
@@ -1830,6 +1840,8 @@ async function boot() {
     closeTextEditor();
     ui.canvas.focus();
     updateSelectionState();
+    // The committed edit will publish; discard any snapshot deferred during it.
+    collaborationController?.dropDeferredSnapshot();
   };
   const beginTextEdit = () => {
     const session = selectedTextEditSession();
@@ -2455,6 +2467,11 @@ async function boot() {
     },
     mcpAdapter,
   );
+  const remoteCursorLayer = document.createElement("div");
+  remoteCursorLayer.style.cssText =
+    "position:fixed;inset:0;pointer-events:none;overflow:hidden;z-index:50;";
+  document.body.appendChild(remoteCursorLayer);
+  const remoteCursors = createRemoteCursors(remoteCursorLayer);
   collaborationController = setupWsCollaboration(
     {
       dialog: ui.collaborationSettingsDialog,
@@ -2488,6 +2505,10 @@ async function boot() {
       onRemoteApplied() {
         updateHistoryControls();
       },
+      onRemoteCursor(peerId, worldX, worldY) {
+        remoteCursors.update(peerId, worldX, worldY);
+      },
+      isBusy: () => textEditSession !== null,
       onError: ui.showFallback,
     },
   );
@@ -2928,6 +2949,14 @@ async function boot() {
     );
     uniforms[18] = gridVisible ? 1 : 0;
     device.queue.writeBuffer(uniformBuffer, 0, uniforms);
+    remoteCursors.render({
+      viewportWidth: uniforms[0],
+      viewportHeight: uniforms[1],
+      cameraX: uniforms[2],
+      cameraY: uniforms[3],
+      zoom: uniforms[4] || 1,
+      canvas: ui.canvas,
+    });
     positionTextEditor();
     const zoomPercent = Math.round(uniforms[4] * 100);
     if (zoomPercent !== lastZoomPercent) {

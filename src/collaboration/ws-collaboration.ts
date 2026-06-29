@@ -23,6 +23,10 @@ type CollaborationHandlers = {
   applyScene(bytes: Uint8Array): void;
   localRevision(): number;
   onRemoteApplied(): void;
+  onRemoteCursor(peerId: string, worldX: number, worldY: number): void;
+  // True while the local user is mid-interaction (e.g. editing text). A remote
+  // snapshot that arrives then is deferred instead of clobbering the edit.
+  isBusy(): boolean;
   onError(message: string): void;
 };
 
@@ -35,6 +39,13 @@ type CommandBody =
       kind: "scene-snapshot";
       revision: number;
       scene: string;
+    }
+  | {
+      // Ephemeral live-cursor position in world coordinates. Not deduped or
+      // logged (high frequency); peers project it onto their own viewport.
+      kind: "cursor";
+      x: number;
+      y: number;
     };
 
 type CommandPayload = {
@@ -63,7 +74,14 @@ type EncryptedEnvelope = {
 
 export type CollaborationController = {
   publishLocalChange(): void;
+  sendCursor(worldX: number, worldY: number): void;
+  // Called when a local edit finishes: flush applies a snapshot deferred during
+  // the edit; drop discards it (the local edit supersedes and will publish).
+  flushDeferredSnapshot(): void;
+  dropDeferredSnapshot(): void;
 };
+
+const CURSOR_SEND_INTERVAL_MS = 50;
 
 const URL_STORAGE_KEY = "blitz.collaboration.url";
 const DEFAULT_URL = "wss://62-238-2-245.sslip.io";
@@ -213,6 +231,7 @@ export function setupWsCollaboration(
   let lastPublishedRevision = handlers.localRevision();
   let latestSnapshotAt = 0;
   let publishTimer: number | undefined;
+  let deferredSnapshot: { bytes: Uint8Array; createdAt: number } | undefined;
   const seenCommands = new Set<string>();
   const debugLines: string[] = [];
 
@@ -316,9 +335,34 @@ export function setupWsCollaboration(
     socket.send(JSON.stringify(await encryptCommand(command)));
     log("send", {
       kind: body.kind,
-      revision: body.revision,
+      revision: "revision" in body ? body.revision : undefined,
       commandId: command.commandId.slice(-12),
     });
+  };
+
+  // Ephemeral, high-frequency send (cursors): signed + encrypted like any
+  // command, but never logged or added to seenCommands so it can't flood the
+  // debug log or grow that set unbounded.
+  let lastCursorSentAt = 0;
+  const sendCursor = (worldX: number, worldY: number) => {
+    if (!socket || socket.readyState !== WebSocket.OPEN || !roomKey) {
+      return;
+    }
+    const now = Date.now();
+    if (now - lastCursorSentAt < CURSOR_SEND_INTERVAL_MS) {
+      return;
+    }
+    lastCursorSentAt = now;
+    void (async () => {
+      try {
+        const command = await signCommand({ kind: "cursor", x: worldX, y: worldY });
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify(await encryptCommand(command)));
+        }
+      } catch {
+        // Ignore transient cursor send failures; the next move will retry.
+      }
+    })();
   };
 
   const publishSnapshot = async () => {
@@ -339,10 +383,19 @@ export function setupWsCollaboration(
     log("snapshot-published", { revision, bytes: scene.byteLength });
   };
 
+  const applyRemoteSnapshot = (bytes: Uint8Array, createdAt: number) => {
+    latestSnapshotAt = createdAt;
+    handlers.applyScene(bytes);
+    // applyScene bumps the local revision; record THAT (local space) as
+    // already-synced, otherwise the apply looks like a local edit and we echo
+    // the snapshot straight back, ping-ponging forever with the peer.
+    lastPublishedRevision = handlers.localRevision();
+    handlers.onRemoteApplied();
+  };
+
   const handleCommand = async (event: MessageEvent) => {
     try {
       const raw = await messageText(event.data);
-      log("receive-frame", { bytes: raw.length });
       const envelope = JSON.parse(raw) as EncryptedEnvelope;
       if (
         !envelope ||
@@ -362,21 +415,33 @@ export function setupWsCollaboration(
         command.room !== connectedRoom ||
         typeof command.commandId !== "string" ||
         typeof command.peerId !== "string" ||
-        typeof command.signature !== "string" ||
-        seenCommands.has(command.commandId)
+        typeof command.signature !== "string"
       ) {
-        log("receive-drop", {
-          reason: command && seenCommands.has(command.commandId) ? "seen-command" : "invalid-command",
-        });
+        log("receive-drop", { reason: "invalid-command" });
         return;
       }
-      seenCommands.add(command.commandId);
       identity ??= await getOrCreateCollaborationIdentity();
       const ok = await identity.verify(command.publicKey, commandPayload(command), command.signature);
       if (!ok) {
         log("receive-drop", { reason: "bad-signature", commandId: command.commandId.slice(-12) });
         return;
       }
+
+      // Cursors are ephemeral: handle before dedup/logging so they never grow
+      // seenCommands or flood the debug log. (Verified above to reject spoofs.)
+      if (command.body.kind === "cursor") {
+        if (command.peerId !== identity.peerId) {
+          handlers.onRemoteCursor(command.peerId, command.body.x, command.body.y);
+        }
+        return;
+      }
+
+      if (seenCommands.has(command.commandId)) {
+        log("receive-drop", { reason: "seen-command" });
+        return;
+      }
+      seenCommands.add(command.commandId);
+      log("receive-frame", { bytes: raw.length });
       log("receive", {
         kind: command.body.kind,
         revision: command.body.revision,
@@ -413,13 +478,15 @@ export function setupWsCollaboration(
           window.clearTimeout(publishTimer);
           publishTimer = undefined;
         }
-        latestSnapshotAt = command.createdAt;
-        handlers.applyScene(bytes);
-        // applyScene bumps the local revision; record THAT (local space) as
-        // already-synced, otherwise the apply looks like a local edit and we
-        // echo the snapshot straight back, ping-ponging forever with the peer.
-        lastPublishedRevision = handlers.localRevision();
-        handlers.onRemoteApplied();
+        // Don't clobber an in-progress local edit (e.g. open text editor); hold
+        // the newest snapshot and apply it once the user finishes (see the
+        // flush/drop controller methods).
+        if (handlers.isBusy()) {
+          deferredSnapshot = { bytes, createdAt: command.createdAt };
+          log("snapshot-deferred", { revision: command.body.revision });
+          return;
+        }
+        applyRemoteSnapshot(bytes, command.createdAt);
         log("snapshot-applied", { revision: command.body.revision, bytes: bytes.byteLength });
       }
     } catch (error) {
@@ -581,6 +648,19 @@ export function setupWsCollaboration(
         publishTimer = undefined;
         void publishSnapshot();
       }, 120);
+    },
+    sendCursor,
+    flushDeferredSnapshot() {
+      const pending = deferredSnapshot;
+      deferredSnapshot = undefined;
+      if (!pending || pending.createdAt < latestSnapshotAt) {
+        return;
+      }
+      applyRemoteSnapshot(pending.bytes, pending.createdAt);
+      log("snapshot-applied", { deferred: true, bytes: pending.bytes.byteLength });
+    },
+    dropDeferredSnapshot() {
+      deferredSnapshot = undefined;
     },
   };
 }

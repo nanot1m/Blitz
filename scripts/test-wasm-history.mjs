@@ -279,5 +279,42 @@ wasm.blitz_bring_to_front();
 check("no-op bring-to-front (already frontmost) adds no step",
   wasm.blitz_history_state_id() === stateBeforeNoop && orderOf(10) === 2);
 
+// --- 12. Moving items inside a container: undo stays linear, not O(n^2) -----
+// Parent restoration must not scan the world per entity when the parent (the
+// container) isn't itself in the transaction.
+console.log("move-in-container undo is linear");
+wasm.blitz_init();
+wasm.blitz_set_actor_id(1, 1);
+wasm.blitz_resize(1920, 1080);
+wasm.blitz_set_camera(960, 540, 1); // screen == world
+const FILLER = 40000;
+const LEAVES = 40000;
+for (let i = 0; i < FILLER; i += 1) {
+  wasm.blitz_create_rect(-100000 + (i % 100), 0, 2, 2, 1, 0, 0, 1, 0, 0, 0, 1, 1);
+}
+wasm.blitz_create_frame(0, 0, 1900, 1000, 0.9, 0.9, 0.9, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 18, 0);
+for (let i = 0; i < LEAVES; i += 1) {
+  wasm.blitz_create_rect(50 + (i % 180) * 10, 50 + Math.floor(i / 180), 6, 6, 0, 0, 1, 1, 0, 0, 0, 1, 1);
+}
+wasm.blitz_history_reset();
+// Marquee selects the leaves (fully inside) but not the container.
+wasm.blitz_begin_marquee(40, 40);
+wasm.blitz_pointer_move(1870, 900);
+wasm.blitz_pointer_up();
+const leavesSelected = wasm.blitz_selected_count();
+wasm.blitz_pointer_down(55, 55, 0);
+wasm.blitz_pointer_move(155, 155);
+wasm.blitz_pointer_up();
+const moveStart = performance.now();
+wasm.blitz_history_undo();
+const moveMs = performance.now() - moveStart;
+check(`marquee selected leaves only (${leavesSelected})`, leavesSelected === LEAVES);
+check(`undo of ${LEAVES} items in a container under 500ms (${moveMs.toFixed(0)}ms)`, moveMs < 500);
+check("redo of the in-container move stays fast", (() => {
+  const t = performance.now();
+  wasm.blitz_history_redo();
+  return performance.now() - t < 500;
+})());
+
 console.log(failures === 0 ? "\nWASM history test passed." : `\n${failures} failure(s).`);
 process.exit(failures === 0 ? 0 : 1);

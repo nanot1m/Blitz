@@ -1110,8 +1110,13 @@ static void mark_transform_subtree_dirty(u32 entity) {
   }
   for (u32 child = world.first_child[entity]; child != BLITZ_INVALID_INDEX;
        child = world.next_sibling[child]) {
-    mark_transform_dirty(child);
-    mark_transform_subtree_dirty(child);
+    // An already-dirty child's subtree was marked when it was dirtied (dirtying
+    // is always paired with this walk), so stop there — keeps marking a deeply
+    // nested hierarchy linear instead of re-walking overlapping subtrees.
+    if (!transform_dirty[child]) {
+      mark_transform_dirty(child);
+      mark_transform_subtree_dirty(child);
+    }
   }
 }
 
@@ -1446,8 +1451,8 @@ static void world_update_for_frame(void) {
 static u32 capture_entity_record(unsigned char *buf, u32 offset, u32 entity);
 static u32 apply_entity_record_into(const unsigned char *buf, u32 offset,
                                     u32 entity);
-static void apply_record_parent(const unsigned char *buf, u32 offset, u32 child,
-                                u32 parent);
+static void apply_record_parent(HistoryTransaction *txn, u32 have_map,
+                                const unsigned char *buf, u32 offset, u32 child);
 
 static u32 history_entity_payload_bytes(u32 entity) {
   u32 mask = world.masks[entity];
@@ -1992,9 +1997,9 @@ static void history_apply_transaction(HistoryTransaction *txn, u32 redo) {
   if (destroyed_any) {
     history_compact_draw_order();
   }
-  // Pass 2: relink parents now that every entity exists. Child comes from the
-  // refreshed hint; the parent is resolved through the per-transaction map,
-  // falling back to a scan only for a parent outside this transaction.
+  // Pass 2: relink parents now that every entity exists. apply_record_parent
+  // detects an unchanged parent in O(1) (so a move never scans) and resolves
+  // through the per-transaction map only on a real reparent.
   u32 have_map = history_apply_map_build(txn);
   for (u32 i = 0u; i < txn->entry_count; i += 1u) {
     HistoryEntry *e = &txn->entries[i];
@@ -2002,19 +2007,7 @@ static void history_apply_transaction(HistoryTransaction *txn, u32 redo) {
     if (restore_offset == BLITZ_INVALID_INDEX || e->entity == BLITZ_INVALID_INDEX) {
       continue;
     }
-    ObjectId parent_id = {read_u32(txn->bytes, restore_offset + 112u),
-                          read_u32(txn->bytes, restore_offset + 116u),
-                          read_u32(txn->bytes, restore_offset + 120u),
-                          read_u32(txn->bytes, restore_offset + 124u)};
-    u32 parent = BLITZ_INVALID_INDEX;
-    if (!object_id_is_zero(parent_id)) {
-      parent = have_map ? history_apply_map_lookup(txn, parent_id)
-                        : BLITZ_INVALID_INDEX;
-      if (parent == BLITZ_INVALID_INDEX) {
-        parent = entity_for_object_id(parent_id);
-      }
-    }
-    apply_record_parent(txn->bytes, restore_offset, e->entity, parent);
+    apply_record_parent(txn, have_map, txn->bytes, restore_offset, e->entity);
   }
   if (redo ? txn->order_after != 0 : txn->order_before != 0) {
     history_restore_draw_order(redo ? txn->order_after : txn->order_before,
@@ -2344,20 +2337,54 @@ static u32 capture_entity_record(unsigned char *buf, u32 offset, u32 entity) {
 // Re-establish a record's relative-transform parent. `child` is the already
 // resolved entity; `parent` is its resolved parent (INVALID when the record has
 // no parent). Call after all records in a delta have been applied.
-static void apply_record_parent(const unsigned char *buf, u32 offset, u32 child,
-                                u32 parent) {
+static void apply_record_parent(HistoryTransaction *txn, u32 have_map,
+                                const unsigned char *buf, u32 offset, u32 child) {
   if (child == BLITZ_INVALID_INDEX) {
     return;
   }
-  if (parent == BLITZ_INVALID_INDEX) {
-    if (world.masks[child] & BLITZ_COMPONENT_RELATIVE_TRANSFORM) {
+  ObjectId parent_id = {read_u32(buf, offset + 112u),
+                        read_u32(buf, offset + 116u),
+                        read_u32(buf, offset + 120u),
+                        read_u32(buf, offset + 124u)};
+  u32 has_relative = world.masks[child] & BLITZ_COMPONENT_RELATIVE_TRANSFORM;
+  u32 current = has_relative ? world.relative_transforms[child].parent
+                             : BLITZ_INVALID_INDEX;
+  if (object_id_is_zero(parent_id)) {
+    if (has_relative) {
       detach_from_parent(child);
     }
     return;
   }
-  attach_relative_transform(child, parent, read_f32(buf, offset + 128u),
-                            read_f32(buf, offset + 132u));
+  float offset_x = read_f32(buf, offset + 128u);
+  float offset_y = read_f32(buf, offset + 132u);
+  // Parent unchanged (the common case for a move) is detected by comparing the
+  // current parent's object_id in O(1) — crucially without resolving parent_id,
+  // which would otherwise be a per-entity scan when the parent isn't itself in
+  // the transaction (e.g. moving items but not their container). Only restore
+  // the offset and re-resolve the subtree if it actually moved.
+  if (current != BLITZ_INVALID_INDEX && world.masks[current] != 0u &&
+      object_id_equal(world.object_ids[current], parent_id)) {
+    RelativeTransform *relative = &world.relative_transforms[child];
+    if (relative->offset_x != offset_x || relative->offset_y != offset_y) {
+      relative->offset_x = offset_x;
+      relative->offset_y = offset_y;
+      mark_transform_dirty(child);
+      mark_transform_subtree_dirty(child);
+    }
+    return;
+  }
+  // A real reparent: resolve the parent (in-transaction map, else a scan) and
+  // re-link. attach_relative_transform's O(subtree) cycle check runs only here.
+  u32 parent = have_map ? history_apply_map_lookup(txn, parent_id)
+                        : BLITZ_INVALID_INDEX;
+  if (parent == BLITZ_INVALID_INDEX) {
+    parent = entity_for_object_id(parent_id);
+  }
+  if (parent != BLITZ_INVALID_INDEX) {
+    attach_relative_transform(child, parent, offset_x, offset_y);
+  }
 }
+
 
 // Create or update an entity from a record (id-stable). `entity` is the target
 // slot, or INVALID to create a fresh one. Existing entities are updated in place

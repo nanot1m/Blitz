@@ -27,6 +27,7 @@ usize strlen(const char *text) {
 #define BLITZ_MAX_TEXT_DRAWS 262144u
 #define BLITZ_MAX_DYN_RECTS 1000000u
 #define BLITZ_MAX_DYN_COMMANDS (BLITZ_MAX_TEXT_DRAWS + BLITZ_MAX_DYN_RECTS)
+#define BLITZ_DEFAULT_CAMERA_ZOOM 2.0f
 #define BLITZ_MIN_TEXT_PX 3.0f
 #define BLITZ_TEXT_INPUT_BYTES 4096u
 #define BLITZ_TEXT_POOL_BYTES (16u * 1024u * 1024u)
@@ -5241,7 +5242,7 @@ void blitz_init(void) {
   scene_revision = 0u;
   scene_start_camera_x = 0.0f;
   scene_start_camera_y = 0.0f;
-  scene_start_camera_zoom = 1.0f;
+  scene_start_camera_zoom = BLITZ_DEFAULT_CAMERA_ZOOM;
   next_object_id_sequence_hi = 0u;
   next_object_id_sequence_lo = 1u;
   last_created_object_id = object_id_zero();
@@ -5251,7 +5252,7 @@ void blitz_init(void) {
   uniforms.viewport_camera[1] = 1.0f;
   uniforms.viewport_camera[2] = 0.0f;
   uniforms.viewport_camera[3] = 0.0f;
-  uniforms.style[0] = 1.0f;
+  uniforms.style[0] = BLITZ_DEFAULT_CAMERA_ZOOM;
   uniforms.style[1] = 0.0f;
   uniforms.style[2] = 0.0f;
   uniforms.style[3] = 0.0f;
@@ -5294,7 +5295,7 @@ void blitz_resize(float width, float height) {
     uniforms.viewport_camera[0] = next_width;
     uniforms.viewport_camera[1] = next_height;
     if (!camera_fit_initialized) {
-      uniforms.style[0] = 1.0f;
+      uniforms.style[0] = BLITZ_DEFAULT_CAMERA_ZOOM;
       camera_fit_initialized = 1u;
     }
     mark_view_dirty();
@@ -5880,10 +5881,10 @@ void blitz_load_demo_template(void) {
   slide_origin_y = 0.0f;
   uniforms.viewport_camera[2] = 0.0f;
   uniforms.viewport_camera[3] = 0.0f;
-  uniforms.style[0] = 1.0f;
+  uniforms.style[0] = BLITZ_DEFAULT_CAMERA_ZOOM;
   scene_start_camera_x = 0.0f;
   scene_start_camera_y = 0.0f;
-  scene_start_camera_zoom = 1.0f;
+  scene_start_camera_zoom = BLITZ_DEFAULT_CAMERA_ZOOM;
   create_demo_world();
   clear_selection();
   mark_render_list_dirty();

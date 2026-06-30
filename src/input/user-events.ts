@@ -15,8 +15,13 @@ type CanvasInteractionOptions = {
   cancelEdit(): void;
   commitEdit(): void;
   createPenStroke(points: Array<{ x: number; y: number }>): void;
+  beginShapeDraft(point: { x: number; y: number }): boolean;
+  updateShapeDraft(point: { x: number; y: number }): void;
+  commitShapeDraft(point: { x: number; y: number }): void;
+  cancelShapeDraft(): void;
   updatePenDraft(points: Array<{ x: number; y: number }>): void;
   clearPenDraft(): void;
+  isCreationToolActive(): boolean;
   isPenMode(): boolean;
   onSelectionChanged(): void;
 };
@@ -26,7 +31,9 @@ export type CanvasInteractionController = {
 };
 
 type KeyboardShortcutOptions = {
+  activateTool(tool: "rect" | "circle" | "pen" | "frame"): void;
   beginTextEdit(): void;
+  cancelActiveTool(): void;
   copySelection(): void | Promise<void>;
   deleteSelection(): void;
   duplicateSelection(): void;
@@ -52,6 +59,7 @@ type UiActionElements = {
   sendToBackButton: HTMLButtonElement;
   shapeMenu: HTMLDetailsElement;
   stressTestButton: HTMLButtonElement;
+  toggleBackgroundThemeButton: HTMLButtonElement;
   toggleGridButton: HTMLButtonElement;
   toggleStatsButton: HTMLButtonElement;
 };
@@ -68,6 +76,7 @@ type UiActions = {
   openFile(): void;
   sendToBack(): void;
   stressTest(): void;
+  toggleBackgroundTheme(): void;
   toggleGrid(): void;
   toggleStats(): void;
 };
@@ -187,6 +196,7 @@ export function setupCanvasInteractions(
   let lastTapY = 0;
   let penPointerId: number | null = null;
   let penPoints: Array<{ x: number; y: number }> = [];
+  let shapePointerId: number | null = null;
 
   const eventToCanvasPixels = (event: PointerEvent | WheelEvent) => {
     const rect = canvas.getBoundingClientRect();
@@ -349,6 +359,8 @@ export function setupCanvasInteractions(
     penPointerId = null;
     penPoints = [];
     options.clearPenDraft();
+    shapePointerId = null;
+    options.cancelShapeDraft();
     draggingCamera = false;
     draggingEntity = false;
     resizingEntity = false;
@@ -365,6 +377,23 @@ export function setupCanvasInteractions(
   };
 
   canvas.addEventListener("pointerdown", (event) => {
+    canvas.focus({ preventScroll: true });
+    if (
+      options.isCreationToolActive() &&
+      !options.isPenMode() &&
+      event.button === 0 &&
+      activeTouches.size === 0
+    ) {
+      event.preventDefault();
+      stopDragging();
+      const point = eventToCanvasPixels(event);
+      if (options.beginShapeDraft(point)) {
+        shapePointerId = event.pointerId;
+        canvas.setPointerCapture(event.pointerId);
+        canvas.classList.add("is-selecting");
+      }
+      return;
+    }
     if (options.isPenMode() && event.button === 0 && activeTouches.size === 0) {
       event.preventDefault();
       stopDragging();
@@ -473,6 +502,11 @@ export function setupCanvasInteractions(
   });
 
   canvas.addEventListener("pointermove", (event) => {
+    if (shapePointerId === event.pointerId) {
+      event.preventDefault();
+      options.updateShapeDraft(eventToCanvasPixels(event));
+      return;
+    }
     if (penPointerId === event.pointerId) {
       event.preventDefault();
       const point = eventToCanvasPixels(event);
@@ -567,6 +601,17 @@ export function setupCanvasInteractions(
   });
 
   canvas.addEventListener("pointerup", (event) => {
+    if (shapePointerId === event.pointerId) {
+      event.preventDefault();
+      shapePointerId = null;
+      clearInteractionClasses();
+      if (canvas.hasPointerCapture(event.pointerId)) {
+        canvas.releasePointerCapture(event.pointerId);
+      }
+      options.commitShapeDraft(eventToCanvasPixels(event));
+      options.onSelectionChanged();
+      return;
+    }
     if (penPointerId === event.pointerId) {
       event.preventDefault();
       const point = eventToCanvasPixels(event);
@@ -663,6 +708,15 @@ export function setupCanvasInteractions(
   });
 
   canvas.addEventListener("pointercancel", (event) => {
+    if (shapePointerId === event.pointerId) {
+      shapePointerId = null;
+      options.cancelShapeDraft();
+      clearInteractionClasses();
+      if (canvas.hasPointerCapture(event.pointerId)) {
+        canvas.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
     if (penPointerId === event.pointerId) {
       penPointerId = null;
       penPoints = [];
@@ -760,7 +814,26 @@ export function setupKeyboardShortcuts(options: KeyboardShortcutOptions): void {
       return;
     }
 
+    if (event.key === "Escape") {
+      event.preventDefault();
+      options.stopDragging();
+      options.cancelActiveTool();
+      return;
+    }
+
     const commandKey = event.ctrlKey || event.metaKey;
+    if (!commandKey && !event.altKey) {
+      const key = event.key.toLowerCase();
+      if (key === "r" || key === "o" || key === "p" || key === "f") {
+        event.preventDefault();
+        options.stopDragging();
+        if (key === "r") options.activateTool("rect");
+        if (key === "o") options.activateTool("circle");
+        if (key === "p") options.activateTool("pen");
+        if (key === "f") options.activateTool("frame");
+        return;
+      }
+    }
     if (commandKey && !event.altKey) {
       const key = event.key.toLowerCase();
       if (key === "z") {
@@ -837,6 +910,7 @@ export function setupUiActions(elements: UiActionElements, actions: UiActions): 
   elements.sendToBackButton.addEventListener("click", actions.sendToBack);
   elements.bringToFrontButton.addEventListener("click", actions.bringToFront);
   elements.toggleGridButton.addEventListener("click", actions.toggleGrid);
+  elements.toggleBackgroundThemeButton.addEventListener("click", actions.toggleBackgroundTheme);
   elements.toggleStatsButton.addEventListener("click", actions.toggleStats);
   elements.emptyOpenFileButton.addEventListener("click", actions.openFile);
   elements.emptyDemoTemplateButton.addEventListener("click", actions.loadDemoTemplate);
@@ -873,6 +947,8 @@ const DEFAULT_COLOR_PALETTE = [
 const isHexColor = (value: string) => /^#[0-9a-f]{6}$/i.test(value);
 
 export interface ColorPopoverOptions {
+  label?: string;
+  layout?: "stack" | "split";
   palette?: string[];
   // Show the alpha slider; omit for opaque-only pickers (e.g. the pen color).
   showAlpha?: boolean;
@@ -923,7 +999,18 @@ export function attachColorPopover(
     close();
     popover = document.createElement("div");
     popover.className = "color-picker-popover";
+    if (options.layout === "split") {
+      popover.classList.add("color-picker-popover--split");
+    }
     popover.addEventListener("pointerdown", (event) => event.stopPropagation());
+    const colorSection = document.createElement("div");
+    colorSection.className = "color-picker-section";
+    if (options.label) {
+      const label = document.createElement("div");
+      label.className = "color-picker-section-label";
+      label.textContent = options.label;
+      colorSection.append(label);
+    }
     const swatches = document.createElement("div");
     swatches.className = "color-picker-swatches";
     const currentValue = (options.getValue?.() ?? button.value) || "#000000";
@@ -975,7 +1062,7 @@ export function attachColorPopover(
       }
     });
     valueRow.append(nativePicker, hexInput);
-    popover.append(swatches, valueRow);
+    colorSection.append(swatches, valueRow);
     if (options.showAlpha) {
       const alpha = document.createElement("input");
       alpha.type = "range";
@@ -986,8 +1073,9 @@ export function attachColorPopover(
       alpha.className = "color-picker-alpha";
       alpha.setAttribute("aria-label", "Alpha");
       alpha.addEventListener("input", () => options.onAlpha?.(Number(alpha.value)));
-      popover.append(alpha);
+      colorSection.append(alpha);
     }
+    popover.append(colorSection);
     options.buildExtra?.(popover);
     document.body.append(popover);
     const rect = button.getBoundingClientRect();

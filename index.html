@@ -11,7 +11,7 @@
     <title>Blitz</title>
   </head>
   <body>
-    <canvas id="blitz-canvas" aria-label="Blitz WebGPU canvas"></canvas>
+    <canvas id="blitz-canvas" tabindex="0" aria-label="Blitz WebGPU canvas"></canvas>
     <textarea id="text-editor" aria-label="Edit selected text" hidden></textarea>
     <div id="tool-island" role="toolbar" aria-label="Canvas tools">
       <details id="file-menu">
@@ -102,6 +102,9 @@
         <div class="view-menu-content" role="group" aria-label="View and settings tools">
           <button id="toggle-grid" type="button" aria-label="Toggle grid" title="Toggle grid" aria-pressed="true">
             <i data-lucide="grid-2-x-2" aria-hidden="true"></i>
+          </button>
+          <button id="toggle-background-theme" type="button" aria-label="Toggle paper background" title="Toggle paper background" aria-pressed="false">
+            <i data-lucide="sun" aria-hidden="true"></i>
           </button>
           <button id="toggle-stats" type="button" aria-label="Stats for nerds" title="Stats for nerds" aria-pressed="false">
             <i data-lucide="activity" aria-hidden="true"></i>

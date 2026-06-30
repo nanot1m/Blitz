@@ -688,7 +688,7 @@ const defaultViewHeader = new DataView(
 if (
   Math.abs(defaultViewHeader.getFloat32(16, true)) > 0.001 ||
   Math.abs(defaultViewHeader.getFloat32(20, true)) > 0.001 ||
-  Math.abs(defaultViewHeader.getFloat32(24, true) - 1) > 0.001
+  Math.abs(defaultViewHeader.getFloat32(24, true) - 2) > 0.001
 ) {
   throw new Error("A regular save unexpectedly captured the current viewport.");
 }

@@ -62,7 +62,13 @@ fn background_fragment_main(in: VertexOut) -> @location(0) vec4f {
   let bold_horizontal = line_alpha(world.y, bold_spacing, bold_width);
   let regular = max(regular_vertical, regular_horizontal) * regular_visible;
   let bold = max(bold_vertical, bold_horizontal);
-  color = mix(color, vec3f(0.12, 0.15, 0.18), min(regular * 0.34, 1.0));
-  color = mix(color, vec3f(0.16, 0.19, 0.23), min(bold * 0.46, 1.0));
+  let luma = dot(u.background_color.rgb, vec3f(0.2126, 0.7152, 0.0722));
+  let light_theme = select(0.0, 1.0, luma > 0.5);
+  let regular_grid = mix(vec3f(0.12, 0.15, 0.18), vec3f(0.78, 0.73, 0.64), light_theme);
+  let bold_grid = mix(vec3f(0.16, 0.19, 0.23), vec3f(0.66, 0.60, 0.50), light_theme);
+  let regular_strength = mix(0.34, 0.22, light_theme);
+  let bold_strength = mix(0.46, 0.30, light_theme);
+  color = mix(color, regular_grid, min(regular * regular_strength, 1.0));
+  color = mix(color, bold_grid, min(bold * bold_strength, 1.0));
   return vec4f(color, u.background_color.a);
 }

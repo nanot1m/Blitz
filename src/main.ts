@@ -321,6 +321,11 @@ type BlitzExports = {
   blitz_render_max_text_draws(): number;
 };
 const blitzShapeText = 3;
+const blitzShapeRect = 0;
+const blitzShapeTriangle = 1;
+const blitzShapeOval = 2;
+const blitzShapeFrame = 4;
+const blitzUpdateGeometry = 1 | 2 | 4 | 8;
 const blitzUpdateText = 128;
 const blitzInvalidIndex = 0xffffffff;
 const textPaddingWorld = 4;
@@ -1041,6 +1046,37 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
   const drawArgsReset = new Uint32Array([6, 0, 0, 0]);
   let statsVisible = false;
   let gridVisible = true;
+  const BACKGROUND_THEME_STORAGE_KEY = "blitz:background-theme";
+  type BackgroundTheme = "dark" | "paper";
+  const readBackgroundTheme = (): BackgroundTheme => {
+    try {
+      return localStorage.getItem(BACKGROUND_THEME_STORAGE_KEY) === "paper"
+        ? "paper"
+        : "dark";
+    } catch {
+      return "dark";
+    }
+  };
+  const persistBackgroundTheme = (theme: BackgroundTheme) => {
+    try {
+      localStorage.setItem(BACKGROUND_THEME_STORAGE_KEY, theme);
+    } catch {
+      // localStorage unavailable; the theme still applies for this session.
+    }
+  };
+  const backgroundColors: Record<BackgroundTheme, readonly [number, number, number, number]> = {
+    dark: [0.058, 0.075, 0.092, 1],
+    paper: [0.965, 0.949, 0.91, 1],
+  };
+  let backgroundTheme = readBackgroundTheme();
+  const syncBackgroundThemeUi = () => {
+    document.body.dataset.backgroundTheme = backgroundTheme;
+    ui.toggleBackgroundThemeButton.setAttribute(
+      "aria-pressed",
+      backgroundTheme === "paper" ? "true" : "false",
+    );
+  };
+  syncBackgroundThemeUi();
   let frameMs = 16;
   let lastFrameStamp = 0;
   let lastStatsAt = 0;
@@ -2304,11 +2340,23 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     ui.redoButton.disabled = !sceneHistory.canRedo();
   };
   updateHistoryControls();
+  type CreationTool = "rect" | "frame" | "circle" | "triangle" | "text" | "pen";
+  let activeTool: CreationTool | null = null;
   let penMode = false;
   const PEN_COLOR_STORAGE_KEY = "blitz:pen-color";
   const PEN_WIDTH_STORAGE_KEY = "blitz:pen-width";
+  const SHAPE_FILL_STORAGE_KEY = "blitz:shape-fill";
+  const SHAPE_FILL_ALPHA_STORAGE_KEY = "blitz:shape-fill-alpha";
+  const SHAPE_STROKE_STORAGE_KEY = "blitz:shape-stroke";
+  const SHAPE_STROKE_ALPHA_STORAGE_KEY = "blitz:shape-stroke-alpha";
+  const SHAPE_STROKE_WIDTH_STORAGE_KEY = "blitz:shape-stroke-width";
+  const TEXT_COLOR_STORAGE_KEY = "blitz:text-tool-color";
+  const TEXT_FONT_SIZE_STORAGE_KEY = "blitz:text-tool-font-size";
   const DEFAULT_PEN_COLOR = "#141a21";
   const DEFAULT_PEN_WIDTH = 4;
+  const DEFAULT_SHAPE_FILL = "#dbeafe";
+  const DEFAULT_SHAPE_STROKE = "#94a3b8";
+  const DEFAULT_TEXT_COLOR = "#141a21";
   const hexToRgb = (hex: string) => ({
     r: Number.parseInt(hex.slice(1, 3), 16) / 255,
     g: Number.parseInt(hex.slice(3, 5), 16) / 255,
@@ -2334,10 +2382,53 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       ? storedColor
       : DEFAULT_PEN_COLOR;
   const storedWidth = Number(readStored(PEN_WIDTH_STORAGE_KEY));
+  const storedShapeFill = readStored(SHAPE_FILL_STORAGE_KEY);
+  const storedShapeFillAlpha = readStored(SHAPE_FILL_ALPHA_STORAGE_KEY);
+  const storedShapeStroke = readStored(SHAPE_STROKE_STORAGE_KEY);
+  const storedShapeStrokeAlpha = readStored(SHAPE_STROKE_ALPHA_STORAGE_KEY);
+  const storedShapeStrokeWidth = Number(readStored(SHAPE_STROKE_WIDTH_STORAGE_KEY));
+  const storedTextColor = readStored(TEXT_COLOR_STORAGE_KEY);
+  const storedTextFontSize = Number(readStored(TEXT_FONT_SIZE_STORAGE_KEY));
+  const parseStoredAlpha = (value: string | null) => {
+    if (value === null) {
+      return 1;
+    }
+    const alpha = Number(value);
+    return Number.isFinite(alpha) && alpha >= 0 && alpha <= 1 ? alpha : 1;
+  };
   // Pens have a fill color and a line width, no stroke.
   const penFill = { ...hexToRgb(penColorHex), a: 1 };
   let penWidth =
     Number.isFinite(storedWidth) && storedWidth > 0 ? storedWidth : DEFAULT_PEN_WIDTH;
+  let shapeFillHex =
+    storedShapeFill && /^#[0-9a-f]{6}$/i.test(storedShapeFill)
+      ? storedShapeFill
+      : DEFAULT_SHAPE_FILL;
+  const shapeFill = {
+    ...hexToRgb(shapeFillHex),
+    a: parseStoredAlpha(storedShapeFillAlpha),
+  };
+  let shapeStrokeHex =
+    storedShapeStroke && /^#[0-9a-f]{6}$/i.test(storedShapeStroke)
+      ? storedShapeStroke
+      : DEFAULT_SHAPE_STROKE;
+  const shapeStroke = {
+    ...hexToRgb(shapeStrokeHex),
+    a: parseStoredAlpha(storedShapeStrokeAlpha),
+  };
+  let shapeStrokeWidth =
+    Number.isFinite(storedShapeStrokeWidth) && storedShapeStrokeWidth >= 0
+      ? storedShapeStrokeWidth
+      : 1;
+  let textToolColorHex =
+    storedTextColor && /^#[0-9a-f]{6}$/i.test(storedTextColor)
+      ? storedTextColor
+      : DEFAULT_TEXT_COLOR;
+  const textToolColor = { ...hexToRgb(textToolColorHex), a: 1 };
+  let textToolFontSize =
+    Number.isFinite(storedTextFontSize) && storedTextFontSize > 0
+      ? storedTextFontSize
+      : 24;
   const applyPenColor = (hex: string) => {
     penColorHex = hex;
     const { r, g, b } = hexToRgb(hex);
@@ -2349,6 +2440,46 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
   const applyPenWidth = (width: number) => {
     penWidth = width;
     persist(PEN_WIDTH_STORAGE_KEY, String(width));
+  };
+  const applyShapeFill = (hex: string) => {
+    shapeFillHex = hex;
+    const { r, g, b } = hexToRgb(hex);
+    shapeFill.r = r;
+    shapeFill.g = g;
+    shapeFill.b = b;
+    persist(SHAPE_FILL_STORAGE_KEY, hex);
+  };
+  const applyShapeFillAlpha = (alpha: number) => {
+    shapeFill.a = alpha;
+    persist(SHAPE_FILL_ALPHA_STORAGE_KEY, String(alpha));
+  };
+  const applyShapeStroke = (hex: string) => {
+    shapeStrokeHex = hex;
+    const { r, g, b } = hexToRgb(hex);
+    shapeStroke.r = r;
+    shapeStroke.g = g;
+    shapeStroke.b = b;
+    persist(SHAPE_STROKE_STORAGE_KEY, hex);
+  };
+  const applyShapeStrokeAlpha = (alpha: number) => {
+    shapeStroke.a = alpha;
+    persist(SHAPE_STROKE_ALPHA_STORAGE_KEY, String(alpha));
+  };
+  const applyShapeStrokeWidth = (width: number) => {
+    shapeStrokeWidth = width;
+    persist(SHAPE_STROKE_WIDTH_STORAGE_KEY, String(width));
+  };
+  const applyTextToolColor = (hex: string) => {
+    textToolColorHex = hex;
+    const { r, g, b } = hexToRgb(hex);
+    textToolColor.r = r;
+    textToolColor.g = g;
+    textToolColor.b = b;
+    persist(TEXT_COLOR_STORAGE_KEY, hex);
+  };
+  const applyTextToolFontSize = (fontSize: number) => {
+    textToolFontSize = fontSize;
+    persist(TEXT_FONT_SIZE_STORAGE_KEY, String(fontSize));
   };
   // Width number input appended below the color section in the pen dropdown.
   const buildPenWidthControl = (popover: HTMLDivElement) => {
@@ -2378,15 +2509,171 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     onColor: applyPenColor,
     buildExtra: buildPenWidthControl,
   });
-  const setPenMode = (enabled: boolean) => {
-    penMode = enabled;
-    ui.penToolButton.setAttribute("aria-pressed", String(enabled));
-    // The styles dropdown stays open for the whole drawing session.
-    if (enabled) {
-      penPopover.open();
-    } else {
-      penPopover.close();
+  const buildShapeStyleControls = (popover: HTMLDivElement) => {
+    const strokeControls = document.createElement("div");
+    strokeControls.className = "tool-stroke-controls";
+    const sectionLabel = document.createElement("div");
+    sectionLabel.className = "color-picker-section-label";
+    sectionLabel.textContent = "Stroke";
+    const colorRow = document.createElement("div");
+    colorRow.className = "color-picker-value";
+    const nativePicker = document.createElement("span");
+    nativePicker.className = "color-picker-native-control";
+    const nativeInput = document.createElement("input");
+    nativeInput.type = "color";
+    nativeInput.value = shapeStrokeHex;
+    nativeInput.setAttribute("aria-label", "Stroke color");
+    nativePicker.append(nativeInput);
+    const hexInput = document.createElement("input");
+    hexInput.type = "text";
+    hexInput.inputMode = "text";
+    hexInput.spellcheck = false;
+    hexInput.value = shapeStrokeHex;
+    hexInput.setAttribute("aria-label", "Stroke hex color");
+    nativeInput.addEventListener("input", () => {
+      applyShapeStroke(nativeInput.value);
+      hexInput.value = nativeInput.value.toUpperCase();
+    });
+    hexInput.addEventListener("input", () => {
+      const value = hexInput.value.trim();
+      if (!/^#[0-9a-f]{6}$/i.test(value)) {
+        return;
+      }
+      nativeInput.value = value;
+      applyShapeStroke(value);
+    });
+    colorRow.append(nativePicker, hexInput);
+    const alpha = document.createElement("input");
+    alpha.type = "range";
+    alpha.min = "0";
+    alpha.max = "1";
+    alpha.step = "0.01";
+    alpha.value = String(shapeStroke.a);
+    alpha.className = "color-picker-alpha";
+    alpha.setAttribute("aria-label", "Stroke alpha");
+    alpha.addEventListener("input", () => applyShapeStrokeAlpha(Number(alpha.value)));
+    const row = document.createElement("label");
+    row.className = "pen-width-control";
+    const label = document.createElement("span");
+    label.textContent = "Width";
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.max = "64";
+    input.step = "0.5";
+    input.value = String(shapeStrokeWidth);
+    input.setAttribute("aria-label", "Stroke width");
+    input.addEventListener("input", () => {
+      const width = Number(input.value);
+      if (Number.isFinite(width) && width >= 0) {
+        applyShapeStrokeWidth(width);
+      }
+    });
+    row.append(label, input);
+    strokeControls.append(sectionLabel, colorRow, alpha, row);
+    popover.append(strokeControls);
+  };
+  const buildTextToolControls = (popover: HTMLDivElement) => {
+    const row = document.createElement("label");
+    row.className = "pen-width-control";
+    const label = document.createElement("span");
+    label.textContent = "Size";
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "4";
+    input.max = "512";
+    input.step = "1";
+    input.value = String(textToolFontSize);
+    input.setAttribute("aria-label", "Font size");
+    input.addEventListener("input", () => {
+      const fontSize = Number(input.value);
+      if (Number.isFinite(fontSize) && fontSize > 0) {
+        applyTextToolFontSize(fontSize);
+      }
+    });
+    row.append(label, input);
+    popover.append(row);
+  };
+  const shapeToolPopovers = new Map<CreationTool, ReturnType<typeof attachColorPopover>>([
+    ["rect", attachColorPopover(ui.addRectButton, {
+      label: "Fill",
+      layout: "split",
+      manualToggle: true,
+      showAlpha: true,
+      getAlpha: () => shapeFill.a,
+      getValue: () => shapeFillHex,
+      onColor: applyShapeFill,
+      onAlpha: applyShapeFillAlpha,
+      buildExtra: buildShapeStyleControls,
+    })],
+    ["frame", attachColorPopover(ui.addFrameButton, {
+      label: "Fill",
+      layout: "split",
+      manualToggle: true,
+      showAlpha: true,
+      getAlpha: () => shapeFill.a,
+      getValue: () => shapeFillHex,
+      onColor: applyShapeFill,
+      onAlpha: applyShapeFillAlpha,
+      buildExtra: buildShapeStyleControls,
+    })],
+    ["circle", attachColorPopover(ui.addCircleButton, {
+      label: "Fill",
+      layout: "split",
+      manualToggle: true,
+      showAlpha: true,
+      getAlpha: () => shapeFill.a,
+      getValue: () => shapeFillHex,
+      onColor: applyShapeFill,
+      onAlpha: applyShapeFillAlpha,
+      buildExtra: buildShapeStyleControls,
+    })],
+    ["triangle", attachColorPopover(ui.addTriangleButton, {
+      label: "Fill",
+      layout: "split",
+      manualToggle: true,
+      showAlpha: true,
+      getAlpha: () => shapeFill.a,
+      getValue: () => shapeFillHex,
+      onColor: applyShapeFill,
+      onAlpha: applyShapeFillAlpha,
+      buildExtra: buildShapeStyleControls,
+    })],
+    ["text", attachColorPopover(ui.addTextButton, {
+      manualToggle: true,
+      getValue: () => textToolColorHex,
+      onColor: applyTextToolColor,
+      buildExtra: buildTextToolControls,
+    })],
+    ["pen", penPopover],
+  ]);
+  const toolButtons = new Map<CreationTool, HTMLButtonElement>([
+    ["rect", ui.addRectButton],
+    ["frame", ui.addFrameButton],
+    ["circle", ui.addCircleButton],
+    ["triangle", ui.addTriangleButton],
+    ["text", ui.addTextButton],
+    ["pen", ui.penToolButton],
+  ]);
+  const setActiveTool = (tool: CreationTool | null) => {
+    activeTool = tool;
+    penMode = tool === "pen";
+    for (const [name, button] of toolButtons) {
+      const selected = name === tool;
+      button.setAttribute("aria-pressed", String(selected));
+      const popover = shapeToolPopovers.get(name);
+      if (selected) {
+        popover?.open();
+      } else {
+        popover?.close();
+      }
     }
+  };
+  const toggleTool = (tool: CreationTool) => {
+    setActiveTool(activeTool === tool ? null : tool);
+  };
+  const setPenMode = (enabled: boolean) => {
+    setActiveTool(enabled ? "pen" : null);
   };
   const smoothPenPoints = (points: Array<{ x: number; y: number }>, capacity: number) => {
     if (points.length < 3) {
@@ -2478,6 +2765,10 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     return count;
   };
   const updatePenDraft = (points: Array<{ x: number; y: number }>) => {
+    if (emptyStateVisible) {
+      emptyStateVisible = false;
+      ui.emptyState.hidden = true;
+    }
     const count = writePathPoints(points);
     if (count < 2) {
       wasm.blitz_clear_path_draft();
@@ -2494,6 +2785,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
   };
   const clearPenDraft = () => {
     wasm.blitz_clear_path_draft();
+    updateEmptyState();
   };
   const createPenStroke = (points: Array<{ x: number; y: number }>) => {
     const count = writePathPoints(points);
@@ -2515,6 +2807,248 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     updateSelectionState();
     updateEmptyState();
   };
+  type ShapeDraft = {
+    tool: Exclude<CreationTool, "pen" | "text">;
+    objectId: ObjectIdWords;
+    startCanvas: { x: number; y: number };
+    startWorld: { x: number; y: number };
+  };
+  let shapeDraft: ShapeDraft | null = null;
+  const canvasToWorld = (point: { x: number; y: number }) => {
+    const uniforms = new Float32Array(
+      wasm.memory.buffer,
+      uniformPtr,
+      wasm.blitz_uniform_f32_count(),
+    );
+    const zoom = uniforms[4] || 1;
+    return {
+      x: (point.x - uniforms[0] * 0.5) / zoom + uniforms[2],
+      y: (point.y - uniforms[1] * 0.5) / zoom + uniforms[3],
+    };
+  };
+  const shapeBoundsFromDrag = (draft: ShapeDraft, point: { x: number; y: number }) => {
+    const world = canvasToWorld(point);
+    const dx = world.x - draft.startWorld.x;
+    const dy = world.y - draft.startWorld.y;
+    const clickLike =
+      Math.hypot(point.x - draft.startCanvas.x, point.y - draft.startCanvas.y) < 3;
+    if (clickLike) {
+      if (draft.tool === "circle") {
+        return {
+          x: draft.startWorld.x - 48,
+          y: draft.startWorld.y - 48,
+          width: 96,
+          height: 96,
+        };
+      }
+      return {
+        x: draft.startWorld.x,
+        y: draft.startWorld.y,
+        width: 160,
+        height: draft.tool === "frame" ? 100 : 96,
+      };
+    }
+    if (draft.tool === "circle") {
+      const side = Math.max(1, Math.max(Math.abs(dx), Math.abs(dy)));
+      return {
+        x: dx < 0 ? draft.startWorld.x - side : draft.startWorld.x,
+        y: dy < 0 ? draft.startWorld.y - side : draft.startWorld.y,
+        width: side,
+        height: side,
+      };
+    }
+    return {
+      x: Math.min(draft.startWorld.x, world.x),
+      y: Math.min(draft.startWorld.y, world.y),
+      width: Math.max(1, Math.abs(dx)),
+      height: Math.max(1, Math.abs(dy)),
+    };
+  };
+  const updateDraftObject = (draft: ShapeDraft, point: { x: number; y: number }) => {
+    const bounds = shapeBoundsFromDrag(draft, point);
+    const kind =
+      draft.tool === "triangle"
+        ? blitzShapeTriangle
+        : draft.tool === "circle"
+          ? blitzShapeOval
+          : draft.tool === "frame"
+            ? blitzShapeFrame
+            : blitzShapeRect;
+    const updateX = draft.tool === "circle" ? bounds.x + bounds.width * 0.5 : bounds.x;
+    const updateY = draft.tool === "circle" ? bounds.y + bounds.height * 0.5 : bounds.y;
+    wasm.blitz_update_object(
+      draft.objectId[0],
+      draft.objectId[1],
+      draft.objectId[2],
+      draft.objectId[3],
+      kind,
+      blitzUpdateGeometry,
+      updateX,
+      updateY,
+      bounds.width,
+      bounds.height,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+    );
+  };
+  const createToolText = (point: { x: number; y: number }) => {
+    const world = canvasToWorld(point);
+    const textLength = writeTextInput("Text");
+    if (textLength < 0) {
+      return;
+    }
+    sceneHistory.transact(() => {
+      wasm.blitz_create_text(
+        world.x,
+        world.y,
+        textToolFontSize,
+        textToolColor.r,
+        textToolColor.g,
+        textToolColor.b,
+        textToolColor.a,
+        textLength,
+        0,
+        1.2,
+        0,
+        0,
+      );
+    });
+    setActiveTool(null);
+    updateSelectionState();
+    updateEmptyState();
+    beginTextEdit();
+  };
+  const beginShapeDraft = (point: { x: number; y: number }) => {
+    if (!activeTool || activeTool === "pen") {
+      return false;
+    }
+    if (activeTool === "text") {
+      createToolText(point);
+      return false;
+    }
+    const world = canvasToWorld(point);
+    sceneHistory.begin();
+    let entity = blitzInvalidIndex;
+    if (activeTool === "frame") {
+      entity = wasm.blitz_create_frame(
+        world.x,
+        world.y,
+        1,
+        1,
+        shapeFill.r,
+        shapeFill.g,
+        shapeFill.b,
+        shapeFill.a,
+        shapeStroke.r,
+        shapeStroke.g,
+        shapeStroke.b,
+        shapeStroke.a,
+        shapeStrokeWidth,
+        textToolColor.r,
+        textToolColor.g,
+        textToolColor.b,
+        textToolColor.a,
+        18,
+        0,
+      );
+    } else if (activeTool === "circle") {
+      entity = wasm.blitz_create_oval(
+        world.x - 0.5,
+        world.y - 0.5,
+        1,
+        1,
+        shapeFill.r,
+        shapeFill.g,
+        shapeFill.b,
+        shapeFill.a,
+        shapeStroke.r,
+        shapeStroke.g,
+        shapeStroke.b,
+        shapeStroke.a,
+        shapeStrokeWidth,
+      );
+    } else {
+      const create =
+        activeTool === "rect" ? wasm.blitz_create_rect : wasm.blitz_create_triangle;
+      entity = create(
+        world.x,
+        world.y,
+        1,
+        1,
+        shapeFill.r,
+        shapeFill.g,
+        shapeFill.b,
+        shapeFill.a,
+        shapeStroke.r,
+        shapeStroke.g,
+        shapeStroke.b,
+        shapeStroke.a,
+        shapeStrokeWidth,
+      );
+    }
+    if (entity === blitzInvalidIndex) {
+      sceneHistory.cancel();
+      return false;
+    }
+    shapeDraft = {
+      tool: activeTool,
+      objectId: readLastCreatedObjectId(),
+      startCanvas: point,
+      startWorld: world,
+    };
+    updateSelectionState();
+    return true;
+  };
+  const updateShapeDraft = (point: { x: number; y: number }) => {
+    if (!shapeDraft) {
+      return;
+    }
+    updateDraftObject(shapeDraft, point);
+    updateSelectionState();
+  };
+  const commitShapeDraft = (point: { x: number; y: number }) => {
+    if (!shapeDraft) {
+      return;
+    }
+    updateDraftObject(shapeDraft, point);
+    shapeDraft = null;
+    sceneHistory.commit();
+    setActiveTool(null);
+    updateSelectionState();
+    updateEmptyState();
+  };
+  const cancelShapeDraft = () => {
+    if (!shapeDraft) {
+      return;
+    }
+    shapeDraft = null;
+    sceneHistory.cancel();
+    updateSelectionState();
+    updateEmptyState();
+  };
+  const cancelActiveTool = () => {
+    cancelShapeDraft();
+    wasm.blitz_clear_path_draft();
+    setActiveTool(null);
+    updateEmptyState();
+  };
   ui.penToolButton.addEventListener("click", () => {
     setPenMode(!penMode);
   });
@@ -2524,8 +3058,13 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     cancelEdit: sceneHistory.cancel,
     commitEdit: sceneHistory.commit,
     createPenStroke,
+    beginShapeDraft,
+    updateShapeDraft,
+    commitShapeDraft,
+    cancelShapeDraft,
     updatePenDraft,
     clearPenDraft,
+    isCreationToolActive: () => activeTool !== null,
     isPenMode: () => penMode,
     onSelectionChanged: updateSelectionState,
   }).stopDragging;
@@ -2685,29 +3224,25 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       sendToBackButton: ui.sendToBackButton,
       shapeMenu: ui.shapeMenu,
       stressTestButton: ui.stressTestButton,
+      toggleBackgroundThemeButton: ui.toggleBackgroundThemeButton,
       toggleGridButton: ui.toggleGridButton,
       toggleStatsButton: ui.toggleStatsButton,
     },
     {
       addCircle: () => {
-        setPenMode(false);
-        runSceneAction(wasm.blitz_add_circle);
+        toggleTool("circle");
       },
       addFrame: () => {
-        setPenMode(false);
-        runSceneAction(wasm.blitz_add_frame);
+        toggleTool("frame");
       },
       addRect: () => {
-        setPenMode(false);
-        runSceneAction(wasm.blitz_add_rect);
+        toggleTool("rect");
       },
       addText: () => {
-        setPenMode(false);
-        runSceneAction(wasm.blitz_add_text);
+        toggleTool("text");
       },
       addTriangle: () => {
-        setPenMode(false);
-        runSceneAction(wasm.blitz_add_triangle);
+        toggleTool("triangle");
       },
       bringToFront: () => {
         sceneHistory.transact(wasm.blitz_bring_to_front);
@@ -2728,6 +3263,11 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
           "aria-pressed",
           gridVisible ? "true" : "false",
         );
+      },
+      toggleBackgroundTheme() {
+        backgroundTheme = backgroundTheme === "paper" ? "dark" : "paper";
+        persistBackgroundTheme(backgroundTheme);
+        syncBackgroundThemeUi();
       },
       toggleStats() {
         statsVisible = !statsVisible;
@@ -2839,7 +3379,11 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
   ui.undoButton.addEventListener("click", undoHistory);
   ui.redoButton.addEventListener("click", redoHistory);
   setupKeyboardShortcuts({
+    activateTool(tool) {
+      toggleTool(tool);
+    },
     beginTextEdit,
+    cancelActiveTool,
     copySelection,
     deleteSelection,
     duplicateSelection,
@@ -3103,6 +3647,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       uniformPtr,
       wasm.blitz_uniform_f32_count(),
     );
+    uniforms.set(backgroundColors[backgroundTheme], 8);
     uniforms[18] = gridVisible ? 1 : 0;
     device.queue.writeBuffer(uniformBuffer, 0, uniforms);
     remoteCursors.render({

@@ -4,6 +4,7 @@ struct BlitzUniforms {
   background_color: vec4f,
   font_params: vec4f,
   interaction: vec4f,
+  rotation: vec4f,
 };
 
 @group(0) @binding(0)

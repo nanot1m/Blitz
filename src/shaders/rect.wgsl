@@ -4,6 +4,7 @@ struct BlitzUniforms {
   background_color: vec4f,
   font_params: vec4f,
   interaction: vec4f,
+  rotation: vec4f,
 };
 
 struct ShapeCommand {
@@ -218,14 +219,18 @@ fn shape_vertex_main(
     world = path_vertex(path_draws[command.y], shape_vertex_index);
   }
 
-  // High bit of the order word flags a dragged command: translate the
-  // rasterized position by the drag offset (interaction.xy). out.world stays in
-  // original geometry space so the fragment coverage is just shifted, not warped.
-  let order = command.w & 0x7fffffffu;
+  // High command bits are live interaction flags. The rasterized position is
+  // preview-transformed by uniforms while out.world stays in original geometry
+  // space, so fragment coverage is not retessellated during drag/rotate.
+  let order = command.w & 0x3fffffffu;
   let dragged = (command.w & 0x80000000u) != 0u;
+  let rotating = (command.w & 0x40000000u) != 0u;
   var draw_world = world;
   if (dragged) {
     draw_world = world + u.interaction.xy;
+  }
+  if (rotating) {
+    draw_world = rotate_around(draw_world, u.rotation.yz, u.rotation.x);
   }
 
   // Draw-order index as depth so the depth test resolves z-order across the
@@ -256,11 +261,13 @@ fn path_vertex_main(@builtin(vertex_index) vertex_index: u32,
   let draw = path_draws[seg.draw_index];
   let half_width = draw.render.z * 0.5;
   let order = draw.render.x;
-  let dragged = draw.render.y > 0.5;
+  let state = u32(draw.render.y + 0.5);
+  let dragged = (state & 1u) != 0u;
+  let rotating = (state & 2u) != 0u;
   let drag_offset = select(vec2f(0.0, 0.0), u.interaction.xy, dragged);
   let center = draw.bounds.xy + draw.bounds.zw * 0.5;
-  let a = rotate_around(vec2f(seg.ax, seg.ay), center, draw.render.w) + drag_offset;
-  let b = rotate_around(vec2f(seg.bx, seg.by), center, draw.render.w) + drag_offset;
+  let a = rotate_around(vec2f(seg.ax, seg.ay), center, draw.render.w);
+  let b = rotate_around(vec2f(seg.bx, seg.by), center, draw.render.w);
   let delta = b - a;
   let len = length(delta);
   let dir = select(vec2f(1.0, 0.0), delta / len, len > 0.0001);
@@ -275,6 +282,10 @@ fn path_vertex_main(@builtin(vertex_index) vertex_index: u32,
   );
   var order_index = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
   let corner = corners[order_index[vertex_index]];
+  var draw_corner = corner + drag_offset;
+  if (rotating) {
+    draw_corner = rotate_around(draw_corner, u.rotation.yz, u.rotation.x);
+  }
 
   var depth = (order + 1.0) / (u.style.w + 4.0);
   if (dragged && u.interaction.w > 0.5) {
@@ -282,7 +293,7 @@ fn path_vertex_main(@builtin(vertex_index) vertex_index: u32,
   }
 
   var out: PathVertexOut;
-  out.position = vec4f(world_to_clip(corner), depth, 1.0);
+  out.position = vec4f(world_to_clip(draw_corner), depth, 1.0);
   out.color = draw.fill_color;
   out.world = corner;
   out.seg_a = a;

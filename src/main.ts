@@ -31,6 +31,7 @@ type BlitzExports = {
   blitz_zoom_at(screenX: number, screenY: number, zoomDelta: number): void;
   blitz_hit_test(screenX: number, screenY: number): number;
   blitz_resize_mode_at(screenX: number, screenY: number): number;
+  blitz_resize_cursor_angle_at(screenX: number, screenY: number): number;
   blitz_pointer_down(
     screenX: number,
     screenY: number,

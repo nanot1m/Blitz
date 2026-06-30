@@ -4,6 +4,7 @@ struct BlitzUniforms {
   background_color: vec4f,
   font_params: vec4f,
   interaction: vec4f,
+  rotation: vec4f,
 };
 
 struct ShapeCommand {
@@ -133,7 +134,7 @@ fn cull_main(@builtin(global_invocation_id) gid: vec3u) {
 
   // Dragged commands are translated in the shader, so their stored bounds are
   // stale; keep them unconditionally rather than culling on the old position.
-  if ((command.w & 0x80000000u) != 0u) {
+  if ((command.w & 0xc0000000u) != 0u) {
     visible_commands[index].kind_index_entity_pad = command;
     return;
   }

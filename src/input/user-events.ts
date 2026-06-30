@@ -6,6 +6,7 @@ type CanvasInteractionWasm = {
   blitz_pointer_move(screenX: number, screenY: number): void;
   blitz_pointer_up(): void;
   blitz_resize_mode_at(screenX: number, screenY: number): number;
+  blitz_resize_cursor_angle_at(screenX: number, screenY: number): number;
   blitz_zoom_at(screenX: number, screenY: number, zoomDelta: number): void;
 };
 
@@ -172,6 +173,7 @@ export function setupCanvasInteractions(
   let draggingEntity = false;
   let resizingEntity = false;
   let resizePointerMode = 0;
+  let resizeCursorAngle = 0;
   let selectingArea = false;
   let mouseEntityDragPending = false;
   let editTransactionActive = false;
@@ -216,44 +218,64 @@ export function setupCanvasInteractions(
     };
   };
 
-  // Custom drag cursor: while dragging an item we hide the OS cursor (which the
+  // Custom interaction cursor: while dragging/rotating an item we hide the OS
+  // cursor (which the
   // compositor draws in real time, so it always runs ahead of the canvas) and
   // draw our own at the same pointer position the frame is rendered from. The
   // synthetic cursor and the dragged item then share the same latency, so the
   // item no longer appears to trail the pointer.
-  let dragCursorEl: HTMLDivElement | null = null;
+  let interactionCursorEl: HTMLDivElement | null = null;
   // Centered on the pointer (the move cursor's hotspot is its center).
-  const positionDragCursor = (clientX: number, clientY: number) => {
-    if (dragCursorEl) {
-      dragCursorEl.style.transform =
+  const positionInteractionCursor = (clientX: number, clientY: number) => {
+    if (interactionCursorEl) {
+      interactionCursorEl.style.transform =
         `translate(${clientX}px, ${clientY}px) translate(-50%, -50%)`;
     }
   };
-  const showDragCursor = (clientX: number, clientY: number) => {
-    if (!dragCursorEl) {
-      dragCursorEl = document.createElement("div");
-      dragCursorEl.style.cssText =
+  const moveCursorSvg =
+    '<svg width="16" height="16" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
+    '<path d="M12 1.5 L8.5 5 H10.75 V10.75 H5 V8.5 L1.5 12 L5 15.5 V13.25 H10.75 V19 H8.5 ' +
+    'L12 22.5 L15.5 19 H13.25 V13.25 H19 V15.5 L22.5 12 L19 8.5 V10.75 H13.25 V5 H15.5 Z" ' +
+    'fill="white" stroke="black" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+  const rotateCursorSvg =
+    '<svg width="16" height="16" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
+    '<path fill="none" stroke="white" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" ' +
+    'd="M21 12a9 9 0 1 1-2.64-6.36L21 8M21 3v5h-5"/>' +
+    '<path fill="none" stroke="#141a21" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" ' +
+    'd="M21 12a9 9 0 1 1-2.64-6.36L21 8M21 3v5h-5"/></svg>';
+  const resizeCursorSvg = (angle: number) =>
+    `<svg width="18" height="18" viewBox="0 0 24 24" style="transform:rotate(${angle}rad)" xmlns="http://www.w3.org/2000/svg">` +
+    '<path fill="none" stroke="white" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" ' +
+    'd="M4 12h16M4 12l4-4M4 12l4 4M20 12l-4-4M20 12l-4 4"/>' +
+    '<path fill="none" stroke="#141a21" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" ' +
+    'd="M4 12h16M4 12l4-4M4 12l4 4M20 12l-4-4M20 12l-4 4"/></svg>';
+  const showInteractionCursor = (
+    clientX: number,
+    clientY: number,
+    kind: "move" | "resize" | "rotate",
+    angle = 0,
+  ) => {
+    if (!interactionCursorEl) {
+      interactionCursorEl = document.createElement("div");
+      interactionCursorEl.style.cssText =
         "position:fixed;left:0;top:0;pointer-events:none;z-index:99999;will-change:transform;";
-      dragCursorEl.innerHTML =
-        '<svg width="16" height="16" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
-        '<path d="M12 1.5 L8.5 5 H10.75 V10.75 H5 V8.5 L1.5 12 L5 15.5 V13.25 H10.75 V19 H8.5 ' +
-        'L12 22.5 L15.5 19 H13.25 V13.25 H19 V15.5 L22.5 12 L19 8.5 V10.75 H13.25 V5 H15.5 Z" ' +
-        'fill="white" stroke="black" stroke-width="1.6" stroke-linejoin="round"/></svg>';
-      document.body.appendChild(dragCursorEl);
+      document.body.appendChild(interactionCursorEl);
     }
-    dragCursorEl.style.display = "block";
-    positionDragCursor(clientX, clientY);
+    interactionCursorEl.innerHTML =
+      kind === "rotate" ? rotateCursorSvg : kind === "resize" ? resizeCursorSvg(angle) : moveCursorSvg;
+    interactionCursorEl.style.display = "block";
+    positionInteractionCursor(clientX, clientY);
     canvas.style.cursor = "none";
   };
-  const updateDragCursor = (clientX: number, clientY: number) => {
-    if (!dragCursorEl || dragCursorEl.style.display === "none") {
+  const updateInteractionCursor = (clientX: number, clientY: number) => {
+    if (!interactionCursorEl || interactionCursorEl.style.display === "none") {
       return;
     }
-    positionDragCursor(clientX, clientY);
+    positionInteractionCursor(clientX, clientY);
   };
-  const hideDragCursor = () => {
-    if (dragCursorEl) {
-      dragCursorEl.style.display = "none";
+  const hideInteractionCursor = () => {
+    if (interactionCursorEl) {
+      interactionCursorEl.style.display = "none";
     }
     canvas.style.cursor = "";
   };
@@ -281,12 +303,24 @@ export function setupCanvasInteractions(
     }
   };
 
-  const setResizeCursor = (pointerMode: number) => {
-    canvas.classList.toggle("is-resizing-nwse", pointerMode === 3 || pointerMode === 5);
-    canvas.classList.toggle("is-resizing-nesw", pointerMode === 4 || pointerMode === 6);
-    canvas.classList.toggle("is-resizing-ns", pointerMode === 7 || pointerMode === 9);
-    canvas.classList.toggle("is-resizing-ew", pointerMode === 8 || pointerMode === 10);
+  const setResizeCursor = (
+    pointerMode: number,
+    clientX?: number,
+    clientY?: number,
+    angle = 0,
+  ) => {
+    canvas.classList.toggle("is-resizing-nwse", false);
+    canvas.classList.toggle("is-resizing-nesw", false);
+    canvas.classList.toggle("is-resizing-ns", false);
+    canvas.classList.toggle("is-resizing-ew", false);
     canvas.classList.toggle("is-rotating", pointerMode === 11);
+    if (pointerMode >= 3 && pointerMode <= 10 && clientX !== undefined && clientY !== undefined) {
+      showInteractionCursor(clientX, clientY, "resize", angle);
+    } else if (pointerMode === 11) {
+      hideInteractionCursor();
+    } else if (pointerMode !== 11 && !draggingEntity && !resizingEntity) {
+      hideInteractionCursor();
+    }
   };
 
   const clearInteractionClasses = () => {
@@ -312,6 +346,7 @@ export function setupCanvasInteractions(
       draggingEntity = false;
       resizingEntity = false;
       resizePointerMode = 0;
+      resizeCursorAngle = 0;
       selectingArea = true;
       canvas.classList.toggle("is-dragging-entity", false);
       canvas.classList.toggle("is-selecting", true);
@@ -325,6 +360,10 @@ export function setupCanvasInteractions(
     draggingEntity = pointerMode === 1;
     resizingEntity = pointerMode >= 3;
     resizePointerMode = resizingEntity ? pointerMode : 0;
+    resizeCursorAngle =
+      pointerMode >= 3 && pointerMode <= 10
+        ? wasm.blitz_resize_cursor_angle_at(start.x, start.y)
+        : 0;
     selectingArea = false;
     canvas.classList.toggle("is-dragging-entity", draggingEntity);
     setResizeCursor(pointerMode);
@@ -345,6 +384,7 @@ export function setupCanvasInteractions(
     draggingEntity = false;
     resizingEntity = false;
     resizePointerMode = 0;
+    resizeCursorAngle = 0;
     selectingArea = false;
     draggingCamera = true;
     touchMode = "pinch";
@@ -367,10 +407,11 @@ export function setupCanvasInteractions(
     draggingEntity = false;
     resizingEntity = false;
     resizePointerMode = 0;
+    resizeCursorAngle = 0;
     selectingArea = false;
     mouseEntityDragPending = false;
     clearInteractionClasses();
-    hideDragCursor();
+    hideInteractionCursor();
     wasm.blitz_pointer_up();
     if (editTransactionActive) {
       options.commitEdit();
@@ -461,6 +502,10 @@ export function setupCanvasInteractions(
       draggingEntity = pointerMode === 1;
       resizingEntity = pointerMode >= 3;
       resizePointerMode = resizingEntity ? pointerMode : 0;
+      resizeCursorAngle =
+        pointerMode >= 3 && pointerMode <= 10
+          ? wasm.blitz_resize_cursor_angle_at(point.x, point.y)
+          : 0;
       selectingArea = pointerMode === 2;
       if (selectingArea) {
         options.cancelEdit();
@@ -488,6 +533,7 @@ export function setupCanvasInteractions(
           draggingEntity = false;
           resizingEntity = false;
           resizePointerMode = 0;
+          resizeCursorAngle = 0;
           mouseEntityDragPending = false;
           selectingArea = true;
           canvas.classList.toggle("is-dragging-entity", false);
@@ -568,7 +614,12 @@ export function setupCanvasInteractions(
 
     if (!draggingCamera && !draggingEntity && !resizingEntity && !selectingArea) {
       const point = eventToCanvasPixels(event);
-      setResizeCursor(wasm.blitz_resize_mode_at(point.x, point.y));
+      const pointerMode = wasm.blitz_resize_mode_at(point.x, point.y);
+      const angle =
+        pointerMode >= 3 && pointerMode <= 10
+          ? wasm.blitz_resize_cursor_angle_at(point.x, point.y)
+          : 0;
+      setResizeCursor(pointerMode, event.clientX, event.clientY, angle);
       return;
     }
 
@@ -586,15 +637,20 @@ export function setupCanvasInteractions(
         clearLongPressTimer();
         if (draggingEntity) {
           canvas.classList.add("is-dragging-entity");
-          showDragCursor(event.clientX, event.clientY);
+          showInteractionCursor(event.clientX, event.clientY, "move");
         }
         if (resizingEntity) {
           setResizeCursor(resizePointerMode);
+          if (resizePointerMode === 11) {
+            showInteractionCursor(event.clientX, event.clientY, "rotate");
+          } else if (resizePointerMode >= 3 && resizePointerMode <= 10) {
+            showInteractionCursor(event.clientX, event.clientY, "resize", resizeCursorAngle);
+          }
         }
       }
       const point = eventToCanvasPixels(event);
       wasm.blitz_pointer_move(point.x, point.y);
-      updateDragCursor(event.clientX, event.clientY);
+      updateInteractionCursor(event.clientX, event.clientY);
     } else {
       wasm.blitz_pan((event.clientX - lastX) * dpr, (event.clientY - lastY) * dpr);
     }
@@ -692,6 +748,7 @@ export function setupCanvasInteractions(
         draggingEntity = false;
         resizingEntity = false;
         resizePointerMode = 0;
+        resizeCursorAngle = 0;
         selectingArea = false;
         clearInteractionClasses();
         options.onSelectionChanged();
@@ -750,6 +807,7 @@ export function setupCanvasInteractions(
         draggingEntity = false;
         resizingEntity = false;
         resizePointerMode = 0;
+        resizeCursorAngle = 0;
         selectingArea = false;
         clearInteractionClasses();
       }

@@ -337,7 +337,7 @@ if (wasm.blitz_set_rotation(...containerId, Math.PI / 2) !== 1) {
   throw new Error("Failed to rotate relative-transform parent.");
 }
 childItem = querySceneItemByObjectId(childId);
-expectNear(childItem.x, 95, "Relative child x after parent rotation");
+expectNear(childItem.x, 145, "Relative child x after parent rotation");
 expectNear(childItem.y, 105, "Relative child y after parent rotation");
 expectNear(childItem.rotation, Math.PI / 2, "Relative child inherited parent rotation");
 expectNear(childItem.relativeRotation, 0, "Relative child local rotation");
@@ -386,14 +386,69 @@ expectNear(childItem.y, 375, "Detached child stable y");
 wasm.blitz_clear_scene();
 wasm.blitz_resize(1000, 1000);
 wasm.blitz_set_camera(0, 0, 1);
+wasm.blitz_create_rect(0, 0, 200, 200, 0.8, 0.8, 1, 1, 0, 0, 0, 1, 1);
+const pointerRotateContainerId = readLastCreatedObjectId();
+if (wasm.blitz_set_container(...pointerRotateContainerId, 1) !== 1) {
+  throw new Error("Failed to tag pointer-rotate parent as a container.");
+}
+wasm.blitz_create_rect(20, 20, 40, 40, 1, 0.8, 0.8, 1, 0, 0, 0, 1, 1);
+const pointerRotateChildContainerId = readLastCreatedObjectId();
+if (wasm.blitz_set_container(...pointerRotateChildContainerId, 1) !== 1) {
+  throw new Error("Failed to tag pointer-rotate child as a container.");
+}
+if (
+  wasm.blitz_set_relative_transform(
+    ...pointerRotateChildContainerId,
+    ...pointerRotateContainerId,
+    20,
+    20,
+  ) !== 1
+) {
+  throw new Error("Failed to attach pointer-rotate child.");
+}
+wasm.blitz_create_rect(30, 30, 10, 10, 1, 0.9, 0.8, 1, 0, 0, 0, 1, 1);
+const pointerRotateGrandchildId = readLastCreatedObjectId();
+if (
+  wasm.blitz_set_relative_transform(
+    ...pointerRotateGrandchildId,
+    ...pointerRotateChildContainerId,
+    10,
+    10,
+  ) !== 1
+) {
+  throw new Error("Failed to attach pointer-rotate grandchild.");
+}
+wasm.blitz_select_object(
+  pointerRotateContainerId[0],
+  pointerRotateContainerId[1],
+  pointerRotateContainerId[2],
+  pointerRotateContainerId[3],
+  0,
+);
+if (wasm.blitz_pointer_down(600, 474, 0) !== 11) {
+  throw new Error("Pointer rotation did not start on the container handle.");
+}
+wasm.blitz_pointer_move(700, 600);
+wasm.blitz_pointer_up();
+const pointerRotatedChild = querySceneItemByObjectId(pointerRotateChildContainerId);
+const pointerRotatedGrandchild = querySceneItemByObjectId(pointerRotateGrandchildId);
+expectNear(pointerRotatedChild.x, 140, "Pointer-rotated child x");
+expectNear(pointerRotatedChild.y, 20, "Pointer-rotated child y");
+expectNear(pointerRotatedGrandchild.x, 160, "Pointer-rotated grandchild x");
+expectNear(pointerRotatedGrandchild.y, 30, "Pointer-rotated grandchild y");
+expectNear(pointerRotatedGrandchild.rotation, Math.PI / 2, "Pointer-rotated grandchild rotation");
+
+wasm.blitz_clear_scene();
+wasm.blitz_resize(1000, 1000);
+wasm.blitz_set_camera(0, 0, 1);
 wasm.blitz_create_rect(0, 0, 100, 100, 0.8, 0.8, 1, 1, 0, 0, 0, 1, 1);
 const rotatedResizeContainerId = readLastCreatedObjectId();
 if (wasm.blitz_set_container(...rotatedResizeContainerId, 1) !== 1) {
   throw new Error("Failed to tag rotated resize container.");
 }
-wasm.blitz_create_rect(60, 45, 20, 20, 1, 0.8, 0.8, 1, 0, 0, 0, 1, 1);
+wasm.blitz_create_rect(60, 45, 40, 40, 1, 0.8, 0.8, 1, 0, 0, 0, 1, 1);
 const rotatedResizeChildId = readLastCreatedObjectId();
-if (wasm.blitz_set_relative_transform(...rotatedResizeChildId, ...rotatedResizeContainerId, 20, 5) !== 1) {
+if (wasm.blitz_set_relative_transform(...rotatedResizeChildId, ...rotatedResizeContainerId, 60, 45) !== 1) {
   throw new Error("Failed to attach rotated resize child.");
 }
 if (wasm.blitz_set_rotation(...rotatedResizeContainerId, Math.PI / 2) !== 1) {
@@ -406,15 +461,15 @@ wasm.blitz_select_object(
   rotatedResizeChildId[3],
   0,
 );
-if (wasm.blitz_pointer_down(545, 580, 0) !== 8) {
+if (wasm.blitz_pointer_down(570, 600, 0) !== 8) {
   throw new Error("Rotated child east resize handle was not detected.");
 }
-wasm.blitz_pointer_move(545, 600);
+wasm.blitz_pointer_move(570, 620);
 wasm.blitz_pointer_up();
 const rotatedResizedChild = querySceneItemByObjectId(rotatedResizeChildId);
-expectNear(rotatedResizedChild.x, 25, "Rotated child resize anchored x");
+expectNear(rotatedResizedChild.x, 45, "Rotated child resize anchored x");
 expectNear(rotatedResizedChild.y, 70, "Rotated child resize anchored y");
-expectNear(rotatedResizedChild.width, 40, "Rotated child resize width");
+expectNear(rotatedResizedChild.width, 60, "Rotated child resize width");
 
 wasm.blitz_clear_scene();
 wasm.blitz_resize(1000, 1000);
@@ -502,7 +557,7 @@ if (wasm.blitz_set_container(...duplicateContainerId, 1) !== 1) {
 }
 wasm.blitz_create_rect(20, 20, 30, 30, 1, 0.8, 0.8, 1, 0, 0, 0, 1, 1);
 const duplicateChildId = readLastCreatedObjectId();
-if (wasm.blitz_set_relative_transform(...duplicateChildId, ...duplicateContainerId, -25, -15) !== 1) {
+if (wasm.blitz_set_relative_transform(...duplicateChildId, ...duplicateContainerId, 20, 20) !== 1) {
   throw new Error("Failed to attach duplicate source child.");
 }
 wasm.blitz_select_object(
@@ -586,7 +641,7 @@ for (let index = 0; index < 40; index += 1) {
   }
   wasm.blitz_create_rect(x + 4, 4, 8, 8, 1, 0.8, 0.8, 1, 0, 0, 0, 1, 1);
   const bulkChildId = readLastCreatedObjectId();
-  if (wasm.blitz_set_relative_transform(...bulkChildId, ...bulkContainerId, -2, -2) !== 1) {
+  if (wasm.blitz_set_relative_transform(...bulkChildId, ...bulkContainerId, 4, 4) !== 1) {
     throw new Error("Failed to attach a bulk child.");
   }
   bulkContainerIds.push(bulkContainerId);

@@ -350,8 +350,9 @@ dialog {
 }
 
 .color-picker-popover--split {
-  display: flex;
-  align-items: stretch;
+  display: grid;
+  grid-template-columns: repeat(2, auto);
+  align-items: start;
   gap: 7px;
   width: auto;
   padding: 7px;
@@ -360,12 +361,11 @@ dialog {
 .color-picker-section {
   display: grid;
   gap: 6px;
-  width: 124px;
   min-width: 0;
 }
 
 .color-picker-popover--split .color-picker-section {
-  width: 112px;
+  width: 98px;
 }
 
 .color-picker-section-label {
@@ -490,6 +490,7 @@ dialog {
 
 .color-picker-alpha {
   width: 100%;
+  min-width: 0;
   height: 18px;
   margin: 0;
   accent-color: #155bd7;
@@ -505,6 +506,7 @@ dialog {
 
 .color-picker-popover--split .tool-stroke-controls {
   width: 112px;
+  min-width: 0;
   margin-top: 0;
   padding-top: 0;
   padding-left: 7px;

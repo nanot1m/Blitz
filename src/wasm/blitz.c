@@ -55,6 +55,8 @@ usize strlen(const char *text) {
 #define BLITZ_PATH_LOD_STRIDE 4u
 
 #define BLITZ_INVALID_INDEX 0xffffffffu
+#define BLITZ_ROTATION_HANDLE 8u
+#define BLITZ_POINTER_MODE_ROTATE 11u
 // High bit of a command's order word: set while the command's entity is being
 // dragged, so the shader translates it by the drag offset instead of rebuilding.
 #define BLITZ_DRAG_FLAG 0x80000000u
@@ -223,6 +225,7 @@ typedef struct TextDraw {
   float rect[4];
   float uv_rect[4];
   float color[4];
+  float transform[4]; // rotation, center.x, center.y, _
 } TextDraw;
 
 typedef struct PathDraw {
@@ -1466,11 +1469,57 @@ static float blitz_cos(float value) {
          x10 / 3628800.0f;
 }
 
+static float blitz_abs(float value) { return value < 0.0f ? -value : value; }
+
+static float blitz_atan2(float y, float x) {
+  const float half_pi = 1.57079632679489661923f;
+  if (x == 0.0f) {
+    if (y > 0.0f) {
+      return half_pi;
+    }
+    if (y < 0.0f) {
+      return -half_pi;
+    }
+    return 0.0f;
+  }
+
+  float abs_y = blitz_abs(y) + 0.0000001f;
+  float angle = 0.0f;
+  if (x < 0.0f) {
+    float r = (x + abs_y) / (abs_y - x);
+    angle = 2.35619449019234492885f;
+    angle += (0.1963f * r * r - 0.9817f) * r;
+  } else {
+    float r = (x - abs_y) / (x + abs_y);
+    angle = 0.78539816339744830962f;
+    angle += (0.1963f * r * r - 0.9817f) * r;
+  }
+  return y < 0.0f ? -angle : angle;
+}
+
+static Vec2 entity_center(u32 entity);
+
+static Vec2 parent_origin(u32 parent) {
+  Vec2 position = world.positions[parent];
+  Vec2 size = world.sizes[parent];
+  return (Vec2){position.x + size.x * 0.5f, position.y + size.y * 0.5f};
+}
+
 static Vec2 world_delta_to_parent_local(u32 parent, float dx, float dy) {
   float rotation = parent != BLITZ_INVALID_INDEX ? world.rotations[parent] : 0.0f;
   float c = blitz_cos(rotation);
   float s = blitz_sin(rotation);
   return (Vec2){dx * c + dy * s, -dx * s + dy * c};
+}
+
+static Vec2 world_position_to_parent_local(u32 parent, float x, float y) {
+  Vec2 origin = parent_origin(parent);
+  return world_delta_to_parent_local(parent, x - origin.x, y - origin.y);
+}
+
+static Vec2 entity_center_to_parent_local(u32 entity, u32 parent) {
+  Vec2 center = entity_center(entity);
+  return world_position_to_parent_local(parent, center.x, center.y);
 }
 
 static u32 selected_top_level_count_capped(u32 cap) {
@@ -1561,9 +1610,7 @@ static u32 attach_entity_to_container_target(u32 entity, u32 target) {
       world.masks[target] == 0u) {
     return 0u;
   }
-  Vec2 local = world_delta_to_parent_local(
-      target, world.positions[entity].x - world.positions[target].x,
-      world.positions[entity].y - world.positions[target].y);
+  Vec2 local = entity_center_to_parent_local(entity, target);
   return attach_relative_transform(
       entity, target, local.x, local.y,
       world.rotations[entity] - world.rotations[target]);
@@ -1709,14 +1756,13 @@ static void resolve_transform_entity(u32 entity, u32 depth) {
     if (relative.parent != BLITZ_INVALID_INDEX &&
         world.masks[relative.parent] != 0u) {
       float parent_rotation = world.rotations[relative.parent];
+      Vec2 origin = parent_origin(relative.parent);
       float c = blitz_cos(parent_rotation);
       float s = blitz_sin(parent_rotation);
-      world.positions[entity].x =
-          world.positions[relative.parent].x + relative.offset_x * c -
-          relative.offset_y * s;
-      world.positions[entity].y =
-          world.positions[relative.parent].y + relative.offset_x * s +
-          relative.offset_y * c;
+      float center_x = origin.x + relative.offset_x * c - relative.offset_y * s;
+      float center_y = origin.y + relative.offset_x * s + relative.offset_y * c;
+      world.positions[entity].x = center_x - world.sizes[entity].x * 0.5f;
+      world.positions[entity].y = center_y - world.sizes[entity].y * 0.5f;
       world.rotations[entity] =
           parent_rotation + relative.rotation;
     }
@@ -2478,13 +2524,11 @@ static void ecs_move_absolute(u32 entity, float x, float y) {
     RelativeTransform *relative = &world.relative_transforms[entity];
     if (relative->parent != BLITZ_INVALID_INDEX &&
         world.masks[relative->parent] != 0u) {
-      float dx = x - world.positions[relative->parent].x;
-      float dy = y - world.positions[relative->parent].y;
-      float parent_rotation = world.rotations[relative->parent];
-      float c = blitz_cos(parent_rotation);
-      float s = blitz_sin(parent_rotation);
-      relative->offset_x = dx * c + dy * s;
-      relative->offset_y = -dx * s + dy * c;
+      Vec2 local = world_position_to_parent_local(
+          relative->parent, x + world.sizes[entity].x * 0.5f,
+          y + world.sizes[entity].y * 0.5f);
+      relative->offset_x = local.x;
+      relative->offset_y = local.y;
     }
   }
   mark_transform_subtree_dirty(entity);
@@ -3619,9 +3663,9 @@ static void push_rect_draw(u32 entity, u32 order) {
   draw->stroke_color[3] = view.stroke_color.a;
 
   draw->stroke_width_pad[0] = view.stroke_width;
-  draw->stroke_width_pad[1] = 0.0f;
-  draw->stroke_width_pad[2] = 0.0f;
-  draw->stroke_width_pad[3] = 0.0f;
+  draw->stroke_width_pad[1] = world.rotations[entity];
+  draw->stroke_width_pad[2] = position.x + size.x * 0.5f;
+  draw->stroke_width_pad[3] = position.y + size.y * 0.5f;
 
   shape_commands[shape_command_count].shape_kind = (u32)BLITZ_SHAPE_RECT;
   shape_commands[shape_command_count].shape_index = rect_draw_count;
@@ -3631,9 +3675,42 @@ static void push_rect_draw(u32 entity, u32 order) {
   shape_command_count += 1u;
 }
 
+static Vec2 entity_center(u32 entity) {
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  return (Vec2){position.x + size.x * 0.5f, position.y + size.y * 0.5f};
+}
+
+static Vec2 rotate_entity_point(u32 entity, float x, float y) {
+  float rotation = world.rotations[entity];
+  if (rotation > -0.00001f && rotation < 0.00001f) {
+    return (Vec2){x, y};
+  }
+  Vec2 center = entity_center(entity);
+  float dx = x - center.x;
+  float dy = y - center.y;
+  float c = blitz_cos(rotation);
+  float s = blitz_sin(rotation);
+  return (Vec2){center.x + dx * c - dy * s, center.y + dx * s + dy * c};
+}
+
+static Vec2 inverse_rotate_entity_point(u32 entity, float x, float y) {
+  float rotation = world.rotations[entity];
+  if (rotation > -0.00001f && rotation < 0.00001f) {
+    return (Vec2){x, y};
+  }
+  Vec2 center = entity_center(entity);
+  float dx = x - center.x;
+  float dy = y - center.y;
+  float c = blitz_cos(rotation);
+  float s = blitz_sin(rotation);
+  return (Vec2){center.x + dx * c + dy * s, center.y - dx * s + dy * c};
+}
+
 static void push_selection_draw(u32 entity, u32 order) {
   Vec2 position = world.positions[entity];
   Vec2 size = world.sizes[entity];
+  Vec2 center = entity_center(entity);
   float inset = 3.0f / uniforms.style[0];
   float x = position.x - inset;
   float y = position.y - inset;
@@ -3659,9 +3736,9 @@ static void push_selection_draw(u32 entity, u32 order) {
   draw->stroke_color[2] = 1.0f;
   draw->stroke_color[3] = 1.0f;
   draw->stroke_width_pad[0] = line;
-  draw->stroke_width_pad[1] = 0.0f;
-  draw->stroke_width_pad[2] = 0.0f;
-  draw->stroke_width_pad[3] = 0.0f;
+  draw->stroke_width_pad[1] = world.rotations[entity];
+  draw->stroke_width_pad[2] = center.x;
+  draw->stroke_width_pad[3] = center.y;
 
   dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_RECT;
   dyn_commands[dyn_command_count].shape_index = dyn_rect_count;
@@ -3728,6 +3805,86 @@ static void push_resize_handle_draw(float center_x, float center_y, u32 order) {
   draw->stroke_width_pad[1] = 0.0f;
   draw->stroke_width_pad[2] = 0.0f;
   draw->stroke_width_pad[3] = 0.0f;
+
+  dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_RECT;
+  dyn_commands[dyn_command_count].shape_index = dyn_rect_count;
+  dyn_commands[dyn_command_count].entity = BLITZ_INVALID_INDEX;
+  dyn_commands[dyn_command_count]._pad0 = order;
+  dyn_rect_count += 1u;
+  dyn_command_count += 1u;
+}
+
+static void rotation_handle_center(u32 entity, float *center_x, float *center_y) {
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  Vec2 rotated = rotate_entity_point(entity, position.x + size.x * 0.5f,
+                                     position.y - 26.0f / uniforms.style[0]);
+  *center_x = rotated.x;
+  *center_y = rotated.y;
+}
+
+static void push_rotation_anchor_draw(u32 entity, u32 order) {
+  Vec2 entity_mid = entity_center(entity);
+
+  if (dyn_rect_reserve()) {
+    Vec2 position = world.positions[entity];
+    Vec2 size = world.sizes[entity];
+    float line_width = 2.0f / uniforms.style[0];
+    float top = position.y - 3.0f / uniforms.style[0];
+    float local_center_x = position.x + size.x * 0.5f;
+    float local_anchor_y = position.y - 26.0f / uniforms.style[0];
+    RectDraw *line = &dyn_rects[dyn_rect_count];
+    line->rect[0] = local_center_x - line_width * 0.5f;
+    line->rect[1] = local_anchor_y;
+    line->rect[2] = line_width;
+    line->rect[3] = top - local_anchor_y;
+    line->fill_color[0] = 0.03f;
+    line->fill_color[1] = 0.33f;
+    line->fill_color[2] = 0.95f;
+    line->fill_color[3] = 1.0f;
+    line->stroke_color[0] = 0.0f;
+    line->stroke_color[1] = 0.0f;
+    line->stroke_color[2] = 0.0f;
+    line->stroke_color[3] = 0.0f;
+    line->stroke_width_pad[0] = 0.0f;
+    line->stroke_width_pad[1] = world.rotations[entity];
+    line->stroke_width_pad[2] = entity_mid.x;
+    line->stroke_width_pad[3] = entity_mid.y;
+
+    dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_RECT;
+    dyn_commands[dyn_command_count].shape_index = dyn_rect_count;
+    dyn_commands[dyn_command_count].entity = BLITZ_INVALID_INDEX;
+    dyn_commands[dyn_command_count]._pad0 = order;
+    dyn_rect_count += 1u;
+    dyn_command_count += 1u;
+  }
+
+  if (!dyn_rect_reserve()) {
+    return;
+  }
+
+  float size = 16.0f / uniforms.style[0];
+  RectDraw *draw = &dyn_rects[dyn_rect_count];
+  Vec2 position = world.positions[entity];
+  Vec2 entity_size = world.sizes[entity];
+  float local_center_x = position.x + entity_size.x * 0.5f;
+  float local_center_y = position.y - 26.0f / uniforms.style[0];
+  draw->rect[0] = local_center_x - size * 0.5f;
+  draw->rect[1] = local_center_y - size * 0.5f;
+  draw->rect[2] = size;
+  draw->rect[3] = size;
+  draw->fill_color[0] = 0.03f;
+  draw->fill_color[1] = 0.33f;
+  draw->fill_color[2] = 0.95f;
+  draw->fill_color[3] = 1.0f;
+  draw->stroke_color[0] = 1.0f;
+  draw->stroke_color[1] = 1.0f;
+  draw->stroke_color[2] = 1.0f;
+  draw->stroke_color[3] = 1.0f;
+  draw->stroke_width_pad[0] = 3.0f / uniforms.style[0];
+  draw->stroke_width_pad[1] = world.rotations[entity];
+  draw->stroke_width_pad[2] = entity_mid.x;
+  draw->stroke_width_pad[3] = entity_mid.y;
 
   dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_RECT;
   dyn_commands[dyn_command_count].shape_index = dyn_rect_count;
@@ -3809,9 +3966,9 @@ static void push_triangle_draw(u32 entity, u32 order) {
   draw->stroke_color[3] = view.stroke_color.a;
 
   draw->stroke_width_pad[0] = view.stroke_width;
-  draw->stroke_width_pad[1] = 0.0f;
-  draw->stroke_width_pad[2] = 0.0f;
-  draw->stroke_width_pad[3] = 0.0f;
+  draw->stroke_width_pad[1] = world.rotations[entity];
+  draw->stroke_width_pad[2] = position.x + size.x * 0.5f;
+  draw->stroke_width_pad[3] = position.y + size.y * 0.5f;
 
   shape_commands[shape_command_count].shape_kind = (u32)BLITZ_SHAPE_TRIANGLE;
   shape_commands[shape_command_count].shape_index = triangle_draw_count;
@@ -3848,9 +4005,9 @@ static void push_oval_draw(u32 entity, u32 order) {
   draw->stroke_color[3] = view.stroke_color.a;
 
   draw->stroke_width_pad[0] = view.stroke_width;
-  draw->stroke_width_pad[1] = 0.0f;
-  draw->stroke_width_pad[2] = 0.0f;
-  draw->stroke_width_pad[3] = 0.0f;
+  draw->stroke_width_pad[1] = world.rotations[entity];
+  draw->stroke_width_pad[2] = position.x + size.x * 0.5f;
+  draw->stroke_width_pad[3] = position.y + size.y * 0.5f;
 
   shape_commands[shape_command_count].shape_kind = (u32)BLITZ_SHAPE_OVAL;
   shape_commands[shape_command_count].shape_index = oval_draw_count;
@@ -3913,7 +4070,8 @@ static void push_path_view_draws(PathView view, Vec2 position, u32 entity,
   draw->render[0] = (float)(order & 0x7fffffffu);
   draw->render[1] = (order & BLITZ_DRAG_FLAG) ? 1.0f : 0.0f;
   draw->render[2] = view.stroke_width;
-  draw->render[3] = (float)view.point_count;
+  draw->render[3] =
+      entity == BLITZ_INVALID_INDEX ? 0.0f : world.rotations[entity];
 
   // draw_params: [tier0 offset, tier0 count, tier1 offset, tier1 count]. The
   // cull picks a tier per stroke by its on-screen size.
@@ -4228,6 +4386,7 @@ static void push_text_draws(u32 entity, u32 order) {
   }
   TextView view = world.text_views[entity];
   Vec2 position = world.positions[entity];
+  Vec2 center = entity_center(entity);
   layout_text(view.text, view.font_size, view.max_width, view.line_height,
               view.max_lines);
   float layout_width =
@@ -4263,6 +4422,10 @@ static void push_text_draws(u32 entity, u32 order) {
         draw->color[1] = view.color.g;
         draw->color[2] = view.color.b;
         draw->color[3] = view.color.a;
+        draw->transform[0] = world.rotations[entity];
+        draw->transform[1] = center.x;
+        draw->transform[2] = center.y;
+        draw->transform[3] = 0.0f;
         dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_TEXT;
         dyn_commands[dyn_command_count].shape_index = text_draw_count;
         dyn_commands[dyn_command_count].entity = entity;
@@ -4278,6 +4441,7 @@ static void push_text_draws(u32 entity, u32 order) {
 static void push_text_run_draws(u32 entity, const char *text, Color color,
                                 float font_size, float pen_x,
                                 float baseline_y, u32 order) {
+  Vec2 center = entity_center(entity);
   const char *cursor = text;
   while (*cursor != '\0') {
     u32 codepoint = utf8_next(&cursor);
@@ -4296,6 +4460,10 @@ static void push_text_run_draws(u32 entity, const char *text, Color color,
       draw->color[1] = color.g;
       draw->color[2] = color.b;
       draw->color[3] = color.a;
+      draw->transform[0] = world.rotations[entity];
+      draw->transform[1] = center.x;
+      draw->transform[2] = center.y;
+      draw->transform[3] = 0.0f;
       dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_TEXT;
       dyn_commands[dyn_command_count].shape_index = text_draw_count;
       dyn_commands[dyn_command_count].entity = entity;
@@ -4511,7 +4679,7 @@ static void extract_dynamic(void) {
 
   dyn_overlay_command_start = dyn_command_count;
 
-  u32 overlay_order = world.draw_order_count + 1u;
+  u32 overlay_order = world.draw_order_count;
   if (drag_active && drag_hover_container != BLITZ_INVALID_INDEX) {
     push_container_hover_draw(drag_hover_container, overlay_order);
   }
@@ -4542,29 +4710,31 @@ static void extract_dynamic(void) {
     }
     push_selection_draw(entity, overlay_order);
     u32 resize_axes = entity_resize_axes(entity);
-    if (selected_count == 1u && resize_axes != 0u &&
-        screen_w >= 24.0f && screen_h >= 24.0f) {
+    if (selected_count == 1u && screen_w >= 24.0f && screen_h >= 24.0f) {
       float left = position.x;
       float top = position.y;
       float right = position.x + size.x;
       float bottom = position.y + size.y;
-      float centers[16] = {
-          left,          top,
-          right,         top,
-          right,         bottom,
-          left,          bottom,
-          (left + right) * 0.5f, top,
-          right,         (top + bottom) * 0.5f,
-          (left + right) * 0.5f, bottom,
-          left,          (top + bottom) * 0.5f,
-      };
-      for (u32 handle = 0u; handle < 8u; handle += 1u) {
-        if (resize_handle_allowed(handle, resize_axes)) {
-          push_resize_handle_draw(centers[handle * 2u],
-                                  centers[handle * 2u + 1u],
-                                  overlay_order + 1u);
+      if (resize_axes != 0u) {
+        Vec2 centers[8] = {
+            rotate_entity_point(entity, left, top),
+            rotate_entity_point(entity, right, top),
+            rotate_entity_point(entity, right, bottom),
+            rotate_entity_point(entity, left, bottom),
+            rotate_entity_point(entity, (left + right) * 0.5f, top),
+            rotate_entity_point(entity, right, (top + bottom) * 0.5f),
+            rotate_entity_point(entity, (left + right) * 0.5f, bottom),
+            rotate_entity_point(entity, left, (top + bottom) * 0.5f),
+        };
+        for (u32 handle = 0u; handle < 8u; handle += 1u) {
+          if (resize_handle_allowed(handle, resize_axes)) {
+            push_resize_handle_draw(centers[handle].x,
+                                    centers[handle].y,
+                                    overlay_order + 1u);
+          }
         }
       }
+      push_rotation_anchor_draw(entity, overlay_order + 1u);
     }
   }
   push_marquee_draw(world.draw_order_count + 3u);
@@ -4585,10 +4755,11 @@ static void screen_to_world(float screen_x, float screen_y, float *world_x,
 }
 
 static int point_in_rect(float world_x, float world_y, u32 entity) {
+  Vec2 local = inverse_rotate_entity_point(entity, world_x, world_y);
   Vec2 position = world.positions[entity];
   Vec2 size = world.sizes[entity];
-  return world_x >= position.x && world_y >= position.y &&
-         world_x <= position.x + size.x && world_y <= position.y + size.y;
+  return local.x >= position.x && local.y >= position.y &&
+         local.x <= position.x + size.x && local.y <= position.y + size.y;
 }
 
 static float triangle_sign(float px, float py, float ax, float ay, float bx,
@@ -4597,6 +4768,7 @@ static float triangle_sign(float px, float py, float ax, float ay, float bx,
 }
 
 static int point_in_triangle(float world_x, float world_y, u32 entity) {
+  Vec2 local = inverse_rotate_entity_point(entity, world_x, world_y);
   Vec2 position = world.positions[entity];
   Vec2 size = world.sizes[entity];
   float top_x = position.x + size.x * 0.5f;
@@ -4606,15 +4778,16 @@ static int point_in_triangle(float world_x, float world_y, u32 entity) {
   float left_x = position.x;
   float left_y = position.y + size.y;
 
-  float d1 = triangle_sign(world_x, world_y, top_x, top_y, right_x, right_y);
-  float d2 = triangle_sign(world_x, world_y, right_x, right_y, left_x, left_y);
-  float d3 = triangle_sign(world_x, world_y, left_x, left_y, top_x, top_y);
+  float d1 = triangle_sign(local.x, local.y, top_x, top_y, right_x, right_y);
+  float d2 = triangle_sign(local.x, local.y, right_x, right_y, left_x, left_y);
+  float d3 = triangle_sign(local.x, local.y, left_x, left_y, top_x, top_y);
   int has_negative = d1 < 0.0f || d2 < 0.0f || d3 < 0.0f;
   int has_positive = d1 > 0.0f || d2 > 0.0f || d3 > 0.0f;
   return !(has_negative && has_positive);
 }
 
 static int point_in_oval(float world_x, float world_y, u32 entity) {
+  Vec2 local = inverse_rotate_entity_point(entity, world_x, world_y);
   Vec2 position = world.positions[entity];
   Vec2 size = world.sizes[entity];
   float radius_x = size.x * 0.5f;
@@ -4624,8 +4797,8 @@ static int point_in_oval(float world_x, float world_y, u32 entity) {
   }
   float center_x = position.x + size.x * 0.5f;
   float center_y = position.y + size.y * 0.5f;
-  float dx = (world_x - center_x) / radius_x;
-  float dy = (world_y - center_y) / radius_y;
+  float dx = (local.x - center_x) / radius_x;
+  float dy = (local.y - center_y) / radius_y;
   return dx * dx + dy * dy <= 1.0f;
 }
 
@@ -4643,6 +4816,7 @@ static float distance_to_segment_sq(float px, float py, Vec2 a, Vec2 b) {
 }
 
 static int point_in_path(float world_x, float world_y, u32 entity) {
+  Vec2 local = inverse_rotate_entity_point(entity, world_x, world_y);
   PathView view = world.path_views[entity];
   if (!view.points || view.point_count < 2u) {
     return 0;
@@ -4654,7 +4828,7 @@ static int point_in_path(float world_x, float world_y, u32 entity) {
     Vec2 a = {position.x + view.points[i - 1u].x,
               position.y + view.points[i - 1u].y};
     Vec2 b = {position.x + view.points[i].x, position.y + view.points[i].y};
-    if (distance_to_segment_sq(world_x, world_y, a, b) <= hit_radius_sq) {
+    if (distance_to_segment_sq(local.x, local.y, a, b) <= hit_radius_sq) {
       return 1;
     }
   }
@@ -4687,6 +4861,19 @@ static u32 selected_resizable_entity(void) {
   return BLITZ_INVALID_INDEX;
 }
 
+static u32 selected_transformable_entity(void) {
+  if (selected_count != 1u) {
+    return BLITZ_INVALID_INDEX;
+  }
+  for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
+    if (world.selected[entity] && (world.masks[entity] & BLITZ_COMPONENT_POSITION) &&
+        (world.masks[entity] & BLITZ_COMPONENT_SIZE)) {
+      return entity;
+    }
+  }
+  return BLITZ_INVALID_INDEX;
+}
+
 static u32 hit_test_resize_handle(float world_x, float world_y, u32 entity) {
   if (entity == BLITZ_INVALID_INDEX) {
     return BLITZ_INVALID_INDEX;
@@ -4698,22 +4885,22 @@ static u32 hit_test_resize_handle(float world_x, float world_y, u32 entity) {
   Vec2 position = world.positions[entity];
   Vec2 size = world.sizes[entity];
   float hit_radius = 10.0f / uniforms.style[0];
-  float centers[16] = {
-      position.x,          position.y,
-      position.x + size.x, position.y,
-      position.x + size.x, position.y + size.y,
-      position.x,          position.y + size.y,
-      position.x + size.x * 0.5f, position.y,
-      position.x + size.x, position.y + size.y * 0.5f,
-      position.x + size.x * 0.5f, position.y + size.y,
-      position.x, position.y + size.y * 0.5f,
+  Vec2 centers[8] = {
+      rotate_entity_point(entity, position.x, position.y),
+      rotate_entity_point(entity, position.x + size.x, position.y),
+      rotate_entity_point(entity, position.x + size.x, position.y + size.y),
+      rotate_entity_point(entity, position.x, position.y + size.y),
+      rotate_entity_point(entity, position.x + size.x * 0.5f, position.y),
+      rotate_entity_point(entity, position.x + size.x, position.y + size.y * 0.5f),
+      rotate_entity_point(entity, position.x + size.x * 0.5f, position.y + size.y),
+      rotate_entity_point(entity, position.x, position.y + size.y * 0.5f),
   };
   for (u32 handle = 0u; handle < 8u; handle += 1u) {
     if (!resize_handle_allowed(handle, axes)) {
       continue;
     }
-    float dx = world_x - centers[handle * 2u];
-    float dy = world_y - centers[handle * 2u + 1u];
+    float dx = world_x - centers[handle].x;
+    float dy = world_y - centers[handle].y;
     if (dx >= -hit_radius && dx <= hit_radius &&
         dy >= -hit_radius && dy <= hit_radius) {
       return handle;
@@ -4722,13 +4909,62 @@ static u32 hit_test_resize_handle(float world_x, float world_y, u32 entity) {
   return BLITZ_INVALID_INDEX;
 }
 
+static u32 hit_test_rotation_handle(float world_x, float world_y, u32 entity) {
+  if (entity == BLITZ_INVALID_INDEX ||
+      !(world.masks[entity] & BLITZ_COMPONENT_POSITION) ||
+      !(world.masks[entity] & BLITZ_COMPONENT_SIZE)) {
+    return 0u;
+  }
+  Vec2 size = world.sizes[entity];
+  if (size.x * uniforms.style[0] < 24.0f ||
+      size.y * uniforms.style[0] < 24.0f) {
+    return 0u;
+  }
+  float center_x = 0.0f;
+  float center_y = 0.0f;
+  rotation_handle_center(entity, &center_x, &center_y);
+  float hit_radius = 11.0f / uniforms.style[0];
+  float dx = world_x - center_x;
+  float dy = world_y - center_y;
+  return dx >= -hit_radius && dx <= hit_radius && dy >= -hit_radius &&
+                 dy <= hit_radius
+             ? 1u
+             : 0u;
+}
+
 static void resize_entity_to(float world_x, float world_y) {
   if (!resize_active || resize_entity == BLITZ_INVALID_INDEX) {
+    return;
+  }
+  if (resize_handle == BLITZ_ROTATION_HANDLE) {
+    Vec2 position = world.positions[resize_entity];
+    Vec2 size = world.sizes[resize_entity];
+    float center_x = position.x + size.x * 0.5f;
+    float center_y = position.y + size.y * 0.5f;
+    float next_rotation =
+        wrap_radians(blitz_atan2(world_y - center_y, world_x - center_x) +
+                     1.57079632679489661923f);
+    ecs_set_rotation(resize_entity, next_rotation);
+    mark_render_list_dirty();
     return;
   }
   u32 axes = entity_resize_axes(resize_entity);
   if (!resize_handle_allowed(resize_handle, axes)) {
     return;
+  }
+
+  float pointer_x = world_x;
+  float pointer_y = world_y;
+  float rotation = world.rotations[resize_entity];
+  if (rotation < -0.00001f || rotation > 0.00001f) {
+    float center_x = resize_start_position.x + resize_start_size.x * 0.5f;
+    float center_y = resize_start_position.y + resize_start_size.y * 0.5f;
+    float dx = world_x - center_x;
+    float dy = world_y - center_y;
+    float c = blitz_cos(rotation);
+    float s = blitz_sin(rotation);
+    pointer_x = center_x + dx * c + dy * s;
+    pointer_y = center_y - dx * s + dy * c;
   }
 
   float min_size = 12.0f / uniforms.style[0];
@@ -4751,36 +4987,71 @@ static void resize_entity_to(float world_x, float world_y) {
 
   if ((axes & 1u) &&
       (resize_handle == 0u || resize_handle == 3u || resize_handle == 7u)) {
-    next_x = world_x < anchor_x - min_size ? world_x : anchor_x - min_size;
+    next_x = pointer_x < anchor_x - min_size ? pointer_x : anchor_x - min_size;
     next_width = anchor_x - next_x;
   } else if ((axes & 1u) &&
              (resize_handle == 1u || resize_handle == 2u ||
               resize_handle == 5u)) {
     next_x = anchor_x;
-    next_width = world_x > anchor_x + min_size ? world_x - anchor_x : min_size;
+    next_width = pointer_x > anchor_x + min_size ? pointer_x - anchor_x : min_size;
   }
   if ((axes & 2u) &&
       (resize_handle == 0u || resize_handle == 1u || resize_handle == 4u)) {
-    next_y = world_y < anchor_y - min_size ? world_y : anchor_y - min_size;
+    next_y = pointer_y < anchor_y - min_size ? pointer_y : anchor_y - min_size;
     next_height = anchor_y - next_y;
   } else if ((axes & 2u) &&
              (resize_handle == 2u || resize_handle == 3u ||
               resize_handle == 6u)) {
     next_y = anchor_y;
-    next_height = world_y > anchor_y + min_size ? world_y - anchor_y : min_size;
+    next_height = pointer_y > anchor_y + min_size ? pointer_y - anchor_y : min_size;
   }
 
-  ecs_move_absolute(resize_entity, next_x, next_y);
+  float anchor_rel_x =
+      (resize_handle == 0u || resize_handle == 3u || resize_handle == 7u)
+          ? 1.0f
+          : 0.0f;
+  float anchor_rel_y =
+      (resize_handle == 0u || resize_handle == 1u || resize_handle == 4u)
+          ? 1.0f
+          : 0.0f;
+  float start_center_x = resize_start_position.x + resize_start_size.x * 0.5f;
+  float start_center_y = resize_start_position.y + resize_start_size.y * 0.5f;
+  float start_anchor_x = resize_start_position.x + resize_start_size.x * anchor_rel_x;
+  float start_anchor_y = resize_start_position.y + resize_start_size.y * anchor_rel_y;
+  float anchor_dx = start_anchor_x - start_center_x;
+  float anchor_dy = start_anchor_y - start_center_y;
+  float rotate_c = blitz_cos(rotation);
+  float rotate_s = blitz_sin(rotation);
+  float anchor_world_x =
+      start_center_x + anchor_dx * rotate_c - anchor_dy * rotate_s;
+  float anchor_world_y =
+      start_center_y + anchor_dx * rotate_s + anchor_dy * rotate_c;
+  float next_anchor_dx = (anchor_rel_x - 0.5f) * next_width;
+  float next_anchor_dy = (anchor_rel_y - 0.5f) * next_height;
+  float next_center_to_anchor_x =
+      next_anchor_dx * rotate_c - next_anchor_dy * rotate_s;
+  float next_center_to_anchor_y =
+      next_anchor_dx * rotate_s + next_anchor_dy * rotate_c;
+  float next_center_x = anchor_world_x - next_center_to_anchor_x;
+  float next_center_y = anchor_world_y - next_center_to_anchor_y;
+  next_x = next_center_x - next_width * 0.5f;
+  next_y = next_center_y - next_height * 0.5f;
+
   if (world.masks[resize_entity] & BLITZ_COMPONENT_TEXT_VIEW) {
     resize_text_entity_to_width(resize_entity, next_width);
   } else {
     world.sizes[resize_entity].x = next_width;
     world.sizes[resize_entity].y = next_height;
   }
+  ecs_move_absolute(resize_entity, next_x, next_y);
   mark_render_list_dirty();
 }
 
 static u32 hit_test_entity(float world_x, float world_y) {
+  u32 rotation_target = selected_transformable_entity();
+  if (hit_test_rotation_handle(world_x, world_y, rotation_target)) {
+    return rotation_target;
+  }
   u32 resize_target = selected_resizable_entity();
   if (hit_test_resize_handle(world_x, world_y, resize_target) !=
       BLITZ_INVALID_INDEX) {
@@ -5438,6 +5709,20 @@ u32 blitz_pointer_down(float screen_x, float screen_y, u32 additive) {
   float world_y = 0.0f;
   screen_to_world(screen_x, screen_y, &world_x, &world_y);
 
+  u32 rotation_target = selected_transformable_entity();
+  if (!additive && hit_test_rotation_handle(world_x, world_y, rotation_target)) {
+    history_begin();
+    history_record_before(rotation_target);
+    resize_active = 1u;
+    resize_entity = rotation_target;
+    resize_handle = BLITZ_ROTATION_HANDLE;
+    resize_start_position = world.positions[rotation_target];
+    resize_start_size = world.sizes[rotation_target];
+    dragging_selection = 0u;
+    drag_top_level_count = 0u;
+    marquee_active = 0u;
+    return BLITZ_POINTER_MODE_ROTATE;
+  }
   u32 resize_target = selected_resizable_entity();
   u32 handle = hit_test_resize_handle(world_x, world_y, resize_target);
   if (!additive && handle != BLITZ_INVALID_INDEX) {
@@ -5531,8 +5816,11 @@ u32 blitz_resize_mode_at(float screen_x, float screen_y) {
   float world_x = 0.0f;
   float world_y = 0.0f;
   screen_to_world(screen_x, screen_y, &world_x, &world_y);
-  u32 handle =
-      hit_test_resize_handle(world_x, world_y, selected_resizable_entity());
+  u32 selected = selected_transformable_entity();
+  if (hit_test_rotation_handle(world_x, world_y, selected)) {
+    return BLITZ_POINTER_MODE_ROTATE;
+  }
+  u32 handle = hit_test_resize_handle(world_x, world_y, selected_resizable_entity());
   return handle == BLITZ_INVALID_INDEX ? 0u : 3u + handle;
 }
 
@@ -5606,9 +5894,9 @@ void blitz_pointer_up(void) {
               (world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM)
                   ? world.relative_transforms[entity].parent
                   : BLITZ_INVALID_INDEX;
-          Vec2 local = world_delta_to_parent_local(
-              drop_container, next_x - world.positions[drop_container].x,
-              next_y - world.positions[drop_container].y);
+          Vec2 local = world_position_to_parent_local(
+              drop_container, next_x + world.sizes[entity].x * 0.5f,
+              next_y + world.sizes[entity].y * 0.5f);
           attach_relative_transform(
               entity, drop_container, local.x, local.y,
               world.rotations[entity] - world.rotations[drop_container]);
@@ -5785,9 +6073,10 @@ u32 blitz_duplicate_selected(float offset_x, float offset_y) {
           attach_relative_transform(clone, clone_parent, relative.offset_x,
                                     relative.offset_y, relative.rotation);
         } else {
+          Vec2 local_offset = world_delta_to_parent_local(parent, offset_x, offset_y);
           attach_relative_transform(clone, parent,
-                                    relative.offset_x + offset_x,
-                                    relative.offset_y + offset_y,
+                                    relative.offset_x + local_offset.x,
+                                    relative.offset_y + local_offset.y,
                                     relative.rotation);
         }
       }
@@ -5901,9 +6190,10 @@ u32 blitz_paste_internal_clipboard(float offset_x, float offset_y) {
           attach_relative_transform(clone, clone_parent, relative.offset_x,
                                     relative.offset_y, relative.rotation);
         } else {
+          Vec2 local_offset = world_delta_to_parent_local(parent, offset_x, offset_y);
           attach_relative_transform(clone, parent,
-                                    relative.offset_x + offset_x,
-                                    relative.offset_y + offset_y,
+                                    relative.offset_x + local_offset.x,
+                                    relative.offset_y + local_offset.y,
                                     relative.rotation);
         }
       }

@@ -36,6 +36,7 @@ struct TextDraw {
   rect: vec4f,
   uv_rect: vec4f,
   color: vec4f,
+  transform: vec4f,
 };
 
 struct DrawArgs {
@@ -71,24 +72,53 @@ var<storage, read> text_draws: array<TextDraw>;
 
 const HIDDEN_SHAPE_KIND: u32 = 0xffffffffu;
 
+fn rotate_around(point: vec2f, center: vec2f, rotation: f32) -> vec2f {
+  if (abs(rotation) < 0.00001) {
+    return point;
+  }
+  let delta = point - center;
+  let c = cos(rotation);
+  let s = sin(rotation);
+  return center + vec2f(delta.x * c - delta.y * s, delta.x * s + delta.y * c);
+}
+
+fn rotated_rect_bounds(rect: vec4f, center: vec2f, rotation: f32) -> vec4f {
+  if (abs(rotation) < 0.00001) {
+    return vec4f(rect.xy, rect.xy + rect.zw);
+  }
+  let p0 = rotate_around(rect.xy, center, rotation);
+  let p1 = rotate_around(vec2f(rect.x + rect.z, rect.y), center, rotation);
+  let p2 = rotate_around(rect.xy + rect.zw, center, rotation);
+  let p3 = rotate_around(vec2f(rect.x, rect.y + rect.w), center, rotation);
+  let bounds_min = min(min(p0, p1), min(p2, p3));
+  let bounds_max = max(max(p0, p1), max(p2, p3));
+  return vec4f(bounds_min, bounds_max);
+}
+
 // Returns world-space bounds as (min.x, min.y, max.x, max.y).
 fn shape_bounds(command: vec4u) -> vec4f {
   if (command.x == 0u) {
-    let r = rect_draws[command.y].rect;
-    return vec4f(r.xy, r.xy + r.zw);
+    let draw = rect_draws[command.y];
+    let r = draw.rect;
+    let rotation = draw.stroke_width_pad.y;
+    return rotated_rect_bounds(r, draw.stroke_width_pad.zw, rotation);
   } else if (command.x == 1u) {
     let d = triangle_draws[command.y];
     let bounds_min = min(d.points_a.xy, min(d.points_a.zw, d.points_b.xy));
     let bounds_max = max(d.points_a.xy, max(d.points_a.zw, d.points_b.xy));
-    return vec4f(bounds_min, bounds_max);
+    return rotated_rect_bounds(vec4f(bounds_min, bounds_max - bounds_min),
+                               d.stroke_width_pad.zw, d.stroke_width_pad.y);
   } else if (command.x == 3u) {
     let t = text_draws[command.y].rect;
-    return vec4f(t.xy, t.xy + t.zw);
+    return rotated_rect_bounds(t, text_draws[command.y].transform.yz,
+                               text_draws[command.y].transform.x);
   }
   // Only rects/triangles/ovals/text reach the cull (paths render via their own
   // pipeline), so command.x == 2u here.
-  let c = oval_draws[command.y].oval;
-  return vec4f(c.xy - c.zw, c.xy + c.zw);
+  let d = oval_draws[command.y];
+  let c = d.oval;
+  return rotated_rect_bounds(vec4f(c.xy - c.zw, c.zw * 2.0),
+                             d.stroke_width_pad.zw, d.stroke_width_pad.y);
 }
 
 @compute @workgroup_size(64)

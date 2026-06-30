@@ -286,6 +286,7 @@ export function setupCanvasInteractions(
     canvas.classList.toggle("is-resizing-nesw", pointerMode === 4 || pointerMode === 6);
     canvas.classList.toggle("is-resizing-ns", pointerMode === 7 || pointerMode === 9);
     canvas.classList.toggle("is-resizing-ew", pointerMode === 8 || pointerMode === 10);
+    canvas.classList.toggle("is-rotating", pointerMode === 11);
   };
 
   const clearInteractionClasses = () => {
@@ -295,6 +296,7 @@ export function setupCanvasInteractions(
       "is-resizing-nesw",
       "is-resizing-ns",
       "is-resizing-ew",
+      "is-rotating",
       "is-panning",
       "is-selecting",
     );

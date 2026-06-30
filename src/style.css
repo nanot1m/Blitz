@@ -97,6 +97,13 @@ dialog {
   cursor: ew-resize;
 }
 
+#blitz-canvas.is-rotating {
+  cursor:
+    url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='24'%20height='24'%20viewBox='0%200%2024%2024'%3E%3Cpath%20fill='white'%20fill-opacity='.9'%20d='M0%200h24v24H0z'/%3E%3Cpath%20fill='none'%20stroke='%23141a21'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%20d='M17%203v5h-5M7%2021v-5h5M18.4%208A7%207%200%200%200%206%206.4M5.6%2016A7%207%200%200%200%2018%2017.6'/%3E%3C/svg%3E")
+      12 12,
+    grab;
+}
+
 #blitz-canvas.is-panning {
   cursor: grabbing;
 }

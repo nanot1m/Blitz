@@ -1057,11 +1057,11 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
   type BackgroundTheme = "dark" | "paper";
   const readBackgroundTheme = (): BackgroundTheme => {
     try {
-      return localStorage.getItem(BACKGROUND_THEME_STORAGE_KEY) === "paper"
-        ? "paper"
-        : "dark";
+      return localStorage.getItem(BACKGROUND_THEME_STORAGE_KEY) === "dark"
+        ? "dark"
+        : "paper";
     } catch {
-      return "dark";
+      return "paper";
     }
   };
   const persistBackgroundTheme = (theme: BackgroundTheme) => {
@@ -3564,11 +3564,19 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
           const [fullOffset, fullCount] = clampTier(records[o + 12], records[o + 13]);
           if (fullCount <= 0) continue;
           const [coarseOffset, coarseCount] = clampTier(records[o + 14], records[o + 15]);
+          const rotation = records[o + 11];
+          const minX = records[o];
+          const minY = records[o + 1];
+          const maxX = records[o] + records[o + 2];
+          const maxY = records[o + 1] + records[o + 3];
+          const centerX = (minX + maxX) * 0.5;
+          const centerY = (minY + maxY) * 0.5;
+          const radius = Math.hypot(maxX - minX, maxY - minY) * 0.5;
           pathDrawList.push({
-            minX: records[o],
-            minY: records[o + 1],
-            maxX: records[o] + records[o + 2],
-            maxY: records[o + 1] + records[o + 3],
+            minX: rotation === 0 ? minX : centerX - radius,
+            minY: rotation === 0 ? minY : centerY - radius,
+            maxX: rotation === 0 ? maxX : centerX + radius,
+            maxY: rotation === 0 ? maxY : centerY + radius,
             dragged: records[o + 9] > 0.5,
             fullOffset,
             fullCount,

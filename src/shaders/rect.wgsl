@@ -36,6 +36,7 @@ struct TextDraw {
   rect: vec4f,
   uv_rect: vec4f,
   color: vec4f,
+  transform: vec4f,
 };
 
 struct PathDraw {
@@ -120,6 +121,31 @@ fn rect_bounds(rect: vec4f, vertex_index: u32) -> vec2f {
   return positions[vertex_index];
 }
 
+fn rotate_around(point: vec2f, center: vec2f, rotation: f32) -> vec2f {
+  if (abs(rotation) < 0.00001) {
+    return point;
+  }
+  let delta = point - center;
+  let c = cos(rotation);
+  let s = sin(rotation);
+  return center + vec2f(delta.x * c - delta.y * s, delta.x * s + delta.y * c);
+}
+
+fn inverse_rotate_around(point: vec2f, center: vec2f, rotation: f32) -> vec2f {
+  if (abs(rotation) < 0.00001) {
+    return point;
+  }
+  let delta = point - center;
+  let c = cos(rotation);
+  let s = sin(rotation);
+  return center + vec2f(delta.x * c + delta.y * s, -delta.x * s + delta.y * c);
+}
+
+fn rect_vertex(draw: RectDraw, vertex_index: u32) -> vec2f {
+  let world = rect_bounds(draw.rect, vertex_index);
+  return rotate_around(world, draw.stroke_width_pad.zw, draw.stroke_width_pad.y);
+}
+
 fn triangle_bounds(draw: TriangleDraw, vertex_index: u32) -> vec2f {
   let top = draw.points_a.xy;
   let right = draw.points_a.zw;
@@ -129,14 +155,25 @@ fn triangle_bounds(draw: TriangleDraw, vertex_index: u32) -> vec2f {
   return rect_bounds(vec4f(bounds_min, bounds_max - bounds_min), vertex_index);
 }
 
+fn triangle_vertex(draw: TriangleDraw, vertex_index: u32) -> vec2f {
+  let world = triangle_bounds(draw, vertex_index);
+  return rotate_around(world, draw.stroke_width_pad.zw, draw.stroke_width_pad.y);
+}
+
 fn oval_bounds(oval: vec4f, vertex_index: u32) -> vec2f {
   let center = oval.xy;
   let radii = oval.zw;
   return rect_bounds(vec4f(center - radii, radii * 2.0), vertex_index);
 }
 
+fn oval_vertex(draw: OvalDraw, vertex_index: u32) -> vec2f {
+  let world = oval_bounds(draw.oval, vertex_index);
+  return rotate_around(world, draw.stroke_width_pad.zw, draw.stroke_width_pad.y);
+}
+
 fn text_vertex(draw: TextDraw, vertex_index: u32) -> vec4f {
   let world = rect_bounds(draw.rect, vertex_index);
+  let rotated_world = rotate_around(world, draw.transform.yz, draw.transform.x);
   let uv_min = draw.uv_rect.xy;
   let uv_max = draw.uv_rect.zw;
   var uvs = array<vec2f, 6>(
@@ -147,11 +184,13 @@ fn text_vertex(draw: TextDraw, vertex_index: u32) -> vec4f {
     vec2f(uv_max.x, uv_min.y),
     vec2f(uv_max.x, uv_max.y)
   );
-  return vec4f(world, uvs[vertex_index]);
+  return vec4f(rotated_world, uvs[vertex_index]);
 }
 
 fn path_vertex(draw: PathDraw, vertex_index: u32) -> vec2f {
-  return rect_bounds(draw.bounds, vertex_index);
+  let world = rect_bounds(draw.bounds, vertex_index);
+  let center = draw.bounds.xy + draw.bounds.zw * 0.5;
+  return rotate_around(world, center, draw.render.w);
 }
 
 @vertex
@@ -166,11 +205,11 @@ fn shape_vertex_main(
   if (command.x == HIDDEN_SHAPE_KIND) {
     world = vec2f(1.0e20, 1.0e20);
   } else if (command.x == 0u) {
-    world = rect_bounds(rect_draws[command.y].rect, shape_vertex_index);
+    world = rect_vertex(rect_draws[command.y], shape_vertex_index);
   } else if (command.x == 1u) {
-    world = triangle_bounds(triangle_draws[command.y], shape_vertex_index);
+    world = triangle_vertex(triangle_draws[command.y], shape_vertex_index);
   } else if (command.x == 2u) {
-    world = oval_bounds(oval_draws[command.y].oval, shape_vertex_index);
+    world = oval_vertex(oval_draws[command.y], shape_vertex_index);
   } else if (command.x == 3u) {
     let text_position = text_vertex(text_draws[command.y], shape_vertex_index);
     world = text_position.xy;
@@ -219,8 +258,9 @@ fn path_vertex_main(@builtin(vertex_index) vertex_index: u32,
   let order = draw.render.x;
   let dragged = draw.render.y > 0.5;
   let drag_offset = select(vec2f(0.0, 0.0), u.interaction.xy, dragged);
-  let a = vec2f(seg.ax, seg.ay) + drag_offset;
-  let b = vec2f(seg.bx, seg.by) + drag_offset;
+  let center = draw.bounds.xy + draw.bounds.zw * 0.5;
+  let a = rotate_around(vec2f(seg.ax, seg.ay), center, draw.render.w) + drag_offset;
+  let b = rotate_around(vec2f(seg.bx, seg.by), center, draw.render.w) + drag_offset;
   let delta = b - a;
   let len = length(delta);
   let dir = select(vec2f(1.0, 0.0), delta / len, len > 0.0001);
@@ -346,9 +386,11 @@ fn shape_fragment_main(in: VertexOut) -> @location(0) vec4f {
   if (command.x == 0u) {
     let draw = rect_draws[command.y];
     let stroke_width = draw.stroke_width_pad.x;
-    coverage = rect_alpha(in.world, draw.rect, 0.0, edge_alpha);
+    let local_world =
+      inverse_rotate_around(in.world, draw.stroke_width_pad.zw, draw.stroke_width_pad.y);
+    coverage = rect_alpha(local_world, draw.rect, 0.0, edge_alpha);
     if (stroke_width > 0.0) {
-      let inner = rect_alpha(in.world, draw.rect, stroke_width, edge_alpha);
+      let inner = rect_alpha(local_world, draw.rect, stroke_width, edge_alpha);
       stroke = coverage * (1.0 - inner);
     } else {
       stroke = 0.0;
@@ -358,16 +400,20 @@ fn shape_fragment_main(in: VertexOut) -> @location(0) vec4f {
   } else if (command.x == 1u) {
     let draw = triangle_draws[command.y];
     let stroke_width = draw.stroke_width_pad.x;
-    coverage = triangle_alpha(in.world, draw, edge_alpha);
-    stroke = select(0.0, coverage * triangle_stroke(in.world, draw, edge_alpha), stroke_width > 0.0);
+    let local_world =
+      inverse_rotate_around(in.world, draw.stroke_width_pad.zw, draw.stroke_width_pad.y);
+    coverage = triangle_alpha(local_world, draw, edge_alpha);
+    stroke = select(0.0, coverage * triangle_stroke(local_world, draw, edge_alpha), stroke_width > 0.0);
     fill_color = draw.fill_color;
     stroke_color = draw.stroke_color;
   } else {
     let draw = oval_draws[command.y];
     let stroke_width = draw.stroke_width_pad.x;
-    coverage = oval_alpha(in.world, draw, 0.0, edge_alpha);
+    let local_world =
+      inverse_rotate_around(in.world, draw.stroke_width_pad.zw, draw.stroke_width_pad.y);
+    coverage = oval_alpha(local_world, draw, 0.0, edge_alpha);
     if (stroke_width > 0.0) {
-      let inner = oval_alpha(in.world, draw, stroke_width, edge_alpha);
+      let inner = oval_alpha(local_world, draw, stroke_width, edge_alpha);
       stroke = coverage * (1.0 - inner);
     } else {
       stroke = 0.0;

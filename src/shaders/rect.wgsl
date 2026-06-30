@@ -53,6 +53,8 @@ struct PathSegment {
   draw_index: u32,
 };
 
+const HIDDEN_SHAPE_KIND: u32 = 0xffffffffu;
+
 @group(0) @binding(0)
 var<uniform> u: BlitzUniforms;
 
@@ -161,7 +163,9 @@ fn shape_vertex_main(
 
   var world: vec2f;
   var uv = vec2f(0.0);
-  if (command.x == 0u) {
+  if (command.x == HIDDEN_SHAPE_KIND) {
+    world = vec2f(1.0e20, 1.0e20);
+  } else if (command.x == 0u) {
     world = rect_bounds(rect_draws[command.y].rect, shape_vertex_index);
   } else if (command.x == 1u) {
     world = triangle_bounds(triangle_draws[command.y], shape_vertex_index);
@@ -319,6 +323,9 @@ fn msdf_screen_range(uv_width: vec2f) -> f32 {
 fn shape_fragment_main(in: VertexOut) -> @location(0) vec4f {
   let uv_width = fwidth(in.uv);
   let command = shape_commands[in.command_index].kind_index_entity_pad;
+  if (command.x == HIDDEN_SHAPE_KIND) {
+    discard;
+  }
   if (command.x == 3u) {
     let draw = text_draws[command.y];
     let sample = textureSampleLevel(font_atlas, font_sampler, in.uv, 0.0);

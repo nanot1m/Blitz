@@ -3122,6 +3122,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     if (bindGroupsDirty) {
       rebuildBindGroups();
     }
+    drawArgsReset[1] = currentShapeCommandCount;
     device.queue.writeBuffer(drawArgsBuffer, 0, drawArgsReset);
     const encoder = device.createCommandEncoder({
       label: "Blitz Render Encoder",

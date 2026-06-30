@@ -52,6 +52,10 @@ const querySceneItemByObjectId = (objectId: number[]) => {
         y: view.getFloat32(offset + 44, true),
         width: view.getFloat32(offset + 48, true),
         height: view.getFloat32(offset + 52, true),
+        rotation: view.getFloat32(offset + 136, true),
+        relativeRotation: view.getFloat32(offset + 140, true),
+        relativeOffsetX: view.getFloat32(offset + 144, true),
+        relativeOffsetY: view.getFloat32(offset + 148, true),
       };
     }
   }
@@ -76,6 +80,10 @@ const querySceneItems = () => {
       y: view.getFloat32(offset + 44, true),
       width: view.getFloat32(offset + 48, true),
       height: view.getFloat32(offset + 52, true),
+      rotation: view.getFloat32(offset + 136, true),
+      relativeRotation: view.getFloat32(offset + 140, true),
+      relativeOffsetX: view.getFloat32(offset + 144, true),
+      relativeOffsetY: view.getFloat32(offset + 148, true),
     };
   });
 };
@@ -315,6 +323,17 @@ if (updateRectPosition(containerId, 20, 30) !== 0) {
 childItem = querySceneItemByObjectId(childId);
 expectNear(childItem.x, 95, "Relative child x after container move");
 expectNear(childItem.y, 105, "Relative child y after container move");
+if (wasm.blitz_set_rotation(...containerId, Math.PI / 2) !== 1) {
+  throw new Error("Failed to rotate relative-transform parent.");
+}
+childItem = querySceneItemByObjectId(childId);
+expectNear(childItem.x, 20 - 75, "Relative child x after parent rotation");
+expectNear(childItem.y, 30 + 75, "Relative child y after parent rotation");
+expectNear(childItem.rotation, Math.PI / 2, "Relative child inherited parent rotation");
+expectNear(childItem.relativeRotation, 0, "Relative child local rotation");
+if (wasm.blitz_set_rotation(...containerId, 0) !== 1) {
+  throw new Error("Failed to reset relative-transform parent rotation.");
+}
 // The rule is enforced only at drop, so sending the child to the back now
 // legitimately places it behind its parent (no continuous normalization).
 wasm.blitz_select_object(childId[0], childId[1], childId[2], childId[3], 0);

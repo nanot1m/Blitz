@@ -71,6 +71,13 @@ type BlitzExports = {
     offsetX: number,
     offsetY: number,
   ): number;
+  blitz_set_rotation(
+    actorHi: number,
+    actorLo: number,
+    sequenceHi: number,
+    sequenceLo: number,
+    rotation: number,
+  ): number;
   blitz_create_rect(
     x: number,
     y: number,
@@ -1363,6 +1370,12 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
         width: view.getFloat32(ptr + 48, true),
         height: view.getFloat32(ptr + 52, true),
       }),
+      debugComponent("Transform", {
+        rotation: view.getFloat32(ptr + 136, true),
+        relativeRotation: view.getFloat32(ptr + 140, true),
+        relativeOffsetX: view.getFloat32(ptr + 144, true),
+        relativeOffsetY: view.getFloat32(ptr + 148, true),
+      }),
     );
     if (kind === 3 || kind === 4) {
       const textPtr = view.getUint32(ptr + 28, true);
@@ -1481,6 +1494,10 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     y: number;
     width: number;
     height: number;
+    rotation: number;
+    relativeRotation: number;
+    relativeOffsetX: number;
+    relativeOffsetY: number;
     fill: [number, number, number, number];
     stroke: [number, number, number, number];
     strokeWidth: number;
@@ -1584,6 +1601,10 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
         y: view.getFloat32(offset + 44, true),
         width: view.getFloat32(offset + 48, true),
         height: view.getFloat32(offset + 52, true),
+        rotation: view.getFloat32(offset + 136, true),
+        relativeRotation: view.getFloat32(offset + 140, true),
+        relativeOffsetX: view.getFloat32(offset + 144, true),
+        relativeOffsetY: view.getFloat32(offset + 148, true),
         fill: [
           view.getFloat32(offset + 56, true),
           view.getFloat32(offset + 60, true),
@@ -2178,6 +2199,9 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       return null;
     }
     const id = readLastCreatedObjectId();
+    if (shape.rotation !== 0) {
+      wasm.blitz_set_rotation(id[0], id[1], id[2], id[3], shape.rotation);
+    }
     wasm.blitz_set_container(id[0], id[1], id[2], id[3], shape.container ? 1 : 0);
     return id;
   };
@@ -2202,8 +2226,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
         }
         const child = createdBySourceId.get(shape.id);
         const parent = createdBySourceId.get(shape.parentId);
-        const parentShape = shapes.find(({ id }) => id === shape.parentId);
-        if (!child || !parent || !parentShape) {
+        if (!child || !parent) {
           continue;
         }
         wasm.blitz_set_relative_transform(
@@ -2215,8 +2238,8 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
           parent[1],
           parent[2],
           parent[3],
-          shape.x - parentShape.x,
-          shape.y - parentShape.y,
+          shape.relativeOffsetX,
+          shape.relativeOffsetY,
         );
       }
       if (createdIds.length > 0) {

@@ -37,7 +37,7 @@ usize strlen(const char *text) {
 // scene (records + text); it is the load/restore size guard.
 #define BLITZ_SCENE_FILE_BUFFER_BYTES (512u * 1024u * 1024u)
 #define BLITZ_SCENE_FILE_MAGIC 0x5a544c42u
-#define BLITZ_SCENE_FILE_VERSION 8u
+#define BLITZ_SCENE_FILE_VERSION 9u
 #define BLITZ_SCENE_FILE_HEADER_BYTES 32u
 #define BLITZ_SCENE_FILE_LEGACY_RECORD_BYTES 80u
 #define BLITZ_SCENE_FILE_RECORD_BYTES 92u
@@ -45,6 +45,8 @@ usize strlen(const char *text) {
 #define BLITZ_SCENE_FILE_V6_RECORD_BYTES 112u
 // v8 appends the parent's object_id (16B) + relative offset (8B) at +112.
 #define BLITZ_SCENE_FILE_V8_RECORD_BYTES 136u
+// v9 appends absolute rotation + relative rotation at +136.
+#define BLITZ_SCENE_FILE_V9_RECORD_BYTES 144u
 #define BLITZ_MAX_TEXT_LAYOUT_LINES 256u
 #define BLITZ_CONTAINER_RETARGET_SELECTION_LIMIT 32u
 #define BLITZ_PATH_INPUT_POINTS 8192u
@@ -171,6 +173,7 @@ typedef struct RelativeTransform {
   u32 parent;
   float offset_x;
   float offset_y;
+  float rotation;
 } RelativeTransform;
 
 typedef struct TextLayoutLine {
@@ -256,6 +259,10 @@ typedef struct SceneItem {
   ObjectId parent_object_id;
   u32 component_mask;
   u32 selected_subtree;
+  float rotation;
+  float relative_rotation;
+  float relative_offset_x;
+  float relative_offset_y;
 } SceneItem;
 
 // Per-entity SoA storage. Indexed by entity slot; the arrays are arena-backed
@@ -271,6 +278,7 @@ typedef struct World {
   u32 *masks;
   Vec2 *positions;
   Vec2 *sizes;
+  float *rotations;
   RectView *rect_views;
   TriangleView *triangle_views;
   OvalView *oval_views;
@@ -429,6 +437,7 @@ typedef struct CrdtPendingParent {
   ObjectId parent;
   float offset_x;
   float offset_y;
+  float rotation;
 } CrdtPendingParent;
 static CrdtPendingParent *crdt_pending_parents;
 static u32 crdt_pending_parent_count;
@@ -699,6 +708,7 @@ static const u32 ecs_strides[] = {
     sizeof(u32),               // masks
     sizeof(Vec2),              // positions
     sizeof(Vec2),              // sizes
+    sizeof(float),             // rotations
     sizeof(RectView),          // rect_views
     sizeof(TriangleView),      // triangle_views
     sizeof(OvalView),          // oval_views
@@ -745,25 +755,26 @@ static void ecs_bind_pointers(u32 capacity) {
   world.masks = (u32 *)(ecs_block + ecs_offset(4u, capacity));
   world.positions = (Vec2 *)(ecs_block + ecs_offset(5u, capacity));
   world.sizes = (Vec2 *)(ecs_block + ecs_offset(6u, capacity));
-  world.rect_views = (RectView *)(ecs_block + ecs_offset(7u, capacity));
-  world.triangle_views = (TriangleView *)(ecs_block + ecs_offset(8u, capacity));
-  world.oval_views = (OvalView *)(ecs_block + ecs_offset(9u, capacity));
-  world.text_views = (TextView *)(ecs_block + ecs_offset(10u, capacity));
-  world.frame_views = (FrameView *)(ecs_block + ecs_offset(11u, capacity));
-  world.path_views = (PathView *)(ecs_block + ecs_offset(12u, capacity));
+  world.rotations = (float *)(ecs_block + ecs_offset(7u, capacity));
+  world.rect_views = (RectView *)(ecs_block + ecs_offset(8u, capacity));
+  world.triangle_views = (TriangleView *)(ecs_block + ecs_offset(9u, capacity));
+  world.oval_views = (OvalView *)(ecs_block + ecs_offset(10u, capacity));
+  world.text_views = (TextView *)(ecs_block + ecs_offset(11u, capacity));
+  world.frame_views = (FrameView *)(ecs_block + ecs_offset(12u, capacity));
+  world.path_views = (PathView *)(ecs_block + ecs_offset(13u, capacity));
   world.relative_transforms =
-      (RelativeTransform *)(ecs_block + ecs_offset(13u, capacity));
-  world.first_child = (u32 *)(ecs_block + ecs_offset(14u, capacity));
-  world.next_sibling = (u32 *)(ecs_block + ecs_offset(15u, capacity));
-  world.prev_sibling = (u32 *)(ecs_block + ecs_offset(16u, capacity));
-  transform_dirty = (u32 *)(ecs_block + ecs_offset(17u, capacity));
-  transform_dirty_entities = (u32 *)(ecs_block + ecs_offset(18u, capacity));
-  draw_order_seen = (u32 *)(ecs_block + ecs_offset(19u, capacity));
-  duplicate_entity_map = (u32 *)(ecs_block + ecs_offset(20u, capacity));
-  internal_clipboard_sources = (u32 *)(ecs_block + ecs_offset(21u, capacity));
-  marquee_base_selected = (u32 *)(ecs_block + ecs_offset(22u, capacity));
-  free_slots = (u32 *)(ecs_block + ecs_offset(23u, capacity));
-  crdt_versions = (CrdtVersion *)(ecs_block + ecs_offset(24u, capacity));
+      (RelativeTransform *)(ecs_block + ecs_offset(14u, capacity));
+  world.first_child = (u32 *)(ecs_block + ecs_offset(15u, capacity));
+  world.next_sibling = (u32 *)(ecs_block + ecs_offset(16u, capacity));
+  world.prev_sibling = (u32 *)(ecs_block + ecs_offset(17u, capacity));
+  transform_dirty = (u32 *)(ecs_block + ecs_offset(18u, capacity));
+  transform_dirty_entities = (u32 *)(ecs_block + ecs_offset(19u, capacity));
+  draw_order_seen = (u32 *)(ecs_block + ecs_offset(20u, capacity));
+  duplicate_entity_map = (u32 *)(ecs_block + ecs_offset(21u, capacity));
+  internal_clipboard_sources = (u32 *)(ecs_block + ecs_offset(22u, capacity));
+  marquee_base_selected = (u32 *)(ecs_block + ecs_offset(23u, capacity));
+  free_slots = (u32 *)(ecs_block + ecs_offset(24u, capacity));
+  crdt_versions = (CrdtVersion *)(ecs_block + ecs_offset(25u, capacity));
 }
 
 // Grow the per-entity block to hold `count` slots. If the block is the last
@@ -928,6 +939,7 @@ static void ecs_storage_init(void) {
   world.masks = 0;
   world.positions = 0;
   world.sizes = 0;
+  world.rotations = 0;
   world.rect_views = 0;
   world.triangle_views = 0;
   world.oval_views = 0;
@@ -1393,6 +1405,7 @@ static void detach_from_parent(u32 entity) {
   world.relative_transforms[entity].parent = BLITZ_INVALID_INDEX;
   world.relative_transforms[entity].offset_x = 0.0f;
   world.relative_transforms[entity].offset_y = 0.0f;
+  world.relative_transforms[entity].rotation = 0.0f;
   world.masks[entity] &= ~BLITZ_COMPONENT_RELATIVE_TRANSFORM;
 }
 
@@ -1424,6 +1437,42 @@ static u32 entity_is_dragged(u32 entity) {
   return world.selected[entity] || entity_has_selected_ancestor(entity);
 }
 
+static float wrap_radians(float value) {
+  const float pi = 3.14159265358979323846f;
+  const float tau = 6.28318530717958647692f;
+  while (value > pi) value -= tau;
+  while (value < -pi) value += tau;
+  return value;
+}
+
+static float blitz_sin(float value) {
+  float x = wrap_radians(value);
+  float x2 = x * x;
+  float x4 = x2 * x2;
+  float x6 = x4 * x2;
+  float x8 = x4 * x4;
+  return x * (1.0f - x2 / 6.0f + x4 / 120.0f - x6 / 5040.0f +
+              x8 / 362880.0f);
+}
+
+static float blitz_cos(float value) {
+  float x = wrap_radians(value);
+  float x2 = x * x;
+  float x4 = x2 * x2;
+  float x6 = x4 * x2;
+  float x8 = x4 * x4;
+  float x10 = x8 * x2;
+  return 1.0f - x2 / 2.0f + x4 / 24.0f - x6 / 720.0f + x8 / 40320.0f -
+         x10 / 3628800.0f;
+}
+
+static Vec2 world_delta_to_parent_local(u32 parent, float dx, float dy) {
+  float rotation = parent != BLITZ_INVALID_INDEX ? world.rotations[parent] : 0.0f;
+  float c = blitz_cos(rotation);
+  float s = blitz_sin(rotation);
+  return (Vec2){dx * c + dy * s, -dx * s + dy * c};
+}
+
 static u32 selected_top_level_count_capped(u32 cap) {
   u32 count = 0u;
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
@@ -1438,7 +1487,7 @@ static u32 selected_top_level_count_capped(u32 cap) {
 }
 
 static u32 attach_relative_transform(u32 entity, u32 parent, float offset_x,
-                                     float offset_y) {
+                                     float offset_y, float rotation) {
   if (entity == BLITZ_INVALID_INDEX || parent == BLITZ_INVALID_INDEX ||
       entity == parent || world.masks[entity] == 0u ||
       world.masks[parent] == 0u || transform_is_descendant(entity, parent)) {
@@ -1448,6 +1497,7 @@ static u32 attach_relative_transform(u32 entity, u32 parent, float offset_x,
   world.relative_transforms[entity].parent = parent;
   world.relative_transforms[entity].offset_x = offset_x;
   world.relative_transforms[entity].offset_y = offset_y;
+  world.relative_transforms[entity].rotation = rotation;
   world.prev_sibling[entity] = BLITZ_INVALID_INDEX;
   world.next_sibling[entity] = world.first_child[parent];
   if (world.first_child[parent] != BLITZ_INVALID_INDEX) {
@@ -1511,11 +1561,12 @@ static u32 attach_entity_to_container_target(u32 entity, u32 target) {
       world.masks[target] == 0u) {
     return 0u;
   }
-  return attach_relative_transform(entity, target,
-                                   world.positions[entity].x -
-                                       world.positions[target].x,
-                                   world.positions[entity].y -
-                                       world.positions[target].y);
+  Vec2 local = world_delta_to_parent_local(
+      target, world.positions[entity].x - world.positions[target].x,
+      world.positions[entity].y - world.positions[target].y);
+  return attach_relative_transform(
+      entity, target, local.x, local.y,
+      world.rotations[entity] - world.rotations[target]);
 }
 
 static void set_container_component(u32 entity, u32 enabled) {
@@ -1632,6 +1683,7 @@ static void cleanup_entity_hierarchy(u32 entity) {
   world.relative_transforms[entity].parent = BLITZ_INVALID_INDEX;
   world.relative_transforms[entity].offset_x = 0.0f;
   world.relative_transforms[entity].offset_y = 0.0f;
+  world.relative_transforms[entity].rotation = 0.0f;
   if (hidden_text_entity == entity) {
     hidden_text_entity = BLITZ_INVALID_INDEX;
   }
@@ -1656,10 +1708,17 @@ static void resolve_transform_entity(u32 entity, u32 depth) {
     resolve_transform_entity(relative.parent, depth + 1u);
     if (relative.parent != BLITZ_INVALID_INDEX &&
         world.masks[relative.parent] != 0u) {
+      float parent_rotation = world.rotations[relative.parent];
+      float c = blitz_cos(parent_rotation);
+      float s = blitz_sin(parent_rotation);
       world.positions[entity].x =
-          world.positions[relative.parent].x + relative.offset_x;
+          world.positions[relative.parent].x + relative.offset_x * c -
+          relative.offset_y * s;
       world.positions[entity].y =
-          world.positions[relative.parent].y + relative.offset_y;
+          world.positions[relative.parent].y + relative.offset_x * s +
+          relative.offset_y * c;
+      world.rotations[entity] =
+          parent_rotation + relative.rotation;
     }
   }
   transform_dirty[entity] = 0u;
@@ -1802,7 +1861,7 @@ static void history_capture_before(u32 entity) {
     return;
   }
   u32 max_record =
-      BLITZ_SCENE_FILE_V8_RECORD_BYTES + history_entity_payload_bytes(entity);
+      BLITZ_SCENE_FILE_V9_RECORD_BYTES + history_entity_payload_bytes(entity);
   if (!history_scratch_reserve_bytes(max_record)) {
     return;
   }
@@ -1978,7 +2037,7 @@ static void history_commit(void) {
       continue;
     }
     u32 max_record =
-        BLITZ_SCENE_FILE_V8_RECORD_BYTES + history_entity_payload_bytes(entity);
+        BLITZ_SCENE_FILE_V9_RECORD_BYTES + history_entity_payload_bytes(entity);
     if (!history_scratch_reserve_bytes(max_record)) {
       e->after_offset = BLITZ_INVALID_INDEX;
       continue;
@@ -2389,6 +2448,8 @@ static u32 ecs_create_entity(void) {
   world.relative_transforms[entity].parent = BLITZ_INVALID_INDEX;
   world.relative_transforms[entity].offset_x = 0.0f;
   world.relative_transforms[entity].offset_y = 0.0f;
+  world.relative_transforms[entity].rotation = 0.0f;
+  world.rotations[entity] = 0.0f;
   transform_dirty[entity] = 0u;
   // Grown ECS slots aren't zeroed, so initialise the version explicitly.
   crdt_versions[entity] = (CrdtVersion){0u, 0u, 0u};
@@ -2417,8 +2478,28 @@ static void ecs_move_absolute(u32 entity, float x, float y) {
     RelativeTransform *relative = &world.relative_transforms[entity];
     if (relative->parent != BLITZ_INVALID_INDEX &&
         world.masks[relative->parent] != 0u) {
-      relative->offset_x = x - world.positions[relative->parent].x;
-      relative->offset_y = y - world.positions[relative->parent].y;
+      float dx = x - world.positions[relative->parent].x;
+      float dy = y - world.positions[relative->parent].y;
+      float parent_rotation = world.rotations[relative->parent];
+      float c = blitz_cos(parent_rotation);
+      float s = blitz_sin(parent_rotation);
+      relative->offset_x = dx * c + dy * s;
+      relative->offset_y = -dx * s + dy * c;
+    }
+  }
+  mark_transform_subtree_dirty(entity);
+}
+
+static void ecs_set_rotation(u32 entity, float rotation) {
+  if (entity == BLITZ_INVALID_INDEX) {
+    return;
+  }
+  world.rotations[entity] = rotation;
+  if (world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM) {
+    RelativeTransform *relative = &world.relative_transforms[entity];
+    if (relative->parent != BLITZ_INVALID_INDEX &&
+        world.masks[relative->parent] != 0u) {
+      relative->rotation = rotation - world.rotations[relative->parent];
     }
   }
   mark_transform_subtree_dirty(entity);
@@ -2615,9 +2696,10 @@ static u32 capture_entity_record(unsigned char *buf, u32 offset, u32 entity) {
   }
 
   u32 payload = kind == BLITZ_SHAPE_PATH ? text_length * 8u : align4(text_length);
-  u32 record_bytes = BLITZ_SCENE_FILE_V8_RECORD_BYTES + payload;
+  u32 record_bytes = BLITZ_SCENE_FILE_V9_RECORD_BYTES + payload;
   Vec2 position = world.positions[entity];
   Vec2 size = world.sizes[entity];
+  float rotation = world.rotations[entity];
   ObjectId oid = world.object_ids[entity];
   write_u32(buf, offset, kind);
   write_u32(buf, offset + 4u, record_bytes);
@@ -2650,11 +2732,13 @@ static u32 capture_entity_record(unsigned char *buf, u32 offset, u32 entity) {
   ObjectId parent_id = object_id_zero();
   float parent_offset_x = 0.0f;
   float parent_offset_y = 0.0f;
+  float parent_rotation = 0.0f;
   if ((mask & BLITZ_COMPONENT_RELATIVE_TRANSFORM) &&
       world.relative_transforms[entity].parent != BLITZ_INVALID_INDEX) {
     parent_id = world.object_ids[world.relative_transforms[entity].parent];
     parent_offset_x = world.relative_transforms[entity].offset_x;
     parent_offset_y = world.relative_transforms[entity].offset_y;
+    parent_rotation = world.relative_transforms[entity].rotation;
   }
   write_u32(buf, offset + 112u, parent_id.actor_hi);
   write_u32(buf, offset + 116u, parent_id.actor_lo);
@@ -2662,17 +2746,19 @@ static u32 capture_entity_record(unsigned char *buf, u32 offset, u32 entity) {
   write_u32(buf, offset + 124u, parent_id.sequence_lo);
   write_f32(buf, offset + 128u, parent_offset_x);
   write_f32(buf, offset + 132u, parent_offset_y);
+  write_f32(buf, offset + 136u, rotation);
+  write_f32(buf, offset + 140u, parent_rotation);
   if (kind == BLITZ_SHAPE_PATH) {
     PathView v = world.path_views[entity];
     for (u32 i = 0u; i < v.point_count; i += 1u) {
-      write_f32(buf, offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES + i * 8u,
+      write_f32(buf, offset + BLITZ_SCENE_FILE_V9_RECORD_BYTES + i * 8u,
                 v.points[i].x);
-      write_f32(buf, offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES + i * 8u + 4u,
+      write_f32(buf, offset + BLITZ_SCENE_FILE_V9_RECORD_BYTES + i * 8u + 4u,
                 v.points[i].y);
     }
   } else if (text) {
     for (u32 i = 0u; i < text_length; i += 1u) {
-      buf[offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES + i] = (unsigned char)text[i];
+      buf[offset + BLITZ_SCENE_FILE_V9_RECORD_BYTES + i] = (unsigned char)text[i];
     }
   }
   return record_bytes;
@@ -2701,6 +2787,7 @@ static void apply_record_parent(HistoryTransaction *txn, u32 have_map,
   }
   float offset_x = read_f32(buf, offset + 128u);
   float offset_y = read_f32(buf, offset + 132u);
+  float relative_rotation = read_f32(buf, offset + 140u);
   // Parent unchanged (the common case for a move) is detected by comparing the
   // current parent's object_id in O(1) — crucially without resolving parent_id,
   // which would otherwise be a per-entity scan when the parent isn't itself in
@@ -2725,7 +2812,8 @@ static void apply_record_parent(HistoryTransaction *txn, u32 have_map,
     parent = entity_for_object_id(parent_id);
   }
   if (parent != BLITZ_INVALID_INDEX) {
-    attach_relative_transform(child, parent, offset_x, offset_y);
+    attach_relative_transform(child, parent, offset_x, offset_y,
+                              relative_rotation);
   }
 }
 
@@ -2758,7 +2846,8 @@ static u32 apply_entity_record_into(const unsigned char *buf, u32 offset,
   u32 max_lines = read_u32(buf, offset + 100u);
   u32 align = read_u32(buf, offset + 104u);
   u32 container = read_u32(buf, offset + 108u) & BLITZ_COMPONENT_CONTAINER;
-  const unsigned char *payload = buf + offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES;
+  float rotation = read_f32(buf, offset + 136u);
+  const unsigned char *payload = buf + offset + BLITZ_SCENE_FILE_V9_RECORD_BYTES;
 
   if (entity == BLITZ_INVALID_INDEX) {
     entity = ecs_create_entity();
@@ -2779,6 +2868,7 @@ static u32 apply_entity_record_into(const unsigned char *buf, u32 offset,
                BLITZ_COMPONENT_CONTAINER);
   }
   ecs_set_position(entity, x, y);
+  ecs_set_rotation(entity, rotation);
   ecs_set_size(entity, width, height);
   if (kind == BLITZ_SHAPE_TRIANGLE) {
     ecs_set_triangle_view(entity, fill, stroke, stroke_width);
@@ -2916,12 +3006,13 @@ static u32 crdt_apply_one(const unsigned char *buf, u32 op, u32 *destroyed_any) 
 // Queue a child whose parent wasn't present when its op applied. A repeat for
 // the same child overwrites (the latest link wins).
 static void crdt_pending_parent_add(ObjectId child, ObjectId parent, float ox,
-                                    float oy) {
+                                    float oy, float rotation) {
   for (u32 i = 0u; i < crdt_pending_parent_count; i += 1u) {
     if (object_id_equal(crdt_pending_parents[i].child, child)) {
       crdt_pending_parents[i].parent = parent;
       crdt_pending_parents[i].offset_x = ox;
       crdt_pending_parents[i].offset_y = oy;
+      crdt_pending_parents[i].rotation = rotation;
       return;
     }
   }
@@ -2942,6 +3033,7 @@ static void crdt_pending_parent_add(ObjectId child, ObjectId parent, float ox,
   p->parent = parent;
   p->offset_x = ox;
   p->offset_y = oy;
+  p->rotation = rotation;
   crdt_pending_parent_count += 1u;
 }
 
@@ -2957,7 +3049,8 @@ static void crdt_retry_pending_parents(void) {
     }
     u32 parent = entity_for_object_id(p.parent);
     if (parent != BLITZ_INVALID_INDEX) {
-      attach_relative_transform(child, parent, p.offset_x, p.offset_y);
+      attach_relative_transform(child, parent, p.offset_x, p.offset_y,
+                                p.rotation);
       continue;
     }
     crdt_pending_parents[kept] = p;
@@ -3029,7 +3122,8 @@ static u32 crdt_apply_op_batch(const unsigned char *buf, u32 byte_count) {
                             : BLITZ_INVALID_INDEX;
           if (cur == BLITZ_INVALID_INDEX) {
             crdt_pending_parent_add(id, parent_id, read_f32(buf, rec + 128u),
-                                    read_f32(buf, rec + 132u));
+                                    read_f32(buf, rec + 132u),
+                                    read_f32(buf, rec + 140u));
           }
         }
       }
@@ -3089,7 +3183,7 @@ static u32 crdt_write_order_block(u32 offset) {
 // when the entity has no syncable record), or 0 if the buffer can't grow.
 static u32 crdt_emit_upsert(u32 offset, u32 entity) {
   u32 max_record =
-      BLITZ_SCENE_FILE_V8_RECORD_BYTES + history_entity_payload_bytes(entity);
+      BLITZ_SCENE_FILE_V9_RECORD_BYTES + history_entity_payload_bytes(entity);
   if (!scene_file_ensure(offset + BLITZ_CRDT_OP_HEADER + max_record, offset)) {
     return 0u;
   }
@@ -5054,6 +5148,9 @@ static u32 clone_entity_for_duplicate(u32 source, float offset_x,
       }
     }
   }
+  if (clone != BLITZ_INVALID_INDEX) {
+    ecs_set_rotation(clone, world.rotations[source]);
+  }
   if (clone != BLITZ_INVALID_INDEX &&
       (mask & BLITZ_COMPONENT_CONTAINER)) {
     set_container_component(clone, 1u);
@@ -5509,9 +5606,12 @@ void blitz_pointer_up(void) {
               (world.masks[entity] & BLITZ_COMPONENT_RELATIVE_TRANSFORM)
                   ? world.relative_transforms[entity].parent
                   : BLITZ_INVALID_INDEX;
-          attach_relative_transform(entity, drop_container,
-                                    next_x - world.positions[drop_container].x,
-                                    next_y - world.positions[drop_container].y);
+          Vec2 local = world_delta_to_parent_local(
+              drop_container, next_x - world.positions[drop_container].x,
+              next_y - world.positions[drop_container].y);
+          attach_relative_transform(
+              entity, drop_container, local.x, local.y,
+              world.rotations[entity] - world.rotations[drop_container]);
           if (previous_parent != drop_container) {
             any_reparented = 1u;
           }
@@ -5683,11 +5783,12 @@ u32 blitz_duplicate_selected(float offset_x, float offset_y) {
         u32 clone_parent = duplicate_entity_map[parent];
         if (clone_parent != BLITZ_INVALID_INDEX) {
           attach_relative_transform(clone, clone_parent, relative.offset_x,
-                                    relative.offset_y);
+                                    relative.offset_y, relative.rotation);
         } else {
           attach_relative_transform(clone, parent,
                                     relative.offset_x + offset_x,
-                                    relative.offset_y + offset_y);
+                                    relative.offset_y + offset_y,
+                                    relative.rotation);
         }
       }
     }
@@ -5798,11 +5899,12 @@ u32 blitz_paste_internal_clipboard(float offset_x, float offset_y) {
         u32 clone_parent = duplicate_entity_map[parent];
         if (clone_parent != BLITZ_INVALID_INDEX) {
           attach_relative_transform(clone, clone_parent, relative.offset_x,
-                                    relative.offset_y);
+                                    relative.offset_y, relative.rotation);
         } else {
           attach_relative_transform(clone, parent,
                                     relative.offset_x + offset_x,
-                                    relative.offset_y + offset_y);
+                                    relative.offset_y + offset_y,
+                                    relative.rotation);
         }
       }
     }
@@ -5934,13 +6036,34 @@ u32 blitz_set_relative_transform(u32 child_actor_hi, u32 child_actor_lo,
     return 0u;
   }
   history_record_before(child);
-  u32 changed = attach_relative_transform(child, parent, offset_x, offset_y);
+  u32 changed = attach_relative_transform(
+      child, parent, offset_x, offset_y,
+      world.rotations[child] - world.rotations[parent]);
   if (changed) {
     history_commit();
   } else {
     history_cancel();
   }
   return changed;
+}
+
+EXPORT("blitz_set_rotation")
+u32 blitz_set_rotation(u32 actor_hi, u32 actor_lo, u32 sequence_hi,
+                       u32 sequence_lo, float rotation) {
+  world_sync_for_read();
+  u32 entity = entity_for_object_id(
+      (ObjectId){actor_hi, actor_lo, sequence_hi, sequence_lo});
+  if (entity == BLITZ_INVALID_INDEX || world.masks[entity] == 0u) {
+    return 0u;
+  }
+  if (world.rotations[entity] == rotation) {
+    return 0u;
+  }
+  history_record_before(entity);
+  ecs_set_rotation(entity, rotation);
+  mark_render_list_dirty();
+  history_commit();
+  return 1u;
 }
 
 EXPORT("blitz_clear_relative_transform")
@@ -6561,6 +6684,19 @@ u32 blitz_query_scene(float min_x, float min_y, float max_x, float max_y,
     item->component_mask = mask;
     item->selected_subtree =
         world.selected[entity] || entity_has_selected_ancestor(entity);
+    item->rotation = world.rotations[entity];
+    item->relative_rotation =
+        (mask & BLITZ_COMPONENT_RELATIVE_TRANSFORM)
+            ? world.relative_transforms[entity].rotation
+            : 0.0f;
+    item->relative_offset_x =
+        (mask & BLITZ_COMPONENT_RELATIVE_TRANSFORM)
+            ? world.relative_transforms[entity].offset_x
+            : 0.0f;
+    item->relative_offset_y =
+        (mask & BLITZ_COMPONENT_RELATIVE_TRANSFORM)
+            ? world.relative_transforms[entity].offset_y
+            : 0.0f;
     scene_query_count += 1u;
   }
   return scene_query_count;
@@ -6708,13 +6844,14 @@ u32 blitz_scene_serialize(void) {
     u32 payload_bytes =
         kind == BLITZ_SHAPE_PATH ? text_length * 2u * sizeof(float)
                                  : align4(text_length);
-    u32 record_bytes = BLITZ_SCENE_FILE_V8_RECORD_BYTES + payload_bytes;
+    u32 record_bytes = BLITZ_SCENE_FILE_V9_RECORD_BYTES + payload_bytes;
     if (offset + record_bytes > BLITZ_SCENE_FILE_BUFFER_BYTES) {
       return 0u;
     }
 
     Vec2 position = world.positions[entity];
     Vec2 size = world.sizes[entity];
+    float rotation = world.rotations[entity];
     if (!scene_file_ensure(offset + record_bytes, offset)) {
       return 0;
     }
@@ -6751,12 +6888,14 @@ u32 blitz_scene_serialize(void) {
     ObjectId parent_id = object_id_zero();
     float parent_offset_x = 0.0f;
     float parent_offset_y = 0.0f;
+    float parent_rotation = 0.0f;
     if ((mask & BLITZ_COMPONENT_RELATIVE_TRANSFORM) &&
         world.relative_transforms[entity].parent != BLITZ_INVALID_INDEX) {
       u32 parent_entity = world.relative_transforms[entity].parent;
       parent_id = world.object_ids[parent_entity];
       parent_offset_x = world.relative_transforms[entity].offset_x;
       parent_offset_y = world.relative_transforms[entity].offset_y;
+      parent_rotation = world.relative_transforms[entity].rotation;
     }
     write_u32(scene_file_buffer, offset + 112u, parent_id.actor_hi);
     write_u32(scene_file_buffer, offset + 116u, parent_id.actor_lo);
@@ -6764,19 +6903,21 @@ u32 blitz_scene_serialize(void) {
     write_u32(scene_file_buffer, offset + 124u, parent_id.sequence_lo);
     write_f32(scene_file_buffer, offset + 128u, parent_offset_x);
     write_f32(scene_file_buffer, offset + 132u, parent_offset_y);
+    write_f32(scene_file_buffer, offset + 136u, rotation);
+    write_f32(scene_file_buffer, offset + 140u, parent_rotation);
     if (kind == BLITZ_SHAPE_PATH) {
       PathView view = world.path_views[entity];
       for (u32 i = 0u; i < view.point_count; i += 1u) {
         write_f32(scene_file_buffer,
-                  offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES + i * 8u,
+                  offset + BLITZ_SCENE_FILE_V9_RECORD_BYTES + i * 8u,
                   view.points[i].x);
         write_f32(scene_file_buffer,
-                  offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES + i * 8u + 4u,
+                  offset + BLITZ_SCENE_FILE_V9_RECORD_BYTES + i * 8u + 4u,
                   view.points[i].y);
       }
     } else {
       for (u32 i = 0u; i < align4(text_length); i += 1u) {
-        scene_file_buffer[offset + BLITZ_SCENE_FILE_V8_RECORD_BYTES + i] =
+        scene_file_buffer[offset + BLITZ_SCENE_FILE_V9_RECORD_BYTES + i] =
             i < text_length ? (unsigned char)text[i] : 0u;
       }
     }
@@ -6829,7 +6970,9 @@ u32 blitz_scene_deserialize(u32 byte_count) {
   u32 offset = BLITZ_SCENE_FILE_HEADER_BYTES;
   u32 required_text_bytes = 0u;
   u32 fixed_record_bytes =
-      file_version >= 8u
+      file_version >= 9u
+          ? BLITZ_SCENE_FILE_V9_RECORD_BYTES
+      : file_version >= 8u
           ? BLITZ_SCENE_FILE_V8_RECORD_BYTES
           : file_version >= 6u
           ? BLITZ_SCENE_FILE_V6_RECORD_BYTES
@@ -6917,6 +7060,8 @@ u32 blitz_scene_deserialize(u32 byte_count) {
     float font_size = read_f32(scene_file_buffer, offset + 68u);
     float origin_x = read_f32(scene_file_buffer, offset + 72u);
     float baseline_offset = read_f32(scene_file_buffer, offset + 76u);
+    float rotation =
+        file_version >= 9u ? read_f32(scene_file_buffer, offset + 136u) : 0.0f;
     float max_width =
         file_version >= 4u ? read_f32(scene_file_buffer, offset + 92u) : 0.0f;
     float line_height = file_version >= 4u
@@ -6939,6 +7084,7 @@ u32 blitz_scene_deserialize(u32 byte_count) {
       advance_sequence_past(object_id);
     }
     ecs_set_position(entity, x, y);
+    ecs_set_rotation(entity, rotation);
     ecs_set_size(entity, width, height);
     if (kind == BLITZ_SHAPE_RECT) {
       ecs_set_rect_view(entity, fill, stroke, stroke_width);
@@ -7027,9 +7173,11 @@ u32 blitz_scene_deserialize(u32 byte_count) {
                              read_u32(scene_file_buffer, offset + 8u)};
         u32 child = entity_for_object_id(child_id);
         u32 parent = entity_for_object_id(parent_id);
-        attach_relative_transform(child, parent,
-                                  read_f32(scene_file_buffer, offset + 128u),
-                                  read_f32(scene_file_buffer, offset + 132u));
+        attach_relative_transform(
+            child, parent, read_f32(scene_file_buffer, offset + 128u),
+            read_f32(scene_file_buffer, offset + 132u),
+            file_version >= 9u ? read_f32(scene_file_buffer, offset + 140u)
+                               : 0.0f);
       }
       offset += record_bytes;
     }
@@ -7377,6 +7525,19 @@ u32 blitz_selected_debug_ptr(void) {
   }
   selected_debug_item.component_mask = mask;
   selected_debug_item.selected_subtree = 1u;
+  selected_debug_item.rotation = world.rotations[entity];
+  selected_debug_item.relative_rotation =
+      (mask & BLITZ_COMPONENT_RELATIVE_TRANSFORM)
+          ? world.relative_transforms[entity].rotation
+          : 0.0f;
+  selected_debug_item.relative_offset_x =
+      (mask & BLITZ_COMPONENT_RELATIVE_TRANSFORM)
+          ? world.relative_transforms[entity].offset_x
+          : 0.0f;
+  selected_debug_item.relative_offset_y =
+      (mask & BLITZ_COMPONENT_RELATIVE_TRANSFORM)
+          ? world.relative_transforms[entity].offset_y
+          : 0.0f;
   selected_debug_mask = mask;
   return (u32)&selected_debug_item;
 }
@@ -8104,6 +8265,7 @@ u32 blitz_selected_count(void) {
 EXPORT("blitz_wasm_live_bytes")
 u32 blitz_wasm_live_bytes(void) {
   u32 per_entity = 6u * (u32)sizeof(u32) + 2u * (u32)sizeof(Vec2) +
+                   (u32)sizeof(float) +
                    (u32)sizeof(RectView) + (u32)sizeof(TriangleView) +
                    (u32)sizeof(OvalView) + (u32)sizeof(TextView) +
                    (u32)sizeof(RelativeTransform) + 7u * (u32)sizeof(u32);

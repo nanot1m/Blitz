@@ -32,6 +32,12 @@ struct OvalDraw {
   stroke_width_pad: vec4f,
 };
 
+struct TextDraw {
+  rect: vec4f,
+  uv_rect: vec4f,
+  color: vec4f,
+};
+
 struct DrawArgs {
   vertex_count: u32,
   instance_count: atomic<u32>,
@@ -60,6 +66,9 @@ var<storage, read_write> visible_commands: array<ShapeCommand>;
 @group(0) @binding(6)
 var<storage, read_write> draw_args: DrawArgs;
 
+@group(0) @binding(7)
+var<storage, read> text_draws: array<TextDraw>;
+
 // Returns world-space bounds as (min.x, min.y, max.x, max.y).
 fn shape_bounds(command: vec4u) -> vec4f {
   if (command.x == 0u) {
@@ -70,8 +79,11 @@ fn shape_bounds(command: vec4u) -> vec4f {
     let bounds_min = min(d.points_a.xy, min(d.points_a.zw, d.points_b.xy));
     let bounds_max = max(d.points_a.xy, max(d.points_a.zw, d.points_b.xy));
     return vec4f(bounds_min, bounds_max);
+  } else if (command.x == 3u) {
+    let t = text_draws[command.y].rect;
+    return vec4f(t.xy, t.xy + t.zw);
   }
-  // Only rects/triangles/ovals reach the cull (paths render via their own
+  // Only rects/triangles/ovals/text reach the cull (paths render via their own
   // pipeline), so command.x == 2u here.
   let c = oval_draws[command.y].oval;
   return vec4f(c.xy - c.zw, c.xy + c.zw);

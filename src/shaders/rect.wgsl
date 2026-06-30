@@ -324,10 +324,11 @@ fn shape_fragment_main(in: VertexOut) -> @location(0) vec4f {
     let sample = textureSampleLevel(font_atlas, font_sampler, in.uv, 0.0);
     let signed_distance = median(sample.rgb) - 0.5;
     let coverage = clamp(signed_distance * msdf_screen_range(uv_width) + 0.5, 0.0, 1.0);
-    if (coverage <= 0.001) {
+    let alpha = draw.color.a * coverage;
+    if (alpha <= 0.001) {
       discard;
     }
-    return vec4f(draw.color.rgb, draw.color.a * coverage);
+    return vec4f(draw.color.rgb, alpha);
   }
   let edge_alpha = 1.0 / max(u.style.x, 0.001);
   var coverage: f32;
@@ -373,7 +374,11 @@ fn shape_fragment_main(in: VertexOut) -> @location(0) vec4f {
   }
 
   let color = mix(fill_color, stroke_color, stroke);
-  return vec4f(color.rgb, color.a * coverage);
+  let alpha = color.a * coverage;
+  if (alpha <= 0.001) {
+    discard;
+  }
+  return vec4f(color.rgb, alpha);
 }
 
 @fragment

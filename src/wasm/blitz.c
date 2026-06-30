@@ -47,8 +47,9 @@ usize strlen(const char *text) {
 #define BLITZ_MAX_TEXT_LAYOUT_LINES 256u
 #define BLITZ_CONTAINER_RETARGET_SELECTION_LIMIT 32u
 #define BLITZ_PATH_INPUT_POINTS 8192u
-// Coarse LOD keeps every Nth point; used when a stroke is small on screen.
-#define BLITZ_PATH_LOD_STRIDE 8u
+// Coarse LOD keeps every Nth point; used only when a stroke is very small on
+// screen. Keep this conservative: high strides make handwriting visibly angular.
+#define BLITZ_PATH_LOD_STRIDE 4u
 
 #define BLITZ_INVALID_INDEX 0xffffffffu
 // High bit of a command's order word: set while the command's entity is being
@@ -351,6 +352,7 @@ static u32 text_draw_count;
 static u32 visible_text_shape_count;
 static u32 container_entity_count;
 static u32 dyn_command_count;
+static u32 dyn_overlay_command_start;
 static u32 dyn_rect_count;
 // Render-stream versions + dirty flags.
 static u32 shape_command_version;
@@ -987,6 +989,10 @@ static void ecs_storage_init(void) {
 // buffers and report whether the (possibly relocated) buffers are usable. Both
 // buffers a push touches are reserved together.
 static int dyn_rect_reserve(void) {
+  if (dyn_command_count >= BLITZ_MAX_DYN_COMMANDS ||
+      dyn_rect_count >= BLITZ_MAX_DYN_RECTS) {
+    return 0;
+  }
   dyn_commands = (ShapeCommand *)dyn_grow(dyn_commands, &dyn_commands_cap,
                                           dyn_command_count, sizeof(ShapeCommand));
   dyn_rects = (RectDraw *)dyn_grow(dyn_rects, &dyn_rects_cap, dyn_rect_count,
@@ -994,6 +1000,10 @@ static int dyn_rect_reserve(void) {
   return dyn_commands != 0 && dyn_rects != 0;
 }
 static int dyn_text_reserve(void) {
+  if (dyn_command_count >= BLITZ_MAX_DYN_COMMANDS ||
+      text_draw_count >= BLITZ_MAX_TEXT_DRAWS) {
+    return 0;
+  }
   dyn_commands = (ShapeCommand *)dyn_grow(dyn_commands, &dyn_commands_cap,
                                           dyn_command_count, sizeof(ShapeCommand));
   text_draws = (TextDraw *)dyn_grow(text_draws, &text_draws_cap, text_draw_count,
@@ -3527,18 +3537,24 @@ static void push_rect_draw(u32 entity, u32 order) {
 }
 
 static void push_selection_draw(u32 entity, u32 order) {
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  float inset = 3.0f / uniforms.style[0];
+  float x = position.x - inset;
+  float y = position.y - inset;
+  float width = size.x + inset * 2.0f;
+  float height = size.y + inset * 2.0f;
+  float line = 2.0f / uniforms.style[0];
+
   if (!dyn_rect_reserve()) {
     return;
   }
 
-  Vec2 position = world.positions[entity];
-  Vec2 size = world.sizes[entity];
-  float inset = 3.0f / uniforms.style[0];
   RectDraw *draw = &dyn_rects[dyn_rect_count];
-  draw->rect[0] = position.x - inset;
-  draw->rect[1] = position.y - inset;
-  draw->rect[2] = size.x + inset * 2.0f;
-  draw->rect[3] = size.y + inset * 2.0f;
+  draw->rect[0] = x;
+  draw->rect[1] = y;
+  draw->rect[2] = width;
+  draw->rect[3] = height;
   draw->fill_color[0] = 0.0f;
   draw->fill_color[1] = 0.0f;
   draw->fill_color[2] = 0.0f;
@@ -3547,7 +3563,7 @@ static void push_selection_draw(u32 entity, u32 order) {
   draw->stroke_color[1] = 0.48f;
   draw->stroke_color[2] = 1.0f;
   draw->stroke_color[3] = 1.0f;
-  draw->stroke_width_pad[0] = 2.0f / uniforms.style[0];
+  draw->stroke_width_pad[0] = line;
   draw->stroke_width_pad[1] = 0.0f;
   draw->stroke_width_pad[2] = 0.0f;
   draw->stroke_width_pad[3] = 0.0f;
@@ -4207,6 +4223,43 @@ static void push_frame_title_draws(u32 entity, u32 order) {
                       view.title_font_size, position.x, baseline_y, order);
 }
 
+static u32 count_text_glyphs(u32 entity) {
+  if (entity == hidden_text_entity) {
+    return 0u;
+  }
+  TextView view = world.text_views[entity];
+  layout_text(view.text, view.font_size, view.max_width, view.line_height,
+              view.max_lines);
+  u32 count = 0u;
+  for (u32 line_index = 0u; line_index < text_layout_line_count; line_index += 1u) {
+    TextLayoutLine line = text_layout_lines[line_index];
+    const char *cursor = view.text + line.start;
+    const char *end = cursor + line.length;
+    while (cursor < end) {
+      u32 codepoint = utf8_next(&cursor);
+      if (codepoint != (u32)' ') {
+        count += 1u;
+      }
+    }
+  }
+  return count;
+}
+
+static u32 count_text_run_glyphs(const char *text) {
+  if (!text || text[0] == '\0') {
+    return 0u;
+  }
+  const char *cursor = text;
+  u32 count = 0u;
+  while (*cursor != '\0') {
+    u32 codepoint = utf8_next(&cursor);
+    if (codepoint != (u32)' ') {
+      count += 1u;
+    }
+  }
+  return count;
+}
+
 static int text_visible_in_view(u32 entity, float scale, float min_x,
                                 float min_y, float max_x, float max_y) {
   Vec2 position = world.positions[entity];
@@ -4309,6 +4362,7 @@ static void extract_dynamic(void) {
   dyn_rect_count = 0u;
   text_draw_count = 0u;
   visible_text_shape_count = 0u;
+  dyn_overlay_command_start = 0u;
 
   float scale = uniforms.style[0];
   float half_w = uniforms.viewport_camera[0] * 0.5f / scale;
@@ -4360,6 +4414,8 @@ static void extract_dynamic(void) {
     }
   }
 
+  dyn_overlay_command_start = dyn_command_count;
+
   u32 overlay_order = world.draw_order_count + 1u;
   if (drag_active && drag_hover_container != BLITZ_INVALID_INDEX) {
     push_container_hover_draw(drag_hover_container, overlay_order);
@@ -4384,12 +4440,15 @@ static void extract_dynamic(void) {
         position.y + size.y < view_min_y || position.y > view_max_y) {
       continue;
     }
-    if (size.x * scale < 1.0f && size.y * scale < 1.0f) {
+    float screen_w = size.x * scale;
+    float screen_h = size.y * scale;
+    if (screen_w < 1.0f && screen_h < 1.0f) {
       continue;
     }
     push_selection_draw(entity, overlay_order);
     u32 resize_axes = entity_resize_axes(entity);
-    if (selected_count == 1u && resize_axes != 0u) {
+    if (selected_count == 1u && resize_axes != 0u &&
+        screen_w >= 24.0f && screen_h >= 24.0f) {
       float left = position.x;
       float top = position.y;
       float right = position.x + size.x;
@@ -5140,6 +5199,7 @@ void blitz_init(void) {
   visible_text_shape_count = 0u;
   container_entity_count = 0u;
   dyn_command_count = 0u;
+  dyn_overlay_command_start = 0u;
   dyn_rect_count = 0u;
   shape_command_version = 0u;
   dyn_version = 0u;
@@ -7695,7 +7755,7 @@ void blitz_set_hidden_text_entity(u32 entity) {
     return;
   }
   hidden_text_entity = entity;
-  mark_dynamic_dirty();
+  mark_static_dynamic_dirty();
 }
 
 EXPORT("blitz_reset_selected_text_width")
@@ -7992,6 +8052,11 @@ u32 blitz_dyn_command_ptr(void) {
 EXPORT("blitz_dyn_command_count")
 u32 blitz_dyn_command_count(void) {
   return dyn_command_count;
+}
+
+EXPORT("blitz_dyn_overlay_command_start")
+u32 blitz_dyn_overlay_command_start(void) {
+  return dyn_overlay_command_start;
 }
 
 EXPORT("blitz_dyn_version")

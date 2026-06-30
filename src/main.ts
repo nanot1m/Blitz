@@ -307,6 +307,7 @@ type BlitzExports = {
   blitz_visible_text_shape_count(): number;
   blitz_dyn_command_ptr(): number;
   blitz_dyn_command_count(): number;
+  blitz_dyn_overlay_command_start(): number;
   blitz_dyn_version(): number;
   blitz_dyn_rect_ptr(): number;
   blitz_dyn_rect_count(): number;
@@ -386,6 +387,7 @@ async function boot() {
   }
   const format = navigator.gpu.getPreferredCanvasFormat();
   const depthFormat: GPUTextureFormat = "depth32float";
+  const msaaSampleCount = 4;
   context.configure({
     device,
     format,
@@ -451,6 +453,40 @@ async function boot() {
   const shader = device.createShaderModule({
     label: "Blitz Shape Shader",
     code: shaderSource,
+  });
+  const pathCompositeShader = device.createShaderModule({
+    label: "Blitz Path Composite Shader",
+    code: `
+struct VertexOut {
+  @builtin(position) position: vec4f,
+  @location(0) uv: vec2f,
+};
+
+@vertex
+fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
+  var positions = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f(3.0, -1.0),
+    vec2f(-1.0, 3.0),
+  );
+  let position = positions[vertex_index];
+  var out: VertexOut;
+  out.position = vec4f(position, 0.0, 1.0);
+  out.uv = position * vec2f(0.5, -0.5) + vec2f(0.5);
+  return out;
+}
+
+@group(0) @binding(0)
+var path_texture: texture_2d<f32>;
+
+@group(0) @binding(1)
+var path_sampler: sampler;
+
+@fragment
+fn fragment_main(in: VertexOut) -> @location(0) vec4f {
+  return textureSample(path_texture, path_sampler, in.uv);
+}
+`,
   });
   const backgroundShader = device.createShaderModule({
     label: "Blitz Background Shader",
@@ -586,6 +622,35 @@ async function boot() {
       depthCompare: "greater-equal",
     },
   });
+  const shapeMsaaDepthPipeline = device.createRenderPipeline({
+    label: "Blitz Shape MSAA Depth Pipeline",
+    layout: pipelineLayout,
+    vertex: {
+      module: shader,
+      entryPoint: "shape_vertex_main",
+    },
+    fragment: {
+      module: shader,
+      entryPoint: "shape_fragment_main",
+      targets: [
+        {
+          format,
+          writeMask: 0,
+        },
+      ],
+    },
+    primitive: {
+      topology: "triangle-list",
+    },
+    depthStencil: {
+      format: depthFormat,
+      depthWriteEnabled: true,
+      depthCompare: "greater-equal",
+    },
+    multisample: {
+      count: msaaSampleCount,
+    },
+  });
   const pathPipeline = device.createRenderPipeline({
     label: "Blitz Path Pipeline",
     layout: pipelineLayout,
@@ -624,6 +689,59 @@ async function boot() {
       format: depthFormat,
       depthWriteEnabled: true,
       depthCompare: "greater",
+    },
+    multisample: {
+      count: msaaSampleCount,
+    },
+  });
+  const pathCompositeBindGroupLayout = device.createBindGroupLayout({
+    label: "Blitz Path Composite Bind Group Layout",
+    entries: [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: "float" },
+      },
+      {
+        binding: 1,
+        visibility: GPUShaderStage.FRAGMENT,
+        sampler: { type: "filtering" },
+      },
+    ],
+  });
+  const pathCompositePipeline = device.createRenderPipeline({
+    label: "Blitz Path Composite Pipeline",
+    layout: device.createPipelineLayout({
+      label: "Blitz Path Composite Pipeline Layout",
+      bindGroupLayouts: [pathCompositeBindGroupLayout],
+    }),
+    vertex: {
+      module: pathCompositeShader,
+      entryPoint: "vertex_main",
+    },
+    fragment: {
+      module: pathCompositeShader,
+      entryPoint: "fragment_main",
+      targets: [
+        {
+          format,
+          blend: {
+            color: {
+              srcFactor: "src-alpha",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+            alpha: {
+              srcFactor: "one",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+          },
+        },
+      ],
+    },
+    primitive: {
+      topology: "triangle-list",
     },
   });
   const cullShader = device.createShaderModule({
@@ -667,6 +785,11 @@ async function boot() {
         binding: 6,
         visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "storage" },
+      },
+      {
+        binding: 7,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" },
       },
     ],
   });
@@ -792,6 +915,7 @@ async function boot() {
         { binding: 4, resource: { buffer: ovalStorageBuffer } },
         { binding: 5, resource: { buffer: visibleCommandStorageBuffer } },
         { binding: 6, resource: { buffer: drawArgsBuffer } },
+        { binding: 7, resource: { buffer: textStorageBuffer } },
       ],
     });
     staticRenderBindGroup = device.createBindGroup({
@@ -912,6 +1036,7 @@ async function boot() {
   let currentDraftSegmentCount = 0;
   let lastUploadedDynVersion = -1;
   let currentDynCommandCount = 0;
+  let currentDynOverlayCommandStart = 0;
   let lastZoomPercent = -1;
   const drawArgsReset = new Uint32Array([6, 0, 0, 0]);
   let statsVisible = false;
@@ -988,6 +1113,18 @@ async function boot() {
   };
   let depthTexture: GPUTexture | null = null;
   let depthView: GPUTextureView | null = null;
+  let pathMsaaTexture: GPUTexture | null = null;
+  let pathMsaaView: GPUTextureView | null = null;
+  let pathResolveTexture: GPUTexture | null = null;
+  let pathResolveView: GPUTextureView | null = null;
+  let pathMsaaDepthTexture: GPUTexture | null = null;
+  let pathMsaaDepthView: GPUTextureView | null = null;
+  let pathCompositeBindGroup!: GPUBindGroup;
+  const pathCompositeSampler = device.createSampler({
+    label: "Blitz Path Composite Sampler",
+    magFilter: "linear",
+    minFilter: "linear",
+  });
   const resize = () => {
     const dpr = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.floor(ui.canvas.clientWidth * dpr));
@@ -1001,6 +1138,9 @@ async function boot() {
       ui.canvas.height = height;
       wasm.blitz_resize(width, height);
       depthTexture?.destroy();
+      pathMsaaTexture?.destroy();
+      pathResolveTexture?.destroy();
+      pathMsaaDepthTexture?.destroy();
       depthTexture = device.createTexture({
         label: "Blitz Depth Texture",
         size: [width, height],
@@ -1008,6 +1148,37 @@ async function boot() {
         usage: GPUTextureUsage.RENDER_ATTACHMENT,
       });
       depthView = depthTexture.createView();
+      pathMsaaTexture = device.createTexture({
+        label: "Blitz Path MSAA Color Texture",
+        size: [width, height],
+        format,
+        sampleCount: msaaSampleCount,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      pathMsaaView = pathMsaaTexture.createView();
+      pathResolveTexture = device.createTexture({
+        label: "Blitz Path Resolve Texture",
+        size: [width, height],
+        format,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      });
+      pathResolveView = pathResolveTexture.createView();
+      pathMsaaDepthTexture = device.createTexture({
+        label: "Blitz Path MSAA Depth Texture",
+        size: [width, height],
+        format: depthFormat,
+        sampleCount: msaaSampleCount,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      pathMsaaDepthView = pathMsaaDepthTexture.createView();
+      pathCompositeBindGroup = device.createBindGroup({
+        label: "Blitz Path Composite Bind Group",
+        layout: pathCompositeBindGroupLayout,
+        entries: [
+          { binding: 0, resource: pathResolveView },
+          { binding: 1, resource: pathCompositeSampler },
+        ],
+      });
     }
   };
   const colorHex = (red: number, green: number, blue: number) =>
@@ -2845,11 +3016,13 @@ async function boot() {
     const dynVersion = wasm.blitz_dyn_version();
     if (dynVersion !== lastUploadedDynVersion) {
       const dynCommandCount = wasm.blitz_dyn_command_count();
+      const dynOverlayCommandStart = wasm.blitz_dyn_overlay_command_start();
       const dynRectPtr = wasm.blitz_dyn_rect_ptr();
       const dynRectCount = wasm.blitz_dyn_rect_count();
       const textDrawPtr = wasm.blitz_text_draw_ptr();
       const textDrawCount = wasm.blitz_text_draw_count();
       currentDynCommandCount = dynCommandCount;
+      currentDynOverlayCommandStart = dynOverlayCommandStart;
       const eDynCommand = ensureStorage(dynCommandStorageBuffer, dynCommandCapacity, dynCommandCount, maxDynCommands, shapeCommandStride, storageDstUsage, "Blitz Dynamic Command Storage");
       dynCommandStorageBuffer = eDynCommand.buffer;
       dynCommandCapacity = eDynCommand.capacity;
@@ -2960,11 +3133,12 @@ async function boot() {
       cullPass.dispatchWorkgroups(Math.ceil(currentShapeCommandCount / 64));
       cullPass.end();
     }
+    const frameView = context.getCurrentTexture().createView();
     const pass = encoder.beginRenderPass({
       label: "Blitz Render Pass",
       colorAttachments: [
         {
-          view: context.getCurrentTexture().createView(),
+          view: frameView,
           clearValue: { r: 0, g: 0, b: 0, a: 1 },
           loadOp: "clear",
           storeOp: "store",
@@ -2985,12 +3159,48 @@ async function boot() {
       pass.setBindGroup(0, staticRenderBindGroup);
       pass.drawIndirect(drawArgsBuffer, 0);
     }
-    if (pathDrawList.length > 0) {
+    if (currentDynOverlayCommandStart > 0) {
+      pass.setPipeline(shapePipeline);
+      pass.setBindGroup(0, dynamicRenderBindGroup);
+      pass.draw(6, currentDynOverlayCommandStart);
+    }
+    pass.end();
+
+    const drawPaths = pathDrawList.length > 0 || currentDraftSegmentCount > 0;
+    if (drawPaths) {
+      const pathPass = encoder.beginRenderPass({
+        label: "Blitz Path MSAA Pass",
+        colorAttachments: [
+          {
+            view: pathMsaaView!,
+            resolveTarget: pathResolveView!,
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: "clear",
+            storeOp: "discard",
+          },
+        ],
+        depthStencilAttachment: {
+          view: pathMsaaDepthView!,
+          depthClearValue: 0.0,
+          depthLoadOp: "clear",
+          depthStoreOp: "discard",
+        },
+      });
+      if (currentShapeCommandCount > 0) {
+        pathPass.setPipeline(shapeMsaaDepthPipeline);
+        pathPass.setBindGroup(0, staticRenderBindGroup);
+        pathPass.drawIndirect(drawArgsBuffer, 0);
+      }
+      if (currentDynOverlayCommandStart > 0) {
+        pathPass.setPipeline(shapeMsaaDepthPipeline);
+        pathPass.setBindGroup(0, dynamicRenderBindGroup);
+        pathPass.draw(6, currentDynOverlayCommandStart);
+      }
       // Per-stroke viewport cull + LOD: skip off-screen/sub-pixel strokes, draw a
       // coarse tier for small ones, and one instanced capsule draw per visible
       // stroke (firstInstance = the chosen tier's segment offset).
-      pass.setPipeline(pathPipeline);
-      pass.setBindGroup(0, staticRenderBindGroup);
+      pathPass.setPipeline(pathPipeline);
+      pathPass.setBindGroup(0, staticRenderBindGroup);
       const scale = uniforms[4];
       const halfW = (uniforms[0] * 0.5) / scale;
       const halfH = (uniforms[1] * 0.5) / scale;
@@ -2998,7 +3208,7 @@ async function boot() {
       const viewMaxX = uniforms[2] + halfW;
       const viewMinY = uniforms[3] - halfH;
       const viewMaxY = uniforms[3] + halfH;
-      const LOD_COARSE_BELOW_PX = 64;
+      const LOD_COARSE_BELOW_PX = 24;
       for (let p = 0; p < pathDrawList.length; p += 1) {
         const d = pathDrawList[p];
         let offset = d.fullOffset;
@@ -3022,21 +3232,56 @@ async function boot() {
             count = d.coarseCount;
           }
         }
-        pass.draw(6, count, 0, offset);
+        pathPass.draw(6, count, 0, offset);
+      }
+      if (currentDraftSegmentCount > 0) {
+        // The in-progress pen stroke: always full detail, drawn on top.
+        pathPass.setPipeline(pathPipeline);
+        pathPass.setBindGroup(0, draftRenderBindGroup);
+        pathPass.draw(6, currentDraftSegmentCount, 0, 0);
+      }
+      pathPass.end();
+
+      const compositePass = encoder.beginRenderPass({
+        label: "Blitz Path Composite Pass",
+        colorAttachments: [
+          {
+            view: frameView,
+            loadOp: "load",
+            storeOp: "store",
+          },
+        ],
+      });
+      compositePass.setPipeline(pathCompositePipeline);
+      compositePass.setBindGroup(0, pathCompositeBindGroup);
+      compositePass.draw(3);
+      compositePass.end();
+    }
+
+    const overlayPass = encoder.beginRenderPass({
+      label: "Blitz Overlay Pass",
+      colorAttachments: [
+        {
+          view: frameView,
+          loadOp: "load",
+          storeOp: "store",
+        },
+      ],
+      depthStencilAttachment: {
+        view: depthView!,
+        depthLoadOp: "load",
+        depthStoreOp: "store",
+      },
+    });
+    if (currentDynCommandCount > 0) {
+      const overlayCount = currentDynCommandCount - currentDynOverlayCommandStart;
+      overlayPass.setPipeline(shapePipeline);
+      overlayPass.setBindGroup(0, dynamicRenderBindGroup);
+      if (overlayCount > 0) {
+        overlayPass.draw(6, overlayCount, 0, currentDynOverlayCommandStart);
       }
     }
-    if (currentDraftSegmentCount > 0) {
-      // The in-progress pen stroke: always full detail, drawn on top.
-      pass.setPipeline(pathPipeline);
-      pass.setBindGroup(0, draftRenderBindGroup);
-      pass.draw(6, currentDraftSegmentCount, 0, 0);
-    }
-    if (currentDynCommandCount > 0) {
-      pass.setPipeline(shapePipeline);
-      pass.setBindGroup(0, dynamicRenderBindGroup);
-      pass.draw(6, currentDynCommandCount);
-    }
-    pass.end();
+    overlayPass.end();
     // When stats are open, copy the post-cull instance count out for readback.
     const sampleVisible =
       statsVisible && !readbackPending && currentShapeCommandCount > 0;

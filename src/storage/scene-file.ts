@@ -46,6 +46,7 @@ type SceneFileElements = {
 
 type SceneFileOptions = {
   historyStateId(): number;
+  onBeforeLoad?(): void;
   onLoaded(): void;
   onError(message: string): void;
 };
@@ -262,7 +263,9 @@ export function setupSceneFileStorage(
       throw new Error(`Permission to open ${handle.name} was not granted.`);
     }
     const file = await handle.getFile();
-    deserializeScene(wasm, new Uint8Array(await file.arrayBuffer()));
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    options.onBeforeLoad?.();
+    deserializeScene(wasm, bytes);
     currentHandle = handle;
     options.onLoaded();
     markClean();
@@ -358,7 +361,9 @@ export function setupSceneFileStorage(
       if (!file) {
         return;
       }
-      deserializeScene(wasm, new Uint8Array(await file.arrayBuffer()));
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      options.onBeforeLoad?.();
+      deserializeScene(wasm, bytes);
       currentHandle = undefined;
       options.onLoaded();
       markClean();
@@ -370,7 +375,9 @@ export function setupSceneFileStorage(
       return;
     }
     void run(async () => {
-      deserializeScene(wasm, new Uint8Array(await file.arrayBuffer()));
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      options.onBeforeLoad?.();
+      deserializeScene(wasm, bytes);
       currentHandle = undefined;
       options.onLoaded();
       markClean();

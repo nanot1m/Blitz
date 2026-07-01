@@ -1066,7 +1066,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       if (remaining <= 0) break;
       if (task.uploadedBytes >= task.byteLength) continue;
       const rawBytes = Math.min(remaining, task.byteLength - task.uploadedBytes);
-      const uploadBytes = rawBytes & ~3;
+      const uploadBytes = rawBytes - (rawBytes % 4);
       if (uploadBytes <= 0) break;
       const byteOffset = task.uploadedBytes;
       if (task.view === "u32") {
@@ -1111,9 +1111,11 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     2 * 4 * Uint32Array.BYTES_PER_ELEMENT;
   let lastUploadedShapeCommandVersion = -1;
   let currentShapeCommandCount = 0;
-  // Limit static scene uploads so opening very large files does not enqueue
-  // hundreds of MB of GPU writes in one frame.
+  // File opens can deserialize hundreds of MB of static draw data at once, so
+  // those uploads are chunked. Direct editing uses one-frame uploads to avoid
+  // showing stale scene buffers during resize, rotate, and drag commits.
   const staticUploadBudgetBytes = 12 * 1024 * 1024;
+  const staticUploadImmediateBudgetBytes = Number.MAX_SAFE_INTEGER;
   // Per-stroke world AABB + LOD tier segment ranges, rebuilt on upload. The draw
   // loop viewport-culls these and draws one tier per visible stroke.
   type PathDrawCull = {
@@ -1155,9 +1157,14 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     pathDrawCount: number;
     pathSegmentCount: number;
     pathSegmentCapacity: number;
+    chunked: boolean;
     tasks: StaticUploadTask[];
   };
   let staticUploadState: StaticUploadState | null = null;
+  let chunkNextStaticUpload = false;
+  const requestChunkedStaticUpload = () => {
+    chunkNextStaticUpload = true;
+  };
   const destroyStaticUploadState = (state: StaticUploadState) => {
     state.shapeCommandBuffer.destroy();
     state.visibleCommandBuffer.destroy();
@@ -1172,8 +1179,6 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
   let lastUploadedDynVersion = -1;
   let currentDynCommandCount = 0;
   let currentDynOverlayCommandStart = 0;
-  let heldDragOffsetX = 0;
-  let heldDragOffsetY = 0;
   let lastZoomPercent = -1;
   const drawArgsReset = new Uint32Array([6, 0, 0, 0]);
   let statsVisible = false;
@@ -3343,6 +3348,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     },
     {
       historyStateId: sceneHistory.stateId,
+      onBeforeLoad: requestChunkedStaticUpload,
       onLoaded() {
         sceneHistory.reset();
         stopDragging();
@@ -3659,6 +3665,8 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       shapeCommandVersion !== lastUploadedShapeCommandVersion &&
       staticUploadState?.version !== shapeCommandVersion
     ) {
+      const chunkedUpload = chunkNextStaticUpload || staticUploadState?.chunked === true;
+      chunkNextStaticUpload = false;
       if (staticUploadState) {
         destroyStaticUploadState(staticUploadState);
         staticUploadState = null;
@@ -3732,11 +3740,17 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
         pathDrawCount,
         pathSegmentCount,
         pathSegmentCapacity: pendingPathSegment.capacity,
+        chunked: chunkedUpload,
         tasks,
       };
     }
     if (staticUploadState) {
-      const complete = uploadStaticChunk(staticUploadState, staticUploadBudgetBytes);
+      const complete = uploadStaticChunk(
+        staticUploadState,
+        staticUploadState.chunked
+          ? staticUploadBudgetBytes
+          : staticUploadImmediateBudgetBytes,
+      );
       if (complete) {
         const uploadableSegments = Math.min(
           staticUploadState.pathSegmentCount,
@@ -3802,8 +3816,6 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
         pathSegmentCapacity = staticUploadState.pathSegmentCapacity;
         currentShapeCommandCount = staticUploadState.shapeCommandCount;
         lastUploadedShapeCommandVersion = staticUploadState.version;
-        heldDragOffsetX = 0;
-        heldDragOffsetY = 0;
         bindGroupsDirty = true;
         staticUploadState = null;
       }
@@ -3899,31 +3911,20 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       uniformPtr,
       wasm.blitz_uniform_f32_count(),
     );
-    const renderUniforms = new Float32Array(uniforms);
-    if (Math.abs(uniforms[16]) > 0.001 || Math.abs(uniforms[17]) > 0.001) {
-      heldDragOffsetX = uniforms[16];
-      heldDragOffsetY = uniforms[17];
-    } else if (staticUploadState && (Math.abs(heldDragOffsetX) > 0.001 || Math.abs(heldDragOffsetY) > 0.001)) {
-      renderUniforms[16] = heldDragOffsetX;
-      renderUniforms[17] = heldDragOffsetY;
-    } else if (!staticUploadState) {
-      heldDragOffsetX = 0;
-      heldDragOffsetY = 0;
-    }
-    renderUniforms.set(backgroundColors[backgroundTheme], 8);
-    renderUniforms[18] = gridVisible ? 1 : 0;
-    device.queue.writeBuffer(uniformBuffer, 0, renderUniforms);
+    uniforms.set(backgroundColors[backgroundTheme], 8);
+    uniforms[18] = gridVisible ? 1 : 0;
+    device.queue.writeBuffer(uniformBuffer, 0, uniforms);
     remoteCursors.render({
-      viewportWidth: renderUniforms[0],
-      viewportHeight: renderUniforms[1],
-      cameraX: renderUniforms[2],
-      cameraY: renderUniforms[3],
-      zoom: renderUniforms[4] || 1,
+      viewportWidth: uniforms[0],
+      viewportHeight: uniforms[1],
+      cameraX: uniforms[2],
+      cameraY: uniforms[3],
+      zoom: uniforms[4] || 1,
       canvas: ui.canvas,
     });
-    positionEmptyState(renderUniforms[0], renderUniforms[1], renderUniforms[2], renderUniforms[3], renderUniforms[4]);
+    positionEmptyState(uniforms[0], uniforms[1], uniforms[2], uniforms[3], uniforms[4]);
     positionTextEditor();
-    const zoomPercent = Math.round(renderUniforms[4] * 100);
+    const zoomPercent = Math.round(uniforms[4] * 100);
     if (zoomPercent !== lastZoomPercent) {
       lastZoomPercent = zoomPercent;
       ui.zoomIndicator.textContent = `${zoomPercent}%`;

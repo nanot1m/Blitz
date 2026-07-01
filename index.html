@@ -8,6 +8,48 @@
     />
     <link rel="preload" href="/OpenSans-Regular.ttf" as="font" type="font/ttf" crossorigin />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script>
+      try {
+        document.documentElement.dataset.backgroundTheme =
+          localStorage.getItem("blitz:background-theme") === "dark"
+            ? "dark"
+            : "paper";
+      } catch {
+        document.documentElement.dataset.backgroundTheme = "paper";
+      }
+    </script>
+    <style>
+      html {
+        background: #f6f2e8;
+      }
+
+      html[data-background-theme="dark"] {
+        background: #0f1318;
+      }
+
+      body {
+        background: #f6f2e8;
+        opacity: 0;
+        animation: blitz-page-fade-in 180ms ease-out 40ms forwards;
+      }
+
+      html[data-background-theme="dark"] body {
+        background: #0f1318;
+      }
+
+      @keyframes blitz-page-fade-in {
+        to {
+          opacity: 1;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        body {
+          opacity: 1;
+          animation: none;
+        }
+      }
+    </style>
     <title>Blitz</title>
   </head>
   <body>

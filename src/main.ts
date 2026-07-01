@@ -1078,6 +1078,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
   };
   let backgroundTheme = readBackgroundTheme();
   const syncBackgroundThemeUi = () => {
+    document.documentElement.dataset.backgroundTheme = backgroundTheme;
     document.body.dataset.backgroundTheme = backgroundTheme;
     ui.toggleBackgroundThemeButton.setAttribute(
       "aria-pressed",

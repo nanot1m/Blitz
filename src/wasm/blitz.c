@@ -1052,6 +1052,7 @@ static void normalize_draw_order_hierarchy(void);
 static void request_draw_order_normalize(void);
 static void mark_static_dynamic_dirty(void);
 static void flush_draw_order_normalize(void);
+static u32 drag_hover_targets_new_container(void);
 static int point_in_rect(float world_x, float world_y, u32 entity);
 static int point_in_triangle(float world_x, float world_y, u32 entity);
 static int point_in_oval(float world_x, float world_y, u32 entity);
@@ -4749,7 +4750,7 @@ static void extract_dynamic(void) {
   dyn_overlay_command_start = dyn_command_count;
 
   u32 overlay_order = world.draw_order_count;
-  if (drag_active && drag_hover_container != BLITZ_INVALID_INDEX) {
+  if (drag_active && drag_hover_targets_new_container()) {
     push_container_hover_draw(drag_hover_container, overlay_order);
   }
   overlay_order += 1u;

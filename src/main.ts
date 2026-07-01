@@ -3699,7 +3699,10 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     if (bindGroupsDirty) {
       rebuildBindGroups();
     }
-    drawArgsReset[1] = currentShapeCommandCount;
+    // The cull shader compacts visible static commands with atomicAdd, so the
+    // indirect instance count must start at zero. Initializing it with the full
+    // command count would draw stale commands left in the visible buffer.
+    drawArgsReset[1] = 0;
     device.queue.writeBuffer(drawArgsBuffer, 0, drawArgsReset);
     const encoder = device.createCommandEncoder({
       label: "Blitz Render Encoder",

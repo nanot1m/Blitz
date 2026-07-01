@@ -1015,6 +1015,58 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       grew: true,
     };
   };
+  const pushStaticUploadTask = (
+    tasks: StaticUploadTask[],
+    buffer: GPUBuffer,
+    ptr: number,
+    count: number,
+    stride: number,
+    view: StaticUploadTask["view"],
+  ) => {
+    if (count <= 0) return;
+    tasks.push({
+      buffer,
+      ptr,
+      byteLength: count * stride,
+      uploadedBytes: 0,
+      view,
+    });
+  };
+  const uploadStaticChunk = (state: StaticUploadState, budgetBytes: number) => {
+    let remaining = budgetBytes;
+    for (const task of state.tasks) {
+      if (remaining <= 0) break;
+      if (task.uploadedBytes >= task.byteLength) continue;
+      const rawBytes = Math.min(remaining, task.byteLength - task.uploadedBytes);
+      const uploadBytes = rawBytes & ~3;
+      if (uploadBytes <= 0) break;
+      const byteOffset = task.uploadedBytes;
+      if (task.view === "u32") {
+        device.queue.writeBuffer(
+          task.buffer,
+          byteOffset,
+          new Uint32Array(
+            wasm.memory.buffer,
+            task.ptr + byteOffset,
+            uploadBytes / Uint32Array.BYTES_PER_ELEMENT,
+          ),
+        );
+      } else {
+        device.queue.writeBuffer(
+          task.buffer,
+          byteOffset,
+          new Float32Array(
+            wasm.memory.buffer,
+            task.ptr + byteOffset,
+            uploadBytes / Float32Array.BYTES_PER_ELEMENT,
+          ),
+        );
+      }
+      task.uploadedBytes += uploadBytes;
+      remaining -= uploadBytes;
+    }
+    return state.tasks.every((task) => task.uploadedBytes >= task.byteLength);
+  };
   // Sum of the currently-allocated GPU buffer sizes, for the stats panel
   // (excludes the resize-dependent depth texture, reported separately).
   const gpuBufferBytes = () =>
@@ -1031,6 +1083,9 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     2 * 4 * Uint32Array.BYTES_PER_ELEMENT;
   let lastUploadedShapeCommandVersion = -1;
   let currentShapeCommandCount = 0;
+  // Limit static scene uploads so opening very large files does not enqueue
+  // hundreds of MB of GPU writes in one frame.
+  const staticUploadBudgetBytes = 12 * 1024 * 1024;
   // Per-stroke world AABB + LOD tier segment ranges, rebuilt on upload. The draw
   // loop viewport-culls these and draws one tier per visible stroke.
   type PathDrawCull = {
@@ -1045,6 +1100,23 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     coarseCount: number;
   };
   let pathDrawList: PathDrawCull[] = [];
+  type StaticUploadTask = {
+    buffer: GPUBuffer;
+    ptr: number;
+    byteLength: number;
+    uploadedBytes: number;
+    view: "u32" | "f32";
+  };
+  type StaticUploadState = {
+    version: number;
+    shapeCommandCount: number;
+    pathDrawPtr: number;
+    pathDrawCount: number;
+    pathSegmentCount: number;
+    pathSegmentCapacity: number;
+    tasks: StaticUploadTask[];
+  };
+  let staticUploadState: StaticUploadState | null = null;
   let lastUploadedDraftVersion = -1;
   let currentDraftSegmentCount = 0;
   let lastUploadedDynVersion = -1;
@@ -3458,7 +3530,10 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     let bindGroupsDirty = false;
     const shapeCommandPtr = wasm.blitz_shape_command_ptr();
     const shapeCommandVersion = wasm.blitz_shape_command_version();
-    if (shapeCommandVersion !== lastUploadedShapeCommandVersion) {
+    if (
+      shapeCommandVersion !== lastUploadedShapeCommandVersion &&
+      staticUploadState?.version !== shapeCommandVersion
+    ) {
       const shapeCommandCount = wasm.blitz_shape_command_count();
       const rectDrawPtr = wasm.blitz_rect_draw_ptr();
       const rectDrawCount = wasm.blitz_rect_draw_count();
@@ -3470,7 +3545,9 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       const pathDrawCount = wasm.blitz_path_draw_count();
       const pathSegmentPtr = wasm.blitz_path_segment_ptr();
       const pathSegmentCount = wasm.blitz_path_segment_count();
-      currentShapeCommandCount = shapeCommandCount;
+      currentShapeCommandCount = 0;
+      visibleGeometryShapeCount = 0;
+      pathDrawList = [];
       const eShape = ensureStorage(shapeCommandStorageBuffer, shapeCommandCapacity, shapeCommandCount, maxShapes, shapeCommandStride, storageDstUsage, "Blitz Shape Command Storage");
       shapeCommandStorageBuffer = eShape.buffer;
       shapeCommandCapacity = eShape.capacity;
@@ -3499,113 +3576,95 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       pathSegmentStorageBuffer = ePathSegment.buffer;
       pathSegmentCapacity = ePathSegment.capacity;
       bindGroupsDirty ||= ePathSegment.grew;
-      if (shapeCommandCount > 0) {
-        device.queue.writeBuffer(
-          shapeCommandStorageBuffer,
-          0,
-          new Uint32Array(
-            wasm.memory.buffer,
-            shapeCommandPtr,
-            shapeCommandCount * shapeCommandU32Count,
-          ),
-        );
-      }
-      if (rectDrawCount > 0) {
-        device.queue.writeBuffer(
-          rectStorageBuffer,
-          0,
-          new Float32Array(
-            wasm.memory.buffer,
-            rectDrawPtr,
-            rectDrawCount * rectDrawF32Count,
-          ),
-        );
-      }
-      if (triangleDrawCount > 0) {
-        device.queue.writeBuffer(
-          triangleStorageBuffer,
-          0,
-          new Float32Array(
-            wasm.memory.buffer,
-            triangleDrawPtr,
-            triangleDrawCount * triangleDrawF32Count,
-          ),
-        );
-      }
-      if (ovalDrawCount > 0) {
-        device.queue.writeBuffer(
-          ovalStorageBuffer,
-          0,
-          new Float32Array(
-            wasm.memory.buffer,
-            ovalDrawPtr,
-            ovalDrawCount * ovalDrawF32Count,
-          ),
-        );
-      }
-      if (pathDrawCount > 0) {
-        device.queue.writeBuffer(
-          pathStorageBuffer,
-          0,
-          new Float32Array(
-            wasm.memory.buffer,
-            pathDrawPtr,
-            pathDrawCount * pathDrawF32Count,
-          ),
-        );
-      }
       // Clamp to what the (limit-capped) buffer can hold; excess strokes are
       // dropped rather than crashing on an over-limit write.
       const uploadableSegments = Math.min(pathSegmentCount, pathSegmentCapacity);
-      if (uploadableSegments > 0) {
-        device.queue.writeBuffer(
-          pathSegmentStorageBuffer,
-          0,
-          new Float32Array(
+      const tasks: StaticUploadTask[] = [];
+      pushStaticUploadTask(
+        tasks,
+        shapeCommandStorageBuffer,
+        shapeCommandPtr,
+        shapeCommandCount,
+        shapeCommandStride,
+        "u32",
+      );
+      pushStaticUploadTask(tasks, rectStorageBuffer, rectDrawPtr, rectDrawCount, rectDrawStride, "f32");
+      pushStaticUploadTask(
+        tasks,
+        triangleStorageBuffer,
+        triangleDrawPtr,
+        triangleDrawCount,
+        triangleDrawStride,
+        "f32",
+      );
+      pushStaticUploadTask(tasks, ovalStorageBuffer, ovalDrawPtr, ovalDrawCount, ovalDrawStride, "f32");
+      pushStaticUploadTask(tasks, pathStorageBuffer, pathDrawPtr, pathDrawCount, pathDrawStride, "f32");
+      pushStaticUploadTask(
+        tasks,
+        pathSegmentStorageBuffer,
+        pathSegmentPtr,
+        uploadableSegments,
+        pathSegmentStride,
+        "f32",
+      );
+      staticUploadState = {
+        version: shapeCommandVersion,
+        shapeCommandCount,
+        pathDrawPtr,
+        pathDrawCount,
+        pathSegmentCount,
+        pathSegmentCapacity,
+        tasks,
+      };
+    }
+    if (staticUploadState) {
+      const complete = uploadStaticChunk(staticUploadState, staticUploadBudgetBytes);
+      if (complete) {
+        const uploadableSegments = Math.min(
+          staticUploadState.pathSegmentCount,
+          staticUploadState.pathSegmentCapacity,
+        );
+        pathDrawList = [];
+        if (staticUploadState.pathDrawCount > 0) {
+          const records = new Float32Array(
             wasm.memory.buffer,
-            pathSegmentPtr,
-            uploadableSegments * pathSegmentF32Count,
-          ),
-        );
-      }
-      pathDrawList = [];
-      if (pathDrawCount > 0) {
-        const records = new Float32Array(
-          wasm.memory.buffer,
-          pathDrawPtr,
-          pathDrawCount * pathDrawF32Count,
-        );
-        const clampTier = (offset: number, count: number) => {
-          if (count <= 0 || offset >= uploadableSegments) return [0, 0];
-          return [offset, Math.min(count, uploadableSegments - offset)];
-        };
-        for (let p = 0; p < pathDrawCount; p += 1) {
-          const o = p * pathDrawF32Count;
-          const [fullOffset, fullCount] = clampTier(records[o + 12], records[o + 13]);
-          if (fullCount <= 0) continue;
-          const [coarseOffset, coarseCount] = clampTier(records[o + 14], records[o + 15]);
-          const rotation = records[o + 11];
-          const minX = records[o];
-          const minY = records[o + 1];
-          const maxX = records[o] + records[o + 2];
-          const maxY = records[o + 1] + records[o + 3];
-          const centerX = (minX + maxX) * 0.5;
-          const centerY = (minY + maxY) * 0.5;
-          const radius = Math.hypot(maxX - minX, maxY - minY) * 0.5;
-          pathDrawList.push({
-            minX: rotation === 0 ? minX : centerX - radius,
-            minY: rotation === 0 ? minY : centerY - radius,
-            maxX: rotation === 0 ? maxX : centerX + radius,
-            maxY: rotation === 0 ? maxY : centerY + radius,
-            dragged: records[o + 9] > 0.5,
-            fullOffset,
-            fullCount,
-            coarseOffset: coarseCount > 0 ? coarseOffset : fullOffset,
-            coarseCount: coarseCount > 0 ? coarseCount : fullCount,
-          });
+            staticUploadState.pathDrawPtr,
+            staticUploadState.pathDrawCount * pathDrawF32Count,
+          );
+          const clampTier = (offset: number, count: number) => {
+            if (count <= 0 || offset >= uploadableSegments) return [0, 0];
+            return [offset, Math.min(count, uploadableSegments - offset)];
+          };
+          for (let p = 0; p < staticUploadState.pathDrawCount; p += 1) {
+            const o = p * pathDrawF32Count;
+            const [fullOffset, fullCount] = clampTier(records[o + 12], records[o + 13]);
+            if (fullCount <= 0) continue;
+            const [coarseOffset, coarseCount] = clampTier(records[o + 14], records[o + 15]);
+            const rotation = records[o + 11];
+            const minX = records[o];
+            const minY = records[o + 1];
+            const maxX = records[o] + records[o + 2];
+            const maxY = records[o + 1] + records[o + 3];
+            const centerX = (minX + maxX) * 0.5;
+            const centerY = (minY + maxY) * 0.5;
+            const radius = Math.hypot(maxX - minX, maxY - minY) * 0.5;
+            pathDrawList.push({
+              minX: rotation === 0 ? minX : centerX - radius,
+              minY: rotation === 0 ? minY : centerY - radius,
+              maxX: rotation === 0 ? maxX : centerX + radius,
+              maxY: rotation === 0 ? maxY : centerY + radius,
+              dragged: records[o + 9] > 0.5,
+              fullOffset,
+              fullCount,
+              coarseOffset: coarseCount > 0 ? coarseOffset : fullOffset,
+              coarseCount: coarseCount > 0 ? coarseCount : fullCount,
+            });
+          }
         }
+        currentShapeCommandCount = staticUploadState.shapeCommandCount;
+        lastUploadedShapeCommandVersion = staticUploadState.version;
+        staticUploadState = null;
       }
-      lastUploadedShapeCommandVersion = shapeCommandVersion;
     }
     const dynCommandPtr = wasm.blitz_dyn_command_ptr();
     const dynVersion = wasm.blitz_dyn_version();

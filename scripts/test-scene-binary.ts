@@ -685,7 +685,11 @@ if (updateRectPosition(unifiedDemoCard.objectId, unifiedDemoCard.x + 40, unified
   throw new Error("Failed to move the demo unified card.");
 }
 const movedDemoLine = querySceneItemByObjectId(demoLine.objectId);
-expectNear(movedDemoLine.x, demoLine.x + 40, "Demo line follows connected card x");
+expectNear(
+  movedDemoLine.x + movedDemoLine.width,
+  unifiedDemoCard.x + 40 + unifiedDemoCard.width + 0.75,
+  "Demo line endpoint follows connected card x",
+);
 expectNear(movedDemoLine.y, demoLine.y, "Demo line keeps connected bounds y");
 wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 4);
 const demoSlideId = queriedObjectIdAt(0);

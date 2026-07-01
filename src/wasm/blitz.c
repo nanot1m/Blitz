@@ -63,6 +63,10 @@ usize strlen(const char *text) {
 #define BLITZ_POINTER_MODE_ROTATE 11u
 #define BLITZ_POINTER_MODE_LINE_START 12u
 #define BLITZ_POINTER_MODE_LINE_END 13u
+#define BLITZ_LINE_ANCHOR_TOP 0u
+#define BLITZ_LINE_ANCHOR_RIGHT 1u
+#define BLITZ_LINE_ANCHOR_BOTTOM 2u
+#define BLITZ_LINE_ANCHOR_LEFT 3u
 // High bit of a command's order word: set while the command's entity is being
 // dragged, so the shader translates it by the drag offset instead of rebuilding.
 #define BLITZ_DRAG_FLAG 0x80000000u
@@ -301,6 +305,8 @@ typedef struct World {
   PathView *path_views;
   u32 *line_start_targets;
   u32 *line_end_targets;
+  u32 *line_start_anchors;
+  u32 *line_end_anchors;
   RelativeTransform *relative_transforms;
   u32 *first_child;
   u32 *next_sibling;
@@ -319,6 +325,9 @@ static PathDraw *path_draws;
 static PathSegment *path_segments;
 static ShapeCommand *dyn_commands;
 static RectDraw *dyn_rects;
+static u32 *drag_line_preview_entities;
+static u32 *drag_line_preview_orders;
+static u32 *drag_line_preview_flags;
 // Grown-on-demand capacities for the buffers above.
 static u32 shape_commands_cap;
 static u32 rect_draws_cap;
@@ -329,6 +338,9 @@ static u32 path_draws_cap;
 static u32 path_segments_cap;
 static u32 dyn_commands_cap;
 static u32 dyn_rects_cap;
+static u32 drag_line_preview_cap;
+static u32 drag_line_preview_order_cap;
+static u32 drag_line_preview_flag_cap;
 // Input staging: JS writes text / pen points here before create/update.
 static char text_input[BLITZ_TEXT_INPUT_BYTES];
 static float path_input[BLITZ_PATH_INPUT_POINTS * 2u];
@@ -379,6 +391,7 @@ static u32 container_entity_count;
 static u32 dyn_command_count;
 static u32 dyn_overlay_command_start;
 static u32 dyn_rect_count;
+static u32 drag_line_preview_count;
 // Render-stream versions + dirty flags.
 static u32 shape_command_version;
 static u32 dyn_version;
@@ -395,6 +408,7 @@ static Vec2 drag_last_world;
 static Vec2 drag_offset;
 static u32 drag_active;
 static u32 drag_hover_container;
+static u32 connection_hover_entity;
 static u32 drag_top_level_count;
 static u32 resize_active;
 static u32 resize_entity;
@@ -734,6 +748,8 @@ static const u32 ecs_strides[] = {
     sizeof(PathView),          // path_views
     sizeof(u32),               // line_start_targets
     sizeof(u32),               // line_end_targets
+    sizeof(u32),               // line_start_anchors
+    sizeof(u32),               // line_end_anchors
     sizeof(RelativeTransform), // relative_transforms
     sizeof(u32),               // first_child
     sizeof(u32),               // next_sibling
@@ -783,19 +799,21 @@ static void ecs_bind_pointers(u32 capacity) {
   world.path_views = (PathView *)(ecs_block + ecs_offset(13u, capacity));
   world.line_start_targets = (u32 *)(ecs_block + ecs_offset(14u, capacity));
   world.line_end_targets = (u32 *)(ecs_block + ecs_offset(15u, capacity));
+  world.line_start_anchors = (u32 *)(ecs_block + ecs_offset(16u, capacity));
+  world.line_end_anchors = (u32 *)(ecs_block + ecs_offset(17u, capacity));
   world.relative_transforms =
-      (RelativeTransform *)(ecs_block + ecs_offset(16u, capacity));
-  world.first_child = (u32 *)(ecs_block + ecs_offset(17u, capacity));
-  world.next_sibling = (u32 *)(ecs_block + ecs_offset(18u, capacity));
-  world.prev_sibling = (u32 *)(ecs_block + ecs_offset(19u, capacity));
-  transform_dirty = (u32 *)(ecs_block + ecs_offset(20u, capacity));
-  transform_dirty_entities = (u32 *)(ecs_block + ecs_offset(21u, capacity));
-  draw_order_seen = (u32 *)(ecs_block + ecs_offset(22u, capacity));
-  duplicate_entity_map = (u32 *)(ecs_block + ecs_offset(23u, capacity));
-  internal_clipboard_sources = (u32 *)(ecs_block + ecs_offset(24u, capacity));
-  marquee_base_selected = (u32 *)(ecs_block + ecs_offset(25u, capacity));
-  free_slots = (u32 *)(ecs_block + ecs_offset(26u, capacity));
-  crdt_versions = (CrdtVersion *)(ecs_block + ecs_offset(27u, capacity));
+      (RelativeTransform *)(ecs_block + ecs_offset(18u, capacity));
+  world.first_child = (u32 *)(ecs_block + ecs_offset(19u, capacity));
+  world.next_sibling = (u32 *)(ecs_block + ecs_offset(20u, capacity));
+  world.prev_sibling = (u32 *)(ecs_block + ecs_offset(21u, capacity));
+  transform_dirty = (u32 *)(ecs_block + ecs_offset(22u, capacity));
+  transform_dirty_entities = (u32 *)(ecs_block + ecs_offset(23u, capacity));
+  draw_order_seen = (u32 *)(ecs_block + ecs_offset(24u, capacity));
+  duplicate_entity_map = (u32 *)(ecs_block + ecs_offset(25u, capacity));
+  internal_clipboard_sources = (u32 *)(ecs_block + ecs_offset(26u, capacity));
+  marquee_base_selected = (u32 *)(ecs_block + ecs_offset(27u, capacity));
+  free_slots = (u32 *)(ecs_block + ecs_offset(28u, capacity));
+  crdt_versions = (CrdtVersion *)(ecs_block + ecs_offset(29u, capacity));
 }
 
 // Grow the per-entity block to hold `count` slots. If the block is the last
@@ -937,6 +955,9 @@ static void ecs_storage_init(void) {
   path_draft_segments = 0;
   dyn_commands = 0;
   dyn_rects = 0;
+  drag_line_preview_entities = 0;
+  drag_line_preview_orders = 0;
+  drag_line_preview_flags = 0;
   scene_file_buffer = 0;
   scene_file_capacity = 0u;
   text_pool = 0;
@@ -953,6 +974,9 @@ static void ecs_storage_init(void) {
   path_draft_segments_cap = 0u;
   dyn_commands_cap = 0u;
   dyn_rects_cap = 0u;
+  drag_line_preview_cap = 0u;
+  drag_line_preview_order_cap = 0u;
+  drag_line_preview_flag_cap = 0u;
   ecs_block = 0;
   entity_capacity = 0u;
   world.draw_order = 0;
@@ -971,6 +995,8 @@ static void ecs_storage_init(void) {
   world.path_views = 0;
   world.line_start_targets = 0;
   world.line_end_targets = 0;
+  world.line_start_anchors = 0;
+  world.line_end_anchors = 0;
   world.relative_transforms = 0;
   world.first_child = 0;
   world.next_sibling = 0;
@@ -985,6 +1011,7 @@ static void ecs_storage_init(void) {
   crdt_versions = 0;
   line_connection_count = 0u;
   line_connections_dirty = 0u;
+  drag_line_preview_count = 0u;
   // The heap reset above invalidates the CRDT change queue and tombstone table;
   // drop them and reset the Lamport clock for the fresh scene.
   crdt_clock = 0u;
@@ -1546,10 +1573,13 @@ static float blitz_atan2(float y, float x) {
 static Vec2 entity_center(u32 entity);
 static Vec2 rotate_entity_point(u32 entity, float x, float y);
 static Vec2 inverse_rotate_entity_point(u32 entity, float x, float y);
+static Vec2 entity_connection_anchor(u32 entity, u32 anchor);
+static u32 nearest_entity_connection_anchor(u32 entity, Vec2 point);
 static Vec2 line_endpoint_world(u32 entity, u32 endpoint);
 static u32 line_endpoint_target(u32 entity, u32 endpoint);
 static void line_clear_endpoint_target(u32 entity, u32 endpoint);
 static void line_set_world_endpoints(u32 entity, Vec2 start, Vec2 end);
+static void clear_drag_line_previews(void);
 
 static Vec2 world_delta_to_parent_local(u32 parent, float dx, float dy) {
   float rotation = parent != BLITZ_INVALID_INDEX ? world.rotations[parent] : 0.0f;
@@ -1867,14 +1897,16 @@ static void system_resolve_line_connections(void) {
     u32 end_target = line_endpoint_target(entity, 1u);
     if (start_target != BLITZ_INVALID_INDEX) {
       if (line_target_valid(entity, start_target)) {
-        start = entity_center(start_target);
+        start = entity_connection_anchor(start_target,
+                                         world.line_start_anchors[entity]);
       } else {
         line_clear_endpoint_target(entity, 0u);
       }
     }
     if (end_target != BLITZ_INVALID_INDEX) {
       if (line_target_valid(entity, end_target)) {
-        end = entity_center(end_target);
+        end = entity_connection_anchor(end_target,
+                                       world.line_end_anchors[entity]);
       } else {
         line_clear_endpoint_target(entity, 1u);
       }
@@ -2612,6 +2644,8 @@ static u32 ecs_create_entity(void) {
   world.relative_transforms[entity].rotation = 0.0f;
   world.line_start_targets[entity] = BLITZ_INVALID_INDEX;
   world.line_end_targets[entity] = BLITZ_INVALID_INDEX;
+  world.line_start_anchors[entity] = BLITZ_LINE_ANCHOR_RIGHT;
+  world.line_end_anchors[entity] = BLITZ_LINE_ANCHOR_LEFT;
   world.rotations[entity] = 0.0f;
   transform_dirty[entity] = 0u;
   // Grown ECS slots aren't zeroed, so initialise the version explicitly.
@@ -3674,12 +3708,14 @@ static void line_clear_endpoint_target(u32 entity, u32 endpoint) {
       line_connection_count -= 1u;
     }
     world.line_start_targets[entity] = BLITZ_INVALID_INDEX;
+    world.line_start_anchors[entity] = BLITZ_LINE_ANCHOR_RIGHT;
   } else {
     if (world.line_end_targets[entity] != BLITZ_INVALID_INDEX &&
         line_connection_count > 0u) {
       line_connection_count -= 1u;
     }
     world.line_end_targets[entity] = BLITZ_INVALID_INDEX;
+    world.line_end_anchors[entity] = BLITZ_LINE_ANCHOR_LEFT;
   }
   mark_line_connections_dirty();
 }
@@ -3702,13 +3738,109 @@ static void line_set_endpoint_target(u32 entity, u32 endpoint, u32 target) {
       line_connection_count += 1u;
     }
     world.line_start_targets[entity] = target;
+    world.line_start_anchors[entity] =
+        nearest_entity_connection_anchor(target, line_endpoint_world(entity, endpoint));
   } else {
     if (world.line_end_targets[entity] == BLITZ_INVALID_INDEX) {
       line_connection_count += 1u;
     }
     world.line_end_targets[entity] = target;
+    world.line_end_anchors[entity] =
+        nearest_entity_connection_anchor(target, line_endpoint_world(entity, endpoint));
   }
   mark_line_connections_dirty();
+}
+
+static void line_set_endpoint_target_anchor(u32 entity, u32 endpoint, u32 target,
+                                            u32 anchor) {
+  line_set_endpoint_target(entity, endpoint, target);
+  if (target == BLITZ_INVALID_INDEX || target >= world.entity_count ||
+      world.masks[target] == 0u) {
+    return;
+  }
+  if (anchor > BLITZ_LINE_ANCHOR_LEFT) {
+    anchor = BLITZ_LINE_ANCHOR_TOP;
+  }
+  if (endpoint == 0u) {
+    world.line_start_anchors[entity] = anchor;
+  } else {
+    world.line_end_anchors[entity] = anchor;
+  }
+}
+
+static void clear_drag_line_previews(void) {
+  for (u32 i = 0u; i < drag_line_preview_count; i += 1u) {
+    u32 entity = drag_line_preview_entities[i];
+    if (entity < drag_line_preview_flag_cap) {
+      drag_line_preview_flags[entity] = 0u;
+    }
+  }
+  drag_line_preview_count = 0u;
+}
+
+static u32 reserve_drag_line_preview_storage(u32 entity_count) {
+  if (entity_count == 0u) {
+    return 1u;
+  }
+  u32 last = entity_count - 1u;
+  drag_line_preview_flags =
+      (u32 *)dyn_grow(drag_line_preview_flags, &drag_line_preview_flag_cap,
+                      last, sizeof(u32));
+  drag_line_preview_entities =
+      (u32 *)dyn_grow(drag_line_preview_entities, &drag_line_preview_cap, last,
+                      sizeof(u32));
+  drag_line_preview_orders =
+      (u32 *)dyn_grow(drag_line_preview_orders, &drag_line_preview_order_cap,
+                      last, sizeof(u32));
+  return drag_line_preview_flags && drag_line_preview_entities &&
+         drag_line_preview_orders;
+}
+
+static void collect_drag_line_previews(void) {
+  clear_drag_line_previews();
+  if (line_connection_count == 0u || world.entity_count == 0u ||
+      !reserve_drag_line_preview_storage(world.entity_count)) {
+    return;
+  }
+  for (u32 i = 0u; i < world.entity_count; i += 1u) {
+    drag_line_preview_flags[i] = 0u;
+  }
+  for (u32 order = 0u; order < world.draw_order_count; order += 1u) {
+    u32 entity = world.draw_order[order];
+    if (!(world.masks[entity] & BLITZ_COMPONENT_LINE_VIEW) ||
+        entity_is_dragged(entity)) {
+      continue;
+    }
+    u32 start_target = line_endpoint_target(entity, 0u);
+    u32 end_target = line_endpoint_target(entity, 1u);
+    u32 start_dragged = line_target_valid(entity, start_target) &&
+                        entity_is_dragged(start_target);
+    u32 end_dragged =
+        line_target_valid(entity, end_target) && entity_is_dragged(end_target);
+    if (!start_dragged && !end_dragged) {
+      continue;
+    }
+    drag_line_preview_flags[entity] = 1u;
+    drag_line_preview_entities[drag_line_preview_count] = entity;
+    drag_line_preview_orders[drag_line_preview_count] = order;
+    drag_line_preview_count += 1u;
+  }
+}
+
+static Vec2 drag_line_preview_endpoint(u32 line, u32 endpoint) {
+  u32 target = line_endpoint_target(line, endpoint);
+  if (line_target_valid(line, target)) {
+    Vec2 center = entity_center(target);
+    center = entity_connection_anchor(
+        target, endpoint == 0u ? world.line_start_anchors[line]
+                               : world.line_end_anchors[line]);
+    if (entity_is_dragged(target)) {
+      center.x += drag_offset.x;
+      center.y += drag_offset.y;
+    }
+    return center;
+  }
+  return line_endpoint_world(line, endpoint);
 }
 
 // --- Selection -------------------------------------------------------------
@@ -3946,6 +4078,38 @@ static Vec2 entity_center(u32 entity) {
   return (Vec2){position.x + size.x * 0.5f, position.y + size.y * 0.5f};
 }
 
+static Vec2 entity_connection_anchor(u32 entity, u32 anchor) {
+  Vec2 position = world.positions[entity];
+  Vec2 size = world.sizes[entity];
+  Vec2 point;
+  if (anchor == BLITZ_LINE_ANCHOR_TOP) {
+    point = (Vec2){position.x + size.x * 0.5f, position.y};
+  } else if (anchor == BLITZ_LINE_ANCHOR_RIGHT) {
+    point = (Vec2){position.x + size.x, position.y + size.y * 0.5f};
+  } else if (anchor == BLITZ_LINE_ANCHOR_BOTTOM) {
+    point = (Vec2){position.x + size.x * 0.5f, position.y + size.y};
+  } else {
+    point = (Vec2){position.x, position.y + size.y * 0.5f};
+  }
+  return rotate_entity_point(entity, point.x, point.y);
+}
+
+static u32 nearest_entity_connection_anchor(u32 entity, Vec2 point) {
+  u32 best_anchor = BLITZ_LINE_ANCHOR_TOP;
+  float best_distance = 0.0f;
+  for (u32 anchor = 0u; anchor < 4u; anchor += 1u) {
+    Vec2 candidate = entity_connection_anchor(entity, anchor);
+    float dx = candidate.x - point.x;
+    float dy = candidate.y - point.y;
+    float distance = dx * dx + dy * dy;
+    if (anchor == 0u || distance < best_distance) {
+      best_anchor = anchor;
+      best_distance = distance;
+    }
+  }
+  return best_anchor;
+}
+
 static Vec2 rotate_entity_point(u32 entity, float x, float y) {
   float rotation = world.rotations[entity];
   if (rotation > -0.00001f && rotation < 0.00001f) {
@@ -4046,6 +4210,93 @@ static void push_container_hover_draw(u32 entity, u32 order) {
   dyn_commands[dyn_command_count]._pad0 = order;
   dyn_rect_count += 1u;
   dyn_command_count += 1u;
+}
+
+static void push_drag_line_preview_draw(u32 entity, u32 order) {
+  if (entity == BLITZ_INVALID_INDEX ||
+      !(world.masks[entity] & BLITZ_COMPONENT_LINE_VIEW) ||
+      !dyn_rect_reserve()) {
+    return;
+  }
+  PathView view = world.path_views[entity];
+  if (!view.points || view.point_count < 2u) {
+    return;
+  }
+  Vec2 start = drag_line_preview_endpoint(entity, 0u);
+  Vec2 end = drag_line_preview_endpoint(entity, 1u);
+  float dx = end.x - start.x;
+  float dy = end.y - start.y;
+  float length = vec2_length(dx, dy);
+  if (length <= 0.001f) {
+    return;
+  }
+  float width = view.stroke_width > 0.1f ? view.stroke_width : 1.0f;
+  float center_x = (start.x + end.x) * 0.5f;
+  float center_y = (start.y + end.y) * 0.5f;
+  RectDraw *draw = &dyn_rects[dyn_rect_count];
+  draw->rect[0] = center_x - length * 0.5f;
+  draw->rect[1] = center_y - width * 0.5f;
+  draw->rect[2] = length;
+  draw->rect[3] = width;
+  draw->fill_color[0] = view.fill_color.r;
+  draw->fill_color[1] = view.fill_color.g;
+  draw->fill_color[2] = view.fill_color.b;
+  draw->fill_color[3] = view.fill_color.a;
+  draw->stroke_color[0] = 0.0f;
+  draw->stroke_color[1] = 0.0f;
+  draw->stroke_color[2] = 0.0f;
+  draw->stroke_color[3] = 0.0f;
+  draw->stroke_width_pad[0] = 0.0f;
+  draw->stroke_width_pad[1] = blitz_atan2(dy, dx);
+  draw->stroke_width_pad[2] = center_x;
+  draw->stroke_width_pad[3] = center_y;
+
+  dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_RECT;
+  dyn_commands[dyn_command_count].shape_index = dyn_rect_count;
+  dyn_commands[dyn_command_count].entity = entity;
+  dyn_commands[dyn_command_count]._pad0 = order;
+  dyn_rect_count += 1u;
+  dyn_command_count += 1u;
+}
+
+static void push_connection_anchor_draws(u32 entity, u32 order) {
+  if (entity == BLITZ_INVALID_INDEX || entity >= world.entity_count ||
+      world.masks[entity] == 0u ||
+      !(world.masks[entity] & BLITZ_COMPONENT_SELECTABLE) ||
+      (world.masks[entity] & BLITZ_COMPONENT_LINE_VIEW)) {
+    return;
+  }
+  float size = 10.0f / uniforms.style[0];
+  for (u32 anchor = 0u; anchor < 4u; anchor += 1u) {
+    if (!dyn_rect_reserve()) {
+      return;
+    }
+    Vec2 point = entity_connection_anchor(entity, anchor);
+    RectDraw *draw = &dyn_rects[dyn_rect_count];
+    draw->rect[0] = point.x - size * 0.5f;
+    draw->rect[1] = point.y - size * 0.5f;
+    draw->rect[2] = size;
+    draw->rect[3] = size;
+    draw->fill_color[0] = 1.0f;
+    draw->fill_color[1] = 1.0f;
+    draw->fill_color[2] = 1.0f;
+    draw->fill_color[3] = 0.95f;
+    draw->stroke_color[0] = 0.12f;
+    draw->stroke_color[1] = 0.48f;
+    draw->stroke_color[2] = 1.0f;
+    draw->stroke_color[3] = 0.95f;
+    draw->stroke_width_pad[0] = 2.0f / uniforms.style[0];
+    draw->stroke_width_pad[1] = 0.0f;
+    draw->stroke_width_pad[2] = 0.0f;
+    draw->stroke_width_pad[3] = 0.0f;
+
+    dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_RECT;
+    dyn_commands[dyn_command_count].shape_index = dyn_rect_count;
+    dyn_commands[dyn_command_count].entity = BLITZ_INVALID_INDEX;
+    dyn_commands[dyn_command_count]._pad0 = order;
+    dyn_rect_count += 1u;
+    dyn_command_count += 1u;
+  }
 }
 
 static void push_resize_handle_draw(float center_x, float center_y, u32 order) {
@@ -4860,6 +5111,10 @@ static void extract_static_shapes(void) {
     if ((world.masks[entity] & base_required) != base_required) {
       continue;
     }
+    if (drag_active && entity < drag_line_preview_flag_cap &&
+        drag_line_preview_flags[entity]) {
+      continue;
+    }
     u32 order = order_index;
     if (drag_active && entity_is_dragged(entity)) {
       order |= BLITZ_DRAG_FLAG;
@@ -4954,9 +5209,20 @@ static void extract_dynamic(void) {
     }
   }
 
+  if (drag_active && drag_line_preview_count > 0u) {
+    for (u32 i = 0u; i < drag_line_preview_count; i += 1u) {
+      push_drag_line_preview_draw(drag_line_preview_entities[i],
+                                  drag_line_preview_orders[i]);
+    }
+  }
+
   dyn_overlay_command_start = dyn_command_count;
 
   u32 overlay_order = world.draw_order_count;
+  if (connection_hover_entity != BLITZ_INVALID_INDEX) {
+    push_connection_anchor_draws(connection_hover_entity, overlay_order);
+  }
+  overlay_order += 1u;
   if (drag_active && drag_hover_targets_new_container()) {
     push_container_hover_draw(drag_hover_container, overlay_order);
   }
@@ -5472,27 +5738,48 @@ static u32 hit_test_drop_container(float world_x, float world_y) {
   return BLITZ_INVALID_INDEX;
 }
 
-static u32 hit_test_line_connection_target(float world_x, float world_y,
-                                           u32 line) {
+static u32 hit_test_line_connection_target_anchor(float world_x, float world_y,
+                                                  u32 line, u32 *out_anchor) {
+  float threshold = 28.0f / uniforms.style[0];
+  float best_distance = threshold * threshold;
+  u32 best_entity = BLITZ_INVALID_INDEX;
+  u32 best_anchor = BLITZ_LINE_ANCHOR_TOP;
   for (u32 i = world.draw_order_count; i > 0u; i -= 1u) {
     u32 entity = world.draw_order[i - 1u];
     if (entity == line || !(world.masks[entity] & BLITZ_COMPONENT_SELECTABLE) ||
         (world.masks[entity] & BLITZ_COMPONENT_LINE_VIEW)) {
       continue;
     }
-    u32 hit = 0u;
-    if (world.masks[entity] & BLITZ_COMPONENT_OVAL_VIEW) {
-      hit = (u32)point_in_oval(world_x, world_y, entity);
-    } else if (world.masks[entity] & BLITZ_COMPONENT_TRIANGLE_VIEW) {
-      hit = (u32)point_in_triangle(world_x, world_y, entity);
-    } else {
-      hit = (u32)point_in_rect(world_x, world_y, entity);
-    }
-    if (hit) {
-      return entity;
+    for (u32 anchor = 0u; anchor < 4u; anchor += 1u) {
+      Vec2 point = entity_connection_anchor(entity, anchor);
+      float dx = world_x - point.x;
+      float dy = world_y - point.y;
+      float distance = dx * dx + dy * dy;
+      if (distance <= best_distance) {
+        best_distance = distance;
+        best_entity = entity;
+        best_anchor = anchor;
+      }
     }
   }
-  return BLITZ_INVALID_INDEX;
+  if (best_entity != BLITZ_INVALID_INDEX && out_anchor) {
+    *out_anchor = best_anchor;
+  }
+  return best_entity;
+}
+
+static u32 hit_test_line_connection_target(float world_x, float world_y,
+                                           u32 line) {
+  u32 anchor = 0u;
+  return hit_test_line_connection_target_anchor(world_x, world_y, line, &anchor);
+}
+
+static void set_connection_hover_entity(u32 entity) {
+  if (connection_hover_entity == entity) {
+    return;
+  }
+  connection_hover_entity = entity;
+  mark_dynamic_dirty();
 }
 
 static u32 drag_hover_container_target(void) {
@@ -5843,12 +6130,14 @@ static void retarget_duplicated_line_connections(u32 original_entity_count) {
     if (start_target < original_entity_count &&
         duplicate_entity_map[start_target] != BLITZ_INVALID_INDEX) {
       line_set_endpoint_target(clone, 0u, duplicate_entity_map[start_target]);
+      world.line_start_anchors[clone] = world.line_start_anchors[source];
     } else {
       line_clear_endpoint_target(clone, 0u);
     }
     if (end_target < original_entity_count &&
         duplicate_entity_map[end_target] != BLITZ_INVALID_INDEX) {
       line_set_endpoint_target(clone, 1u, duplicate_entity_map[end_target]);
+      world.line_end_anchors[clone] = world.line_end_anchors[source];
     } else {
       line_clear_endpoint_target(clone, 1u);
     }
@@ -5904,13 +6193,19 @@ static void create_demo_world(void) {
       (Color){1.0f, 1.0f, 1.0f, 1.0f},
       (Color){0.86f, 0.88f, 0.91f, 1.0f}, 1.0f);
   u32 card_connector = create_slide_line(
-      -35.0f, 42.0f, 325.0f, 42.0f,
-      (Color){0.27f, 0.43f, 0.89f, 0.85f}, 2.0f);
+      130.0f, 42.0f, 160.0f, 42.0f,
+      (Color){0.27f, 0.43f, 0.89f, 0.72f}, 1.5f);
   if (card_connector != BLITZ_INVALID_INDEX &&
       unified_card != BLITZ_INVALID_INDEX &&
       scalable_card != BLITZ_INVALID_INDEX) {
-    line_set_endpoint_target(card_connector, 0u, unified_card);
-    line_set_endpoint_target(card_connector, 1u, scalable_card);
+    line_set_endpoint_target_anchor(card_connector, 0u, unified_card,
+                                    BLITZ_LINE_ANCHOR_RIGHT);
+    line_set_endpoint_target_anchor(card_connector, 1u, scalable_card,
+                                    BLITZ_LINE_ANCHOR_LEFT);
+    line_set_world_endpoints(
+        card_connector,
+        entity_connection_anchor(unified_card, BLITZ_LINE_ANCHOR_RIGHT),
+        entity_connection_anchor(scalable_card, BLITZ_LINE_ANCHOR_LEFT));
   }
 
   create_slide_rect(-200.0f, 124.0f, 690.0f, 176.0f,
@@ -6005,6 +6300,7 @@ void blitz_init(void) {
   dyn_command_count = 0u;
   dyn_overlay_command_start = 0u;
   dyn_rect_count = 0u;
+  drag_line_preview_count = 0u;
   shape_command_version = 0u;
   dyn_version = 0u;
   static_dirty = 1u;
@@ -6012,6 +6308,7 @@ void blitz_init(void) {
   dragging_selection = 0u;
   drag_active = 0u;
   drag_hover_container = BLITZ_INVALID_INDEX;
+  connection_hover_entity = BLITZ_INVALID_INDEX;
   drag_top_level_count = 0u;
   drag_offset.x = 0.0f;
   drag_offset.y = 0.0f;
@@ -6356,9 +6653,13 @@ void blitz_pointer_move(float screen_x, float screen_y) {
       line_set_endpoint_world(
           resize_entity, resize_handle == BLITZ_LINE_START_HANDLE ? 0u : 1u,
           (Vec2){world_x, world_y});
+      u32 hover_anchor = 0u;
+      set_connection_hover_entity(hit_test_line_connection_target_anchor(
+          world_x, world_y, resize_entity, &hover_anchor));
       mark_render_list_dirty();
       return;
     }
+    set_connection_hover_entity(BLITZ_INVALID_INDEX);
     resize_entity_to(world_x, world_y);
     return;
   }
@@ -6370,8 +6671,20 @@ void blitz_pointer_move(float screen_x, float screen_y) {
     return;
   }
   if (!dragging_selection) {
+    u32 hover_anchor = 0u;
+    u32 hover = hit_test_line_connection_target_anchor(
+        world_x, world_y, BLITZ_INVALID_INDEX, &hover_anchor);
+    if (hover == BLITZ_INVALID_INDEX) {
+      hover = hit_test_entity(world_x, world_y);
+      if (hover != BLITZ_INVALID_INDEX &&
+          (world.masks[hover] & BLITZ_COMPONENT_LINE_VIEW)) {
+        hover = BLITZ_INVALID_INDEX;
+      }
+    }
+    set_connection_hover_entity(hover);
     return;
   }
+  set_connection_hover_entity(BLITZ_INVALID_INDEX);
 
   // First motion: rebuild once so the dragged commands get the drag flag, then
   // each frame only updates the offset uniform (no extraction/re-upload).
@@ -6379,6 +6692,7 @@ void blitz_pointer_move(float screen_x, float screen_y) {
     drag_active = 1u;
     drag_offset.x = 0.0f;
     drag_offset.y = 0.0f;
+    collect_drag_line_previews();
     mark_render_list_dirty();
   }
   drag_offset.x += world_x - drag_last_world.x;
@@ -6396,6 +6710,9 @@ void blitz_pointer_move(float screen_x, float screen_y) {
   // while hovering a new container (no re-extraction needed during the drag).
   // interaction[3] (.w); [2] (.z) is owned by the grid-visibility toggle.
   uniforms.interaction[3] = drag_hover_targets_new_container() ? 1.0f : 0.0f;
+  if (drag_line_preview_count > 0u) {
+    mark_dynamic_dirty();
+  }
 }
 
 EXPORT("blitz_pointer_up")
@@ -6407,15 +6724,17 @@ void blitz_pointer_up(void) {
         resize_entity != BLITZ_INVALID_INDEX) {
       u32 endpoint = resize_handle == BLITZ_LINE_START_HANDLE ? 0u : 1u;
       Vec2 endpoint_world = line_endpoint_world(resize_entity, endpoint);
-      u32 target = hit_test_line_connection_target(endpoint_world.x,
-                                                   endpoint_world.y,
-                                                   resize_entity);
+      u32 anchor = 0u;
+      u32 target = hit_test_line_connection_target_anchor(
+          endpoint_world.x, endpoint_world.y, resize_entity, &anchor);
       if (target != BLITZ_INVALID_INDEX) {
-        line_set_endpoint_target(resize_entity, endpoint, target);
-        line_set_endpoint_world(resize_entity, endpoint, entity_center(target));
+        line_set_endpoint_target_anchor(resize_entity, endpoint, target, anchor);
+        line_set_endpoint_world(resize_entity, endpoint,
+                                entity_connection_anchor(target, anchor));
       } else {
         line_clear_endpoint_target(resize_entity, endpoint);
       }
+      set_connection_hover_entity(BLITZ_INVALID_INDEX);
       resize_active = 0u;
       resize_entity = BLITZ_INVALID_INDEX;
       mark_render_list_dirty();
@@ -6475,12 +6794,14 @@ void blitz_pointer_up(void) {
     drag_offset.x = 0.0f;
     drag_offset.y = 0.0f;
     drag_hover_container = BLITZ_INVALID_INDEX;
+    set_connection_hover_entity(BLITZ_INVALID_INDEX);
     uniforms.interaction[0] = 0.0f;
     uniforms.interaction[1] = 0.0f;
     uniforms.interaction[3] = 0.0f;
     drag_active = 0u;
     dragging_selection = 0u;
     drag_top_level_count = 0u;
+    clear_drag_line_previews();
     system_resolve_relative_transforms();
     system_resolve_line_connections();
     mark_render_list_dirty();
@@ -6489,7 +6810,9 @@ void blitz_pointer_up(void) {
   }
   dragging_selection = 0u;
   drag_hover_container = BLITZ_INVALID_INDEX;
+  set_connection_hover_entity(BLITZ_INVALID_INDEX);
   drag_top_level_count = 0u;
+  clear_drag_line_previews();
   if (!marquee_active) {
     history_cancel();
     return;
@@ -6785,6 +7108,7 @@ u32 blitz_paste_internal_clipboard(float offset_x, float offset_y) {
 
 // --- Public API: scene & selection management ------------------------------
 static void clear_scene_state(void) {
+  clear_drag_line_previews();
   for (u32 entity = 0u; entity < world.entity_count; entity += 1u) {
     if (world.masks[entity] != 0u) {
       release_entity_resources(entity);
@@ -6799,6 +7123,7 @@ static void clear_scene_state(void) {
   dragging_selection = 0u;
   drag_active = 0u;
   drag_hover_container = BLITZ_INVALID_INDEX;
+  connection_hover_entity = BLITZ_INVALID_INDEX;
   drag_top_level_count = 0u;
   drag_offset.x = 0.0f;
   drag_offset.y = 0.0f;
@@ -8161,6 +8486,8 @@ void blitz_delete_selected(void) {
   dragging_selection = 0u;
   drag_active = 0u;
   drag_top_level_count = 0u;
+  connection_hover_entity = BLITZ_INVALID_INDEX;
+  clear_drag_line_previews();
   resize_active = 0u;
   resize_entity = BLITZ_INVALID_INDEX;
   mark_line_connections_dirty();

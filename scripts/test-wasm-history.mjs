@@ -153,17 +153,17 @@ wasm.blitz_pointer_down(220, 760, 0);
 wasm.blitz_pointer_move(320, 720);
 wasm.blitz_pointer_up();
 const connected = snapshot().get(connectorSeq);
-check("line endpoint connected to rect center",
-  connectorLine !== 0xffffffff && near(connected.x + connected.w - 1.5, 320));
+check("line endpoint connected to rect side anchor",
+  connectorLine !== 0xffffffff && near(connected.x + connected.w - 1.5, 300));
 wasm.blitz_pointer_down(310, 710, 0);
 wasm.blitz_pointer_move(360, 760);
 const duringFollowDrag = snapshot().get(connectorSeq);
 check("connected line endpoint waits for drag commit",
-  duringFollowDrag && near(duringFollowDrag.x + duringFollowDrag.w - 1.5, 320));
+  duringFollowDrag && near(duringFollowDrag.x + duringFollowDrag.w - 1.5, 300));
 wasm.blitz_pointer_up();
 const followed = snapshot().get(connectorSeq);
 check("connected line endpoint follows moved widget",
-  followed && near(followed.x + followed.w - 1.5, 370) &&
+  followed && near(followed.x + followed.w - 1.5, 350) &&
   near(followed.y + followed.h - 1.5, 770));
 
 wasm.blitz_clear_scene();
@@ -184,7 +184,7 @@ const clonedConnector = [...snapshot().values()].find(
   (v) => v.kind === 6 && v.x > 150,
 );
 check("duplicated connector retargets to duplicated widget",
-  clonedConnector && near(clonedConnector.x + clonedConnector.w - 1.5, 400) &&
+  clonedConnector && near(clonedConnector.x + clonedConnector.w - 1.5, 380) &&
   near(clonedConnector.y + clonedConnector.h - 1.5, 150));
 
 // --- 7. Parent reparent (drag into frame) -> undo detaches / redo attaches --

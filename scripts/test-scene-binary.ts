@@ -664,6 +664,29 @@ expectNear(movedBulkChild.y, firstBulkContainer.y + 16, "Bulk child follows afte
 
 wasm.blitz_clear_scene();
 wasm.blitz_load_demo_template();
+wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 100);
+let demoItems = querySceneItems();
+const demoLine = demoItems.find((item) => item.kind === 6);
+if (!demoLine) {
+  throw new Error("The demo slide should include a line connector.");
+}
+const unifiedDemoCard = demoItems.find(
+  (item) =>
+    item.kind === 0 &&
+    Math.abs(item.x + 200) < 0.001 &&
+    Math.abs(item.y + 2) < 0.001 &&
+    Math.abs(item.width - 330) < 0.001 &&
+    Math.abs(item.height - 88) < 0.001,
+);
+if (!unifiedDemoCard) {
+  throw new Error("The demo slide unified card was not found.");
+}
+if (updateRectPosition(unifiedDemoCard.objectId, unifiedDemoCard.x + 40, unifiedDemoCard.y + 20) !== 0) {
+  throw new Error("Failed to move the demo unified card.");
+}
+const movedDemoLine = querySceneItemByObjectId(demoLine.objectId);
+expectNear(movedDemoLine.x, demoLine.x + 40, "Demo line follows connected card x");
+expectNear(movedDemoLine.y, demoLine.y, "Demo line keeps connected bounds y");
 wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 4);
 const demoSlideId = queriedObjectIdAt(0);
 const demoChildId = queriedObjectIdAt(1);
@@ -748,6 +771,12 @@ if (wasm.blitz_selected_style_kind() !== 1) {
 const pathRoundTripItem = querySceneItemByObjectId(pathRoundTripId);
 if (pathRoundTripItem.kind !== 5) {
   throw new Error("A path was not exposed as the path shape kind.");
+}
+wasm.blitz_create_line(620, 560, 740, 600, 0.2, 0.4, 0.9, 1, 3);
+const lineRoundTripId = readLastCreatedObjectId();
+const lineRoundTripItem = querySceneItemByObjectId(lineRoundTripId);
+if (lineRoundTripItem.kind !== 6) {
+  throw new Error("A line was not exposed as the line shape kind.");
 }
 if (wasm.blitz_scene_revision() === emptyRevision) {
   throw new Error("Scene mutations did not advance the revision.");
@@ -872,13 +901,17 @@ if (
 }
 
 wasm.blitz_query_scene(-1000, -1000, 1000, 1000, 10);
-if (wasm.blitz_scene_query_total() !== 6) {
-  throw new Error(`Expected six restored objects, received ${wasm.blitz_scene_query_total()}.`);
+if (wasm.blitz_scene_query_total() !== 7) {
+  throw new Error(`Expected seven restored objects, received ${wasm.blitz_scene_query_total()}.`);
 }
 const restoredFrame = querySceneItemByObjectId(frameRoundTripId);
 const restoredPath = querySceneItemByObjectId(pathRoundTripId);
+const restoredLine = querySceneItemByObjectId(lineRoundTripId);
 if (restoredPath.kind !== 5) {
   throw new Error("A restored path did not keep its shape kind.");
+}
+if (restoredLine.kind !== 6) {
+  throw new Error("A restored line did not keep its shape kind.");
 }
 wasm.blitz_select_object(
   frameRoundTripId[0],

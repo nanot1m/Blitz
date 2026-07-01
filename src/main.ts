@@ -167,6 +167,17 @@ type BlitzExports = {
     fillA: number,
     strokeWidth: number,
   ): number;
+  blitz_create_line(
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    fillR: number,
+    fillG: number,
+    fillB: number,
+    fillA: number,
+    strokeWidth: number,
+  ): number;
   blitz_text_input_ptr(): number;
   blitz_text_input_capacity(): number;
   blitz_path_input_ptr(): number;
@@ -333,6 +344,7 @@ const blitzShapeRect = 0;
 const blitzShapeTriangle = 1;
 const blitzShapeOval = 2;
 const blitzShapeFrame = 4;
+const blitzShapeLine = 6;
 const blitzUpdateGeometry = 1 | 2 | 4 | 8;
 const blitzUpdateText = 128;
 const blitzInvalidIndex = 0xffffffff;
@@ -1015,6 +1027,22 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       grew: true,
     };
   };
+  const createUploadStorage = (
+    currentCapacity: number,
+    needed: number,
+    ceiling: number,
+    stride: number,
+    usage: number,
+    label: string,
+  ): { buffer: GPUBuffer; capacity: number } => {
+    let next = Math.max(currentCapacity, 1);
+    while (next < needed) next *= 2;
+    next = Math.min(next, ceiling, maxStorageElements(stride));
+    return {
+      buffer: device.createBuffer({ label, size: next * stride, usage }),
+      capacity: next,
+    };
+  };
   const pushStaticUploadTask = (
     tasks: StaticUploadTask[],
     buffer: GPUBuffer,
@@ -1110,6 +1138,19 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
   type StaticUploadState = {
     version: number;
     shapeCommandCount: number;
+    shapeCommandBuffer: GPUBuffer;
+    shapeCommandCapacity: number;
+    visibleCommandBuffer: GPUBuffer;
+    visibleCommandCapacity: number;
+    rectBuffer: GPUBuffer;
+    rectCapacity: number;
+    triangleBuffer: GPUBuffer;
+    triangleCapacity: number;
+    ovalBuffer: GPUBuffer;
+    ovalCapacity: number;
+    pathBuffer: GPUBuffer;
+    pathCapacity: number;
+    pathSegmentBuffer: GPUBuffer;
     pathDrawPtr: number;
     pathDrawCount: number;
     pathSegmentCount: number;
@@ -1117,11 +1158,22 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     tasks: StaticUploadTask[];
   };
   let staticUploadState: StaticUploadState | null = null;
+  const destroyStaticUploadState = (state: StaticUploadState) => {
+    state.shapeCommandBuffer.destroy();
+    state.visibleCommandBuffer.destroy();
+    state.rectBuffer.destroy();
+    state.triangleBuffer.destroy();
+    state.ovalBuffer.destroy();
+    state.pathBuffer.destroy();
+    state.pathSegmentBuffer.destroy();
+  };
   let lastUploadedDraftVersion = -1;
   let currentDraftSegmentCount = 0;
   let lastUploadedDynVersion = -1;
   let currentDynCommandCount = 0;
   let currentDynOverlayCommandStart = 0;
+  let heldDragOffsetX = 0;
+  let heldDragOffsetY = 0;
   let lastZoomPercent = -1;
   const drawArgsReset = new Uint32Array([6, 0, 0, 0]);
   let statsVisible = false;
@@ -1427,7 +1479,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     );
     ui.debuggerEntityId.textContent = `${words[0]}${words[1]}:${words[2]}${words[3]}`;
     const kind = view.getUint32(ptr + 16, true);
-    const kindNames = ["Rectangle", "Triangle", "Oval", "Text", "Frame", "Pen"];
+    const kindNames = ["Rectangle", "Triangle", "Oval", "Text", "Frame", "Pen", "Line"];
     const mask = wasm.blitz_selected_debug_mask();
     ui.debuggerComponents.append(
       debugComponent("Entity", {
@@ -1506,11 +1558,11 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
         }),
       );
     }
-    if (kind === 5) {
+    if (kind === 5 || kind === blitzShapeLine) {
       const segments = view.getFloat32(ptr + 96, true);
       const triangles = view.getFloat32(ptr + 100, true);
       ui.debuggerComponents.append(
-        debugComponent("PenGeometry", {
+        debugComponent(kind === blitzShapeLine ? "LineGeometry" : "PenGeometry", {
           points: view.getFloat32(ptr + 92, true),
           segments,
           triangles,
@@ -1524,7 +1576,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
         selectable: (mask & 64) !== 0 ? "yes" : "no",
         resizableX: (mask & 128) !== 0 ? "yes" : "no",
         resizableY: (mask & 256) !== 0 ? "yes" : "no",
-        geometricStyle: (mask & (4 | 8 | 16 | 4096)) !== 0 ? "yes" : "no",
+        geometricStyle: (mask & (4 | 8 | 16 | 4096 | 8192)) !== 0 ? "yes" : "no",
         textStyle: (mask & 32) !== 0 ? "yes" : "no",
         container: (mask & 1024) !== 0 ? "yes" : "no",
         relativeTransform: (mask & 512) !== 0 ? "yes" : "no",
@@ -2455,7 +2507,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     ui.redoButton.disabled = !sceneHistory.canRedo();
   };
   updateHistoryControls();
-  type CreationTool = "rect" | "frame" | "circle" | "triangle" | "text" | "pen";
+  type CreationTool = "rect" | "frame" | "circle" | "triangle" | "text" | "line" | "pen";
   let activeTool: CreationTool | null = null;
   let penMode = false;
   const PEN_COLOR_STORAGE_KEY = "blitz:pen-color";
@@ -2760,6 +2812,12 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       onColor: applyTextToolColor,
       buildExtra: buildTextToolControls,
     })],
+    ["line", attachColorPopover(ui.addLineButton, {
+      manualToggle: true,
+      getValue: () => penColorHex,
+      onColor: applyPenColor,
+      buildExtra: buildPenWidthControl,
+    })],
     ["pen", penPopover],
   ]);
   const toolButtons = new Map<CreationTool, HTMLButtonElement>([
@@ -2768,6 +2826,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     ["circle", ui.addCircleButton],
     ["triangle", ui.addTriangleButton],
     ["text", ui.addTextButton],
+    ["line", ui.addLineButton],
     ["pen", ui.penToolButton],
   ]);
   const setActiveTool = (tool: CreationTool | null) => {
@@ -2924,7 +2983,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
   };
   type ShapeDraft = {
     tool: Exclude<CreationTool, "pen" | "text">;
-    objectId: ObjectIdWords;
+    objectId: ObjectIdWords | null;
     startCanvas: { x: number; y: number };
     startWorld: { x: number; y: number };
   };
@@ -2980,6 +3039,23 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     };
   };
   const updateDraftObject = (draft: ShapeDraft, point: { x: number; y: number }) => {
+    if (draft.tool === "line") {
+      new Float32Array(wasm.memory.buffer, wasm.blitz_path_input_ptr(), 4).set([
+        draft.startCanvas.x,
+        draft.startCanvas.y,
+        point.x,
+        point.y,
+      ]);
+      wasm.blitz_update_path_draft(
+        2,
+        penFill.r,
+        penFill.g,
+        penFill.b,
+        penFill.a,
+        penWidth,
+      );
+      return;
+    }
     const bounds = shapeBoundsFromDrag(draft, point);
     const kind =
       draft.tool === "triangle"
@@ -2992,10 +3068,10 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     const updateX = draft.tool === "circle" ? bounds.x + bounds.width * 0.5 : bounds.x;
     const updateY = draft.tool === "circle" ? bounds.y + bounds.height * 0.5 : bounds.y;
     wasm.blitz_update_object(
-      draft.objectId[0],
-      draft.objectId[1],
-      draft.objectId[2],
-      draft.objectId[3],
+      draft.objectId![0],
+      draft.objectId![1],
+      draft.objectId![2],
+      draft.objectId![3],
       kind,
       blitzUpdateGeometry,
       updateX,
@@ -3059,6 +3135,30 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       return false;
     }
     const world = canvasToWorld(point);
+    if (activeTool === "line") {
+      sceneHistory.begin();
+      shapeDraft = {
+        tool: activeTool,
+        objectId: null,
+        startCanvas: point,
+        startWorld: world,
+      };
+      new Float32Array(wasm.memory.buffer, wasm.blitz_path_input_ptr(), 4).set([
+        point.x,
+        point.y,
+        point.x,
+        point.y,
+      ]);
+      wasm.blitz_update_path_draft(
+        2,
+        penFill.r,
+        penFill.g,
+        penFill.b,
+        penFill.a,
+        penWidth,
+      );
+      return true;
+    }
     sceneHistory.begin();
     let entity = blitzInvalidIndex;
     if (activeTool === "frame") {
@@ -3142,7 +3242,27 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     if (!shapeDraft) {
       return;
     }
-    updateDraftObject(shapeDraft, point);
+    const draft = shapeDraft;
+    updateDraftObject(draft, point);
+    if (draft.tool === "line") {
+      const endWorld = canvasToWorld(point);
+      const clickLike =
+        Math.hypot(point.x - draft.startCanvas.x, point.y - draft.startCanvas.y) < 3;
+      const x2 = clickLike ? draft.startWorld.x + 160 : endWorld.x;
+      const y2 = clickLike ? draft.startWorld.y : endWorld.y;
+      wasm.blitz_clear_path_draft();
+      wasm.blitz_create_line(
+        draft.startWorld.x,
+        draft.startWorld.y,
+        x2,
+        y2,
+        penFill.r,
+        penFill.g,
+        penFill.b,
+        penFill.a,
+        penWidth,
+      );
+    }
     shapeDraft = null;
     sceneHistory.commit();
     setActiveTool(null);
@@ -3154,6 +3274,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       return;
     }
     shapeDraft = null;
+    wasm.blitz_clear_path_draft();
     sceneHistory.cancel();
     updateSelectionState();
     updateEmptyState();
@@ -3329,6 +3450,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     {
       addCircleButton: ui.addCircleButton,
       addFrameButton: ui.addFrameButton,
+      addLineButton: ui.addLineButton,
       addRectButton: ui.addRectButton,
       addTextButton: ui.addTextButton,
       addTriangleButton: ui.addTriangleButton,
@@ -3349,6 +3471,9 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       },
       addFrame: () => {
         toggleTool("frame");
+      },
+      addLine: () => {
+        toggleTool("line");
       },
       addRect: () => {
         toggleTool("rect");
@@ -3534,6 +3659,10 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       shapeCommandVersion !== lastUploadedShapeCommandVersion &&
       staticUploadState?.version !== shapeCommandVersion
     ) {
+      if (staticUploadState) {
+        destroyStaticUploadState(staticUploadState);
+        staticUploadState = null;
+      }
       const shapeCommandCount = wasm.blitz_shape_command_count();
       const rectDrawPtr = wasm.blitz_rect_draw_ptr();
       const rectDrawCount = wasm.blitz_rect_draw_count();
@@ -3545,63 +3674,39 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       const pathDrawCount = wasm.blitz_path_draw_count();
       const pathSegmentPtr = wasm.blitz_path_segment_ptr();
       const pathSegmentCount = wasm.blitz_path_segment_count();
-      currentShapeCommandCount = 0;
-      visibleGeometryShapeCount = 0;
-      pathDrawList = [];
-      const eShape = ensureStorage(shapeCommandStorageBuffer, shapeCommandCapacity, shapeCommandCount, maxShapes, shapeCommandStride, storageDstUsage, "Blitz Shape Command Storage");
-      shapeCommandStorageBuffer = eShape.buffer;
-      shapeCommandCapacity = eShape.capacity;
-      bindGroupsDirty ||= eShape.grew;
-      const eVisible = ensureStorage(visibleCommandStorageBuffer, visibleCommandCapacity, shapeCommandCount, maxShapes, shapeCommandStride, GPUBufferUsage.STORAGE, "Blitz Visible Command Storage");
-      visibleCommandStorageBuffer = eVisible.buffer;
-      visibleCommandCapacity = eVisible.capacity;
-      bindGroupsDirty ||= eVisible.grew;
-      const eRect = ensureStorage(rectStorageBuffer, rectCapacity, rectDrawCount, maxShapes, rectDrawStride, storageDstUsage, "Blitz Rect Draw Storage");
-      rectStorageBuffer = eRect.buffer;
-      rectCapacity = eRect.capacity;
-      bindGroupsDirty ||= eRect.grew;
-      const eTriangle = ensureStorage(triangleStorageBuffer, triangleCapacity, triangleDrawCount, maxShapes, triangleDrawStride, storageDstUsage, "Blitz Triangle Draw Storage");
-      triangleStorageBuffer = eTriangle.buffer;
-      triangleCapacity = eTriangle.capacity;
-      bindGroupsDirty ||= eTriangle.grew;
-      const eOval = ensureStorage(ovalStorageBuffer, ovalCapacity, ovalDrawCount, maxShapes, ovalDrawStride, storageDstUsage, "Blitz Oval Draw Storage");
-      ovalStorageBuffer = eOval.buffer;
-      ovalCapacity = eOval.capacity;
-      bindGroupsDirty ||= eOval.grew;
-      const ePath = ensureStorage(pathStorageBuffer, pathCapacity, pathDrawCount, maxShapes, pathDrawStride, storageDstUsage, "Blitz Path Draw Storage");
-      pathStorageBuffer = ePath.buffer;
-      pathCapacity = ePath.capacity;
-      bindGroupsDirty ||= ePath.grew;
-      const ePathSegment = ensureStorage(pathSegmentStorageBuffer, pathSegmentCapacity, pathSegmentCount, maxPathSegments, pathSegmentStride, storageDstUsage, "Blitz Path Segment Storage");
-      pathSegmentStorageBuffer = ePathSegment.buffer;
-      pathSegmentCapacity = ePathSegment.capacity;
-      bindGroupsDirty ||= ePathSegment.grew;
+      const pendingShape = createUploadStorage(shapeCommandCapacity, shapeCommandCount, maxShapes, shapeCommandStride, storageDstUsage, "Blitz Pending Shape Command Storage");
+      const pendingVisible = createUploadStorage(visibleCommandCapacity, shapeCommandCount, maxShapes, shapeCommandStride, GPUBufferUsage.STORAGE, "Blitz Pending Visible Command Storage");
+      const pendingRect = createUploadStorage(rectCapacity, rectDrawCount, maxShapes, rectDrawStride, storageDstUsage, "Blitz Pending Rect Draw Storage");
+      const pendingTriangle = createUploadStorage(triangleCapacity, triangleDrawCount, maxShapes, triangleDrawStride, storageDstUsage, "Blitz Pending Triangle Draw Storage");
+      const pendingOval = createUploadStorage(ovalCapacity, ovalDrawCount, maxShapes, ovalDrawStride, storageDstUsage, "Blitz Pending Oval Draw Storage");
+      const pendingPath = createUploadStorage(pathCapacity, pathDrawCount, maxShapes, pathDrawStride, storageDstUsage, "Blitz Pending Path Draw Storage");
+      const pendingPathSegment = createUploadStorage(pathSegmentCapacity, pathSegmentCount, maxPathSegments, pathSegmentStride, storageDstUsage, "Blitz Pending Path Segment Storage");
       // Clamp to what the (limit-capped) buffer can hold; excess strokes are
       // dropped rather than crashing on an over-limit write.
-      const uploadableSegments = Math.min(pathSegmentCount, pathSegmentCapacity);
+      const uploadableSegments = Math.min(pathSegmentCount, pendingPathSegment.capacity);
       const tasks: StaticUploadTask[] = [];
       pushStaticUploadTask(
         tasks,
-        shapeCommandStorageBuffer,
+        pendingShape.buffer,
         shapeCommandPtr,
         shapeCommandCount,
         shapeCommandStride,
         "u32",
       );
-      pushStaticUploadTask(tasks, rectStorageBuffer, rectDrawPtr, rectDrawCount, rectDrawStride, "f32");
+      pushStaticUploadTask(tasks, pendingRect.buffer, rectDrawPtr, rectDrawCount, rectDrawStride, "f32");
       pushStaticUploadTask(
         tasks,
-        triangleStorageBuffer,
+        pendingTriangle.buffer,
         triangleDrawPtr,
         triangleDrawCount,
         triangleDrawStride,
         "f32",
       );
-      pushStaticUploadTask(tasks, ovalStorageBuffer, ovalDrawPtr, ovalDrawCount, ovalDrawStride, "f32");
-      pushStaticUploadTask(tasks, pathStorageBuffer, pathDrawPtr, pathDrawCount, pathDrawStride, "f32");
+      pushStaticUploadTask(tasks, pendingOval.buffer, ovalDrawPtr, ovalDrawCount, ovalDrawStride, "f32");
+      pushStaticUploadTask(tasks, pendingPath.buffer, pathDrawPtr, pathDrawCount, pathDrawStride, "f32");
       pushStaticUploadTask(
         tasks,
-        pathSegmentStorageBuffer,
+        pendingPathSegment.buffer,
         pathSegmentPtr,
         uploadableSegments,
         pathSegmentStride,
@@ -3610,10 +3715,23 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       staticUploadState = {
         version: shapeCommandVersion,
         shapeCommandCount,
+        shapeCommandBuffer: pendingShape.buffer,
+        shapeCommandCapacity: pendingShape.capacity,
+        visibleCommandBuffer: pendingVisible.buffer,
+        visibleCommandCapacity: pendingVisible.capacity,
+        rectBuffer: pendingRect.buffer,
+        rectCapacity: pendingRect.capacity,
+        triangleBuffer: pendingTriangle.buffer,
+        triangleCapacity: pendingTriangle.capacity,
+        ovalBuffer: pendingOval.buffer,
+        ovalCapacity: pendingOval.capacity,
+        pathBuffer: pendingPath.buffer,
+        pathCapacity: pendingPath.capacity,
+        pathSegmentBuffer: pendingPathSegment.buffer,
         pathDrawPtr,
         pathDrawCount,
         pathSegmentCount,
-        pathSegmentCapacity,
+        pathSegmentCapacity: pendingPathSegment.capacity,
         tasks,
       };
     }
@@ -3661,8 +3779,32 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
             });
           }
         }
+        shapeCommandStorageBuffer.destroy();
+        visibleCommandStorageBuffer.destroy();
+        rectStorageBuffer.destroy();
+        triangleStorageBuffer.destroy();
+        ovalStorageBuffer.destroy();
+        pathStorageBuffer.destroy();
+        pathSegmentStorageBuffer.destroy();
+        shapeCommandStorageBuffer = staticUploadState.shapeCommandBuffer;
+        shapeCommandCapacity = staticUploadState.shapeCommandCapacity;
+        visibleCommandStorageBuffer = staticUploadState.visibleCommandBuffer;
+        visibleCommandCapacity = staticUploadState.visibleCommandCapacity;
+        rectStorageBuffer = staticUploadState.rectBuffer;
+        rectCapacity = staticUploadState.rectCapacity;
+        triangleStorageBuffer = staticUploadState.triangleBuffer;
+        triangleCapacity = staticUploadState.triangleCapacity;
+        ovalStorageBuffer = staticUploadState.ovalBuffer;
+        ovalCapacity = staticUploadState.ovalCapacity;
+        pathStorageBuffer = staticUploadState.pathBuffer;
+        pathCapacity = staticUploadState.pathCapacity;
+        pathSegmentStorageBuffer = staticUploadState.pathSegmentBuffer;
+        pathSegmentCapacity = staticUploadState.pathSegmentCapacity;
         currentShapeCommandCount = staticUploadState.shapeCommandCount;
         lastUploadedShapeCommandVersion = staticUploadState.version;
+        heldDragOffsetX = 0;
+        heldDragOffsetY = 0;
+        bindGroupsDirty = true;
         staticUploadState = null;
       }
     }
@@ -3757,20 +3899,31 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       uniformPtr,
       wasm.blitz_uniform_f32_count(),
     );
-    uniforms.set(backgroundColors[backgroundTheme], 8);
-    uniforms[18] = gridVisible ? 1 : 0;
-    device.queue.writeBuffer(uniformBuffer, 0, uniforms);
+    const renderUniforms = new Float32Array(uniforms);
+    if (Math.abs(uniforms[16]) > 0.001 || Math.abs(uniforms[17]) > 0.001) {
+      heldDragOffsetX = uniforms[16];
+      heldDragOffsetY = uniforms[17];
+    } else if (staticUploadState && (Math.abs(heldDragOffsetX) > 0.001 || Math.abs(heldDragOffsetY) > 0.001)) {
+      renderUniforms[16] = heldDragOffsetX;
+      renderUniforms[17] = heldDragOffsetY;
+    } else if (!staticUploadState) {
+      heldDragOffsetX = 0;
+      heldDragOffsetY = 0;
+    }
+    renderUniforms.set(backgroundColors[backgroundTheme], 8);
+    renderUniforms[18] = gridVisible ? 1 : 0;
+    device.queue.writeBuffer(uniformBuffer, 0, renderUniforms);
     remoteCursors.render({
-      viewportWidth: uniforms[0],
-      viewportHeight: uniforms[1],
-      cameraX: uniforms[2],
-      cameraY: uniforms[3],
-      zoom: uniforms[4] || 1,
+      viewportWidth: renderUniforms[0],
+      viewportHeight: renderUniforms[1],
+      cameraX: renderUniforms[2],
+      cameraY: renderUniforms[3],
+      zoom: renderUniforms[4] || 1,
       canvas: ui.canvas,
     });
-    positionEmptyState(uniforms[0], uniforms[1], uniforms[2], uniforms[3], uniforms[4]);
+    positionEmptyState(renderUniforms[0], renderUniforms[1], renderUniforms[2], renderUniforms[3], renderUniforms[4]);
     positionTextEditor();
-    const zoomPercent = Math.round(uniforms[4] * 100);
+    const zoomPercent = Math.round(renderUniforms[4] * 100);
     if (zoomPercent !== lastZoomPercent) {
       lastZoomPercent = zoomPercent;
       ui.zoomIndicator.textContent = `${zoomPercent}%`;

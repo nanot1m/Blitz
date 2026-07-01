@@ -32,7 +32,7 @@ export type CanvasInteractionController = {
 };
 
 type KeyboardShortcutOptions = {
-  activateTool(tool: "rect" | "circle" | "pen" | "frame"): void;
+  activateTool(tool: "rect" | "circle" | "pen" | "frame" | "line"): void;
   beginTextEdit(): void;
   cancelActiveTool(): void;
   copySelection(): void | Promise<void>;
@@ -50,6 +50,7 @@ type KeyboardShortcutOptions = {
 type UiActionElements = {
   addCircleButton: HTMLButtonElement;
   addFrameButton: HTMLButtonElement;
+  addLineButton: HTMLButtonElement;
   addRectButton: HTMLButtonElement;
   addTextButton: HTMLButtonElement;
   addTriangleButton: HTMLButtonElement;
@@ -68,6 +69,7 @@ type UiActionElements = {
 type UiActions = {
   addCircle(): void;
   addFrame(): void;
+  addLine(): void;
   addRect(): void;
   addText(): void;
   addTriangle(): void;
@@ -187,6 +189,9 @@ export function setupCanvasInteractions(
   let primaryTouchId: number | null = null;
   let touchStartX = 0;
   let touchStartY = 0;
+
+  const isResizeLikePointerMode = (pointerMode: number) =>
+    (pointerMode >= 3 && pointerMode <= 10) || pointerMode === 12 || pointerMode === 13;
   let longPressTimer: number | undefined;
   const touchMoveThreshold = 8;
   const mouseDragThreshold = 1;
@@ -314,7 +319,7 @@ export function setupCanvasInteractions(
     canvas.classList.toggle("is-resizing-ns", false);
     canvas.classList.toggle("is-resizing-ew", false);
     canvas.classList.toggle("is-rotating", pointerMode === 11);
-    if (pointerMode >= 3 && pointerMode <= 10 && clientX !== undefined && clientY !== undefined) {
+    if (isResizeLikePointerMode(pointerMode) && clientX !== undefined && clientY !== undefined) {
       showInteractionCursor(clientX, clientY, "resize", angle);
     } else if (pointerMode === 11) {
       hideInteractionCursor();
@@ -361,7 +366,7 @@ export function setupCanvasInteractions(
     resizingEntity = pointerMode >= 3;
     resizePointerMode = resizingEntity ? pointerMode : 0;
     resizeCursorAngle =
-      pointerMode >= 3 && pointerMode <= 10
+      isResizeLikePointerMode(pointerMode)
         ? wasm.blitz_resize_cursor_angle_at(start.x, start.y)
         : 0;
     selectingArea = false;
@@ -503,7 +508,7 @@ export function setupCanvasInteractions(
       resizingEntity = pointerMode >= 3;
       resizePointerMode = resizingEntity ? pointerMode : 0;
       resizeCursorAngle =
-        pointerMode >= 3 && pointerMode <= 10
+        isResizeLikePointerMode(pointerMode)
           ? wasm.blitz_resize_cursor_angle_at(point.x, point.y)
           : 0;
       selectingArea = pointerMode === 2;
@@ -616,7 +621,7 @@ export function setupCanvasInteractions(
       const point = eventToCanvasPixels(event);
       const pointerMode = wasm.blitz_resize_mode_at(point.x, point.y);
       const angle =
-        pointerMode >= 3 && pointerMode <= 10
+        isResizeLikePointerMode(pointerMode)
           ? wasm.blitz_resize_cursor_angle_at(point.x, point.y)
           : 0;
       setResizeCursor(pointerMode, event.clientX, event.clientY, angle);
@@ -643,7 +648,7 @@ export function setupCanvasInteractions(
           setResizeCursor(resizePointerMode);
           if (resizePointerMode === 11) {
             showInteractionCursor(event.clientX, event.clientY, "rotate");
-          } else if (resizePointerMode >= 3 && resizePointerMode <= 10) {
+          } else if (isResizeLikePointerMode(resizePointerMode)) {
             showInteractionCursor(event.clientX, event.clientY, "resize", resizeCursorAngle);
           }
         }
@@ -884,13 +889,14 @@ export function setupKeyboardShortcuts(options: KeyboardShortcutOptions): void {
     const commandKey = event.ctrlKey || event.metaKey;
     if (!commandKey && !event.altKey) {
       const key = event.key.toLowerCase();
-      if (key === "r" || key === "o" || key === "p" || key === "f") {
+      if (key === "r" || key === "o" || key === "p" || key === "f" || key === "l") {
         event.preventDefault();
         options.stopDragging();
         if (key === "r") options.activateTool("rect");
         if (key === "o") options.activateTool("circle");
         if (key === "p") options.activateTool("pen");
         if (key === "f") options.activateTool("frame");
+        if (key === "l") options.activateTool("line");
         return;
       }
     }
@@ -962,6 +968,7 @@ export function setupKeyboardShortcuts(options: KeyboardShortcutOptions): void {
 export function setupUiActions(elements: UiActionElements, actions: UiActions): void {
   elements.addRectButton.addEventListener("click", actions.addRect);
   elements.addFrameButton.addEventListener("click", actions.addFrame);
+  elements.addLineButton.addEventListener("click", actions.addLine);
   elements.addCircleButton.addEventListener("click", actions.addCircle);
   elements.addTriangleButton.addEventListener("click", actions.addTriangle);
   elements.addTextButton.addEventListener("click", actions.addText);

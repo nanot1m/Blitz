@@ -129,7 +129,65 @@ check("path restored with same bounds + width",
   pathAfter && near(pathAfter.w, pathBefore.w) && near(pathAfter.h, pathBefore.h) &&
   near(pathAfter.strokeWidth, 4));
 
-// --- 6. Parent reparent (drag into frame) -> undo detaches / redo attaches --
+// --- 6. Line (path-backed shape kind) round-trip ---------------------------
+console.log("line create -> delete -> undo");
+const lineEntity = wasm.blitz_create_line(100, 720, 240, 760, 0.1, 0.2, 0.8, 1, 3);
+check("line created", lineEntity !== 0xffffffff && wasm.blitz_entity_count() === 5);
+const lineSeq = [...snapshot().entries()].find(([, v]) => v.kind === 6)?.[0];
+check("line queryable (kind 6)", lineSeq !== undefined);
+const lineBefore = snapshot().get(lineSeq);
+wasm.blitz_select_all();
+wasm.blitz_delete_selected();
+check("all deleted after line selection", wasm.blitz_entity_count() === 0);
+wasm.blitz_history_undo();
+const lineAfter = snapshot().get(lineSeq);
+check("line restored with same bounds + width",
+  lineAfter && near(lineAfter.w, lineBefore.w) && near(lineAfter.h, lineBefore.h) &&
+  near(lineAfter.strokeWidth, 3));
+wasm.blitz_create_rect(300, 700, 40, 40, 0.8, 0.8, 0.9, 1, 0, 0, 0, 1, 1);
+const connectorLine = wasm.blitz_create_line(100, 720, 220, 760, 0.1, 0.2, 0.8, 1, 3);
+const connectorSeq = Math.max(
+  ...[...snapshot().entries()].filter(([, v]) => v.kind === 6).map(([seq]) => seq),
+);
+wasm.blitz_pointer_down(220, 760, 0);
+wasm.blitz_pointer_move(320, 720);
+wasm.blitz_pointer_up();
+const connected = snapshot().get(connectorSeq);
+check("line endpoint connected to rect center",
+  connectorLine !== 0xffffffff && near(connected.x + connected.w - 1.5, 320));
+wasm.blitz_pointer_down(310, 710, 0);
+wasm.blitz_pointer_move(360, 760);
+const duringFollowDrag = snapshot().get(connectorSeq);
+check("connected line endpoint waits for drag commit",
+  duringFollowDrag && near(duringFollowDrag.x + duringFollowDrag.w - 1.5, 320));
+wasm.blitz_pointer_up();
+const followed = snapshot().get(connectorSeq);
+check("connected line endpoint follows moved widget",
+  followed && near(followed.x + followed.w - 1.5, 370) &&
+  near(followed.y + followed.h - 1.5, 770));
+
+wasm.blitz_clear_scene();
+wasm.blitz_history_reset?.();
+wasm.blitz_create_rect(100, 100, 40, 40, 1, 1, 1, 1, 0, 0, 0, 1, 1);
+wasm.blitz_create_rect(300, 100, 40, 40, 1, 1, 1, 1, 0, 0, 0, 1, 1);
+wasm.blitz_create_line(120, 120, 320, 120, 0.1, 0.2, 0.8, 1, 3);
+wasm.blitz_pointer_down(120, 120, 0);
+wasm.blitz_pointer_up();
+wasm.blitz_pointer_down(320, 120, 0);
+wasm.blitz_pointer_up();
+wasm.blitz_select_all();
+check("duplicated connected pair", wasm.blitz_duplicate_selected(50, 0) === 3);
+wasm.blitz_pointer_down(370, 130, 0);
+wasm.blitz_pointer_move(400, 160);
+wasm.blitz_pointer_up();
+const clonedConnector = [...snapshot().values()].find(
+  (v) => v.kind === 6 && v.x > 150,
+);
+check("duplicated connector retargets to duplicated widget",
+  clonedConnector && near(clonedConnector.x + clonedConnector.w - 1.5, 400) &&
+  near(clonedConnector.y + clonedConnector.h - 1.5, 150));
+
+// --- 7. Parent reparent (drag into frame) -> undo detaches / redo attaches --
 console.log("reparent via drag -> undo detaches, redo re-attaches");
 wasm.blitz_clear_scene();
 wasm.blitz_history_reset?.();
@@ -149,7 +207,7 @@ check("undo detaches child", snapshot().get(childSeq).parentSeq === 0);
 wasm.blitz_history_redo();
 check("redo re-attaches child to frame", snapshot().get(childSeq).parentSeq === frameSeq);
 
-// --- 7. Eviction: more than the step budget, no crash ----------------------
+// --- 8. Eviction: more than the step budget, no crash ----------------------
 console.log("step-budget eviction");
 wasm.blitz_clear_scene();
 wasm.blitz_history_reset?.();
@@ -166,7 +224,7 @@ while (wasm.blitz_history_can_undo()) {
 check("undo stack capped at 64 steps", undone === 64);
 check("eviction left earliest creates intact", wasm.blitz_entity_count() === 200 - 64);
 
-// --- 8. Bulk transform timing ----------------------------------------------
+// --- 9. Bulk transform timing ----------------------------------------------
 console.log("bulk transform timing");
 wasm.blitz_clear_scene();
 wasm.blitz_history_reset?.();
@@ -184,7 +242,7 @@ const dt = performance.now() - t0;
 check(`bulk ${BULK}-entity transform round-trip under 500ms (${dt.toFixed(1)}ms)`, dt < 500);
 check("bulk redo left fill applied", near(snapshot().values().next().value.fillR, 0.2));
 
-// --- 9. Explicit begin/commit groups multiple mutations into one step ------
+// --- 10. Explicit begin/commit groups multiple mutations into one step -----
 console.log("begin/commit grouping + state_id dirty tracking");
 wasm.blitz_clear_scene();
 check("clear_scene resets history (state_id 0)", wasm.blitz_history_state_id() === 0);
@@ -211,7 +269,7 @@ wasm.blitz_create_rect(60, 0, 10, 10, 1, 1, 0, 1, 0, 0, 0, 1, 1); // new branch
 check("a new branch yields a fresh state_id", wasm.blitz_history_state_id() !== saved);
 check("new branch truncated the redo stack", wasm.blitz_history_can_redo() === 0);
 
-// --- 10. Bulk delete -> undo -> redo stays linear (no O(n^2) apply) --------
+// --- 11. Bulk delete -> undo -> redo stays linear (no O(n^2) apply) --------
 console.log("bulk delete/undo/redo at scale");
 wasm.blitz_clear_scene();
 const BULK_DELETE = 200_000;
@@ -232,7 +290,7 @@ check(`${BULK_DELETE} delete cleared the scene`, afterDelete === 0);
 check(`${BULK_DELETE} undo restored every entity`, afterUndo === BULK_DELETE);
 check(`bulk delete/undo/redo/undo under 2s (${bulkMs.toFixed(0)}ms)`, bulkMs < 2000);
 
-// --- 11. Z-order (bring-to-front / send-to-back) is undoable ----------------
+// --- 12. Z-order (bring-to-front / send-to-back) is undoable ---------------
 console.log("z-order changes preserved in history");
 wasm.blitz_clear_scene();
 const orderOf = (x) => {

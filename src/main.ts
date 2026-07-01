@@ -1478,6 +1478,24 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
     updateDebuggerIsland();
   };
   let emptyStateVisible = false;
+  const emptyStateAnchor = { x: 0, y: -160 };
+  const positionEmptyState = (
+    viewportWidth: number,
+    viewportHeight: number,
+    cameraX: number,
+    cameraY: number,
+    zoom: number,
+  ) => {
+    const safeZoom = zoom || 1;
+    const cssScale = ui.canvas.clientWidth / Math.max(viewportWidth, 1);
+    const x =
+      ((emptyStateAnchor.x - cameraX) * safeZoom + viewportWidth * 0.5) *
+      cssScale;
+    const y =
+      ((emptyStateAnchor.y - cameraY) * safeZoom + viewportHeight * 0.5) *
+      cssScale;
+    ui.emptyState.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%) scale(${safeZoom * cssScale})`;
+  };
   const updateEmptyState = () => {
     const visible = wasm.blitz_entity_count() === 0;
     if (visible === emptyStateVisible) {
@@ -3691,6 +3709,7 @@ fn fragment_main(in: VertexOut) -> @location(0) vec4f {
       zoom: uniforms[4] || 1,
       canvas: ui.canvas,
     });
+    positionEmptyState(uniforms[0], uniforms[1], uniforms[2], uniforms[3], uniforms[4]);
     positionTextEditor();
     const zoomPercent = Math.round(uniforms[4] * 100);
     if (zoomPercent !== lastZoomPercent) {

@@ -3812,24 +3812,25 @@ static void push_container_hover_draw(u32 entity, u32 order) {
 
   Vec2 position = world.positions[entity];
   Vec2 size = world.sizes[entity];
+  Vec2 center = entity_center(entity);
   float inset = 5.0f / uniforms.style[0];
   RectDraw *draw = &dyn_rects[dyn_rect_count];
   draw->rect[0] = position.x - inset;
   draw->rect[1] = position.y - inset;
   draw->rect[2] = size.x + inset * 2.0f;
   draw->rect[3] = size.y + inset * 2.0f;
-  draw->fill_color[0] = 0.11f;
-  draw->fill_color[1] = 0.72f;
-  draw->fill_color[2] = 0.61f;
-  draw->fill_color[3] = 0.08f;
-  draw->stroke_color[0] = 0.11f;
-  draw->stroke_color[1] = 0.72f;
-  draw->stroke_color[2] = 0.61f;
-  draw->stroke_color[3] = 0.95f;
-  draw->stroke_width_pad[0] = 2.0f / uniforms.style[0];
-  draw->stroke_width_pad[1] = 0.0f;
-  draw->stroke_width_pad[2] = 0.0f;
-  draw->stroke_width_pad[3] = 0.0f;
+  draw->fill_color[0] = 0.13f;
+  draw->fill_color[1] = 0.38f;
+  draw->fill_color[2] = 0.86f;
+  draw->fill_color[3] = 0.035f;
+  draw->stroke_color[0] = 0.13f;
+  draw->stroke_color[1] = 0.38f;
+  draw->stroke_color[2] = 0.86f;
+  draw->stroke_color[3] = 0.58f;
+  draw->stroke_width_pad[0] = 1.25f / uniforms.style[0];
+  draw->stroke_width_pad[1] = world.rotations[entity];
+  draw->stroke_width_pad[2] = center.x;
+  draw->stroke_width_pad[3] = center.y;
 
   dyn_commands[dyn_command_count].shape_kind = BLITZ_SHAPE_RECT;
   dyn_commands[dyn_command_count].shape_index = dyn_rect_count;
@@ -7577,6 +7578,10 @@ u32 blitz_scene_deserialize(u32 byte_count) {
   // Second pass: every entity now exists, so parent object_ids resolve and the
   // relative-transform hierarchy can be re-established.
   if (file_version >= 8u) {
+    if (!history_order_map_build()) {
+      clear_scene_state();
+      return 13u;
+    }
     offset = BLITZ_SCENE_FILE_HEADER_BYTES;
     for (u32 index = 0u; index < object_count; index += 1u) {
       u32 record_bytes = read_u32(scene_file_buffer, offset + 4u);
@@ -7589,8 +7594,8 @@ u32 blitz_scene_deserialize(u32 byte_count) {
                              read_u32(scene_file_buffer, offset + 84u),
                              read_u32(scene_file_buffer, offset + 88u),
                              read_u32(scene_file_buffer, offset + 8u)};
-        u32 child = entity_for_object_id(child_id);
-        u32 parent = entity_for_object_id(parent_id);
+        u32 child = history_order_map_lookup(child_id);
+        u32 parent = history_order_map_lookup(parent_id);
         float offset_x = read_f32(scene_file_buffer, offset + 128u);
         float offset_y = read_f32(scene_file_buffer, offset + 132u);
         if (file_version < 10u && child != BLITZ_INVALID_INDEX &&

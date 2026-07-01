@@ -359,5 +359,46 @@ check("undo brings the container back", frame !== undefined);
 check("undo re-attaches the children", after.filter((r) => r.parentSeq === containerSeq).length === childCountBefore && childCountBefore === 3);
 check("undo restores the container's z-order", frame && frame.order === frameOrderBefore);
 
+// --- 14. Loading a serialized container scene resolves parents linearly -----
+console.log("scene deserialize with many children is linear");
+wasm.blitz_init();
+wasm.blitz_set_actor_id(1, 1);
+wasm.blitz_resize(1920, 1080);
+wasm.blitz_set_camera(960, 540, 1);
+const LOAD_CHILDREN = 30000;
+wasm.blitz_create_frame(0, 0, 1600, 900, 0.95, 0.95, 0.95, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 18, 0);
+for (let i = 0; i < LOAD_CHILDREN; i += 1) {
+  wasm.blitz_create_rect(
+    20 + (i % 300) * 5,
+    20 + Math.floor(i / 300) * 5,
+    3,
+    3,
+    0,
+    0,
+    1,
+    1,
+    0,
+    0,
+    0,
+    1,
+    1,
+  );
+}
+const sceneBytes = wasm.blitz_scene_serialize();
+const sceneCopy = new Uint8Array(
+  wasm.memory.buffer,
+  wasm.blitz_scene_file_buffer_ptr(),
+  sceneBytes,
+).slice();
+wasm.blitz_clear_scene();
+const scenePtr = wasm.blitz_scene_file_buffer_reserve(sceneCopy.byteLength);
+new Uint8Array(wasm.memory.buffer, scenePtr, sceneCopy.byteLength).set(sceneCopy);
+const loadStart = performance.now();
+const loadError = wasm.blitz_scene_deserialize(sceneCopy.byteLength);
+const loadMs = performance.now() - loadStart;
+check("large relative scene deserialize succeeds", loadError === 0);
+check("large relative scene restores every entity", wasm.blitz_entity_count() === LOAD_CHILDREN + 1);
+check(`large relative scene deserialize under 1500ms (${loadMs.toFixed(0)}ms)`, loadMs < 1500);
+
 console.log(failures === 0 ? "\nWASM history test passed." : `\n${failures} failure(s).`);
 process.exit(failures === 0 ? 0 : 1);

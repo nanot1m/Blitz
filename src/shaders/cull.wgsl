@@ -42,7 +42,7 @@ struct TextDraw {
 
 struct DrawArgs {
   vertex_count: u32,
-  instance_count: u32,
+  instance_count: atomic<u32>,
   first_vertex: u32,
   first_instance: u32,
 };
@@ -135,7 +135,8 @@ fn cull_main(@builtin(global_invocation_id) gid: vec3u) {
   // Dragged commands are translated in the shader, so their stored bounds are
   // stale; keep them unconditionally rather than culling on the old position.
   if ((command.w & 0xc0000000u) != 0u) {
-    visible_commands[index].kind_index_entity_pad = command;
+    let visible_index = atomicAdd(&draw_args.instance_count, 1u);
+    visible_commands[visible_index].kind_index_entity_pad = command;
     return;
   }
 
@@ -147,15 +148,14 @@ fn cull_main(@builtin(global_invocation_id) gid: vec3u) {
 
   if (bounds.z < view_min.x || bounds.x > view_max.x ||
       bounds.w < view_min.y || bounds.y > view_max.y) {
-    visible_commands[index].kind_index_entity_pad = vec4u(HIDDEN_SHAPE_KIND, 0u, 0u, 0u);
     return;
   }
 
   let size = bounds.zw - bounds.xy;
   if (size.x * scale < 1.0 && size.y * scale < 1.0) {
-    visible_commands[index].kind_index_entity_pad = vec4u(HIDDEN_SHAPE_KIND, 0u, 0u, 0u);
     return;
   }
 
-  visible_commands[index].kind_index_entity_pad = command;
+  let visible_index = atomicAdd(&draw_args.instance_count, 1u);
+  visible_commands[visible_index].kind_index_entity_pad = command;
 }
